@@ -11,6 +11,8 @@ hiddenimports = [
     "insightface.model_zoo.scrfd",
     "insightface.model_zoo.model_zoo",
     "onnxruntime.capi.onnxruntime_pybind11_state",
+    "comtypes",
+    "pygrabber.dshow_graph",
 ]
 
 binaries = []

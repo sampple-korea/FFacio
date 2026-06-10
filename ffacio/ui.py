@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .camera import list_camera_devices, open_camera, open_windows_camera_settings
 from .door import DoorDecision, create_door_controller
 from .engine import FaceEngine, FaceObservation, MatchResult, average_embeddings, create_engine, stable_match_decision
 from .liveness import LivenessChallenge
@@ -161,7 +162,7 @@ class VisionWorker(QObject):
         super().__init__()
         self.engine = engine
         self.settings = settings
-        self.capture: cv2.VideoCapture | None = None
+        self.capture = None
         self.timer: QTimer | None = None
         self.running = False
         self.processing = False
@@ -190,6 +191,13 @@ class VisionWorker(QObject):
         self.awaiting_ui = False
 
     def open_camera(self) -> None:
+        if self.capture:
+            self.capture.release()
+        result = open_camera(self.settings.camera_index)
+        self.capture = result.capture
+        self.last_camera_ok = result.ok
+        self.camera_status.emit(result.ok, result.message)
+        return
         if os.environ.get("FFACIO_SKIP_CAMERA") == "1":
             self.last_camera_ok = False
             self.camera_status.emit(False, "카메라 smoke skip")
@@ -580,47 +588,50 @@ class FFacioWindow(QMainWindow):
     def settings_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        header = QLabel("설정")
+        header = QLabel("Settings")
         header.setFont(QFont("Segoe UI", 28, QFont.Bold))
         self.threshold_label = QLabel()
         self.threshold_slider = QSlider(Qt.Horizontal)
         self.threshold_slider.setRange(45, 70)
         self.threshold_slider.setValue(int(self.store.settings.threshold * 100))
         self.threshold_slider.valueChanged.connect(self.update_threshold)
-        self.liveness_check = QCheckBox("라이브니스 챌린지")
+        self.liveness_check = QCheckBox("Liveness challenge")
         self.liveness_check.setChecked(self.store.settings.liveness_enabled)
         self.liveness_check.setEnabled(False)
-        self.liveness_check.setToolTip("실제 출입 인증 안전을 위해 이 빌드에서는 라이브니스를 끌 수 없습니다.")
+        self.liveness_check.setToolTip("Liveness is always enabled for access-control safety.")
         self.liveness_check.stateChanged.connect(self.update_liveness)
+
         self.camera_combo = QComboBox()
-        for index in range(6):
-            self.camera_combo.addItem(f"카메라 {index}", index)
-        self.camera_combo.setCurrentIndex(min(max(self.store.settings.camera_index, 0), 5))
+        self.refresh_camera_combo()
         self.camera_combo.currentIndexChanged.connect(self.update_camera_index)
-        retry_camera = QPushButton("카메라 다시 연결")
+        retry_camera = QPushButton("Reconnect camera")
         retry_camera.clicked.connect(self.retry_camera)
+        camera_settings_btn = QPushButton("Open Windows camera privacy")
+        camera_settings_btn.clicked.connect(open_windows_camera_settings)
         self.camera_status = QLabel("")
+        self.camera_status.setWordWrap(True)
         self.camera_status.setStyleSheet("color:#6e6e73; font-size:14px;")
+
         self.door_mode_combo = QComboBox()
-        self.door_mode_combo.addItem("Mock 로그만 기록", "mock")
-        self.door_mode_combo.addItem("HTTP 릴레이", "http")
+        self.door_mode_combo.addItem("Mock log only", "mock")
+        self.door_mode_combo.addItem("HTTP relay", "http")
         self.door_mode_combo.setCurrentIndex(1 if self.store.settings.door_mode == "http" else 0)
         self.door_mode_combo.currentIndexChanged.connect(self.update_door_settings)
-        self.door_arm_check = QCheckBox("인증 성공 시 HTTP 릴레이 열기 활성화")
+        self.door_arm_check = QCheckBox("Open HTTP relay after accepted authentication")
         self.door_arm_check.setChecked(self.store.settings.door_http_armed)
         self.door_arm_check.setEnabled(self.store.settings.door_mode == "http")
-        self.door_arm_check.setToolTip("실제 문 제어는 RGB 웹캠의 한계를 이해하고 별도 하드웨어 안전장치를 둔 경우에만 켜세요.")
+        self.door_arm_check.setToolTip("Enable real door control only with separate hardware safety checks.")
         self.door_arm_check.stateChanged.connect(self.update_door_settings)
         self.door_url_input = QLineEdit()
-        self.door_url_input.setPlaceholderText("HTTP 릴레이 URL")
+        self.door_url_input.setPlaceholderText("HTTP relay URL")
         self.door_url_input.setText(self.store.settings.door_http_url)
         self.door_url_input.editingFinished.connect(self.update_door_settings)
         self.door_test_url_input = QLineEdit()
-        self.door_test_url_input.setPlaceholderText("HTTP 테스트 URL (필수, 열림 없음)")
+        self.door_test_url_input.setPlaceholderText("HTTP test URL (required, no open)")
         self.door_test_url_input.setText(self.store.settings.door_http_test_url)
         self.door_test_url_input.editingFinished.connect(self.update_door_settings)
         self.door_token_input = QLineEdit()
-        self.door_token_input.setPlaceholderText("Bearer 토큰 (선택)")
+        self.door_token_input.setPlaceholderText("Bearer token (optional)")
         self.door_token_input.setEchoMode(QLineEdit.Password)
         self.door_token_input.setText(self.store.settings.door_http_token)
         self.door_token_input.editingFinished.connect(self.update_door_settings)
@@ -629,21 +640,23 @@ class FFacioWindow(QMainWindow):
         self.door_method_combo.addItem("GET", "GET")
         self.door_method_combo.setCurrentIndex(1 if self.store.settings.door_http_method == "GET" else 0)
         self.door_method_combo.currentIndexChanged.connect(self.update_door_settings)
-        test_btn = QPushButton("문 제어 설정 점검")
+        test_btn = QPushButton("Check door settings")
         test_btn.clicked.connect(self.test_door)
-        reset_data_btn = QPushButton("로컬 데이터 초기화")
+        reset_data_btn = QPushButton("Reset local data")
         reset_data_btn.setObjectName("danger")
         reset_data_btn.clicked.connect(self.reset_local_data)
         self.log_list = QListWidget()
+
         layout.addWidget(header)
         layout.addWidget(self.threshold_label)
         layout.addWidget(self.threshold_slider)
         layout.addWidget(self.liveness_check)
-        layout.addWidget(QLabel("카메라"))
+        layout.addWidget(QLabel("Camera"))
         layout.addWidget(self.camera_combo)
         layout.addWidget(retry_camera)
+        layout.addWidget(camera_settings_btn)
         layout.addWidget(self.camera_status)
-        layout.addWidget(QLabel("문 제어"))
+        layout.addWidget(QLabel("Door control"))
         layout.addWidget(self.door_mode_combo)
         layout.addWidget(self.door_arm_check)
         layout.addWidget(self.door_url_input)
@@ -652,11 +665,26 @@ class FFacioWindow(QMainWindow):
         layout.addWidget(self.door_method_combo)
         layout.addWidget(test_btn)
         layout.addWidget(reset_data_btn)
-        layout.addWidget(QLabel("최근 로그"))
+        layout.addWidget(QLabel("Recent logs"))
         layout.addWidget(self.log_list, 1)
-        self.threshold_label.setText(f"인증 임계값 {self.store.settings.threshold:.2f}")
+        self.threshold_label.setText(f"Recognition threshold {self.store.settings.threshold:.2f}")
         self.refresh_logs()
         return page
+
+    def refresh_camera_combo(self) -> None:
+        current = self.store.settings.camera_index
+        self.camera_combo.blockSignals(True)
+        self.camera_combo.clear()
+        devices = list_camera_devices()
+        if devices:
+            for device in devices:
+                self.camera_combo.addItem(f"{device.index}: {device.name}", device.index)
+        else:
+            for index in range(6):
+                self.camera_combo.addItem(f"Camera {index}", index)
+        match = self.camera_combo.findData(current)
+        self.camera_combo.setCurrentIndex(match if match >= 0 else 0)
+        self.camera_combo.blockSignals(False)
 
     def tick(self) -> None:
         try:
