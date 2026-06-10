@@ -1,6 +1,8 @@
 package com.ffacio.mobile
 
 import android.Manifest
+import android.app.Activity
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -203,6 +205,7 @@ private fun FFacioApp(
     var cameraAvailable by remember { mutableStateOf(true) }
     var cameraRetryNonce by remember { mutableIntStateOf(0) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var pendingAdminAction by remember { mutableStateOf<AdminAction?>(null) }
     val enrollSamples = remember { mutableStateListOf<FloatArray>() }
     val liveness = remember { LivenessChallenge() }
     var liveCandidate by remember { mutableIntStateOf(-1) }
@@ -217,6 +220,49 @@ private fun FFacioApp(
         if (!it) {
             status = "카메라 권한이 필요합니다"
             detail = "앱 설정에서 카메라 권한을 허용해 주세요"
+        }
+    }
+
+    val adminLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        val action = pendingAdminAction
+        pendingAdminAction = null
+        if (it.resultCode == Activity.RESULT_OK && action != null) {
+            when (action) {
+                AdminAction.StartEnroll -> {
+                    mode = AppMode.Enroll
+                    enrollSamples.clear()
+                    liveCandidate = -1
+                    stableUser = -1
+                    stableCount = 0
+                    liveness.reset()
+                    status = "ì–¼êµ´ì„ ì¤‘ì•™ì— ë§žì¶°ì£¼ì„¸ìš”"
+                    detail = "ì—¬ëŸ¬ ê°ë„ì˜ ìƒ˜í”Œì„ ìžë™ìœ¼ë¡œ ìˆ˜ì§‘í•©ë‹ˆë‹¤"
+                }
+                AdminAction.DeleteUsers -> {
+                    users.clear()
+                    saveUsers(context, prefs, users)
+                    liveCandidate = -1
+                    stableUser = -1
+                    stableCount = 0
+                    liveness.reset()
+                    confirmDelete = false
+                    status = "ë“±ë¡ ì‚¬ìš©ìžë¥¼ ì‚­ì œí–ˆìŠµë‹ˆë‹¤"
+                    detail = "ìƒˆ ì‚¬ìš©ìž ë“±ë¡ì„ ì‹œìž‘í•  ìˆ˜ ìžˆìŠµë‹ˆë‹¤"
+                }
+                AdminAction.ArmDoor -> {
+                    doorArmed = true
+                    prefs.edit()
+                        .putString(DOOR_URL_KEY, doorUrl.trim())
+                        .putBoolean(DOOR_ARMED_KEY, doorArmed)
+                        .apply()
+                    securePutString(context, prefs, DOOR_TOKEN_KEY, doorToken.trim())
+                    status = "ë¦´ë ˆì´ ì—´ê¸°ê°€ í™œì„±í™”ë˜ì—ˆìŠµë‹ˆë‹¤"
+                    detail = "ì¸ì¦ê³¼ ë¼ì´ë¸Œë‹ˆìŠ¤ê°€ ëª¨ë‘ í†µê³¼í•œ ê²½ìš°ì—ë§Œ ìš”ì²­í•©ë‹ˆë‹¤"
+                }
+            }
+        } else {
+            status = "ê´€ë¦¬ìž í™•ì¸ì´ ì·¨ì†Œë˜ì—ˆìŠµë‹ˆë‹¤"
+            detail = "ë“±ë¡, ì‚­ì œ, ë¬¸ ì œì–´ í™œì„±í™”ì€ ê¸°ê¸° ìž ê¸ˆ í™•ì¸ì´ í•„ìš”í•©ë‹ˆë‹¤"
         }
     }
 
@@ -252,6 +298,26 @@ private fun FFacioApp(
         stableUser = -1
         stableCount = 0
         liveness.reset()
+    }
+
+    fun requestAdmin(action: AdminAction) {
+        val keyguard = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        if (!keyguard.isDeviceSecure) {
+            status = "ê¸°ê¸° ìž ê¸ˆì´ í•„ìš”í•©ë‹ˆë‹¤"
+            detail = "ë“±ë¡, ì‚­ì œ, ë¦´ë ˆì´ í™œì„±í™”ì„ ìœ„í•´ Android í™”ë©´ ìž ê¸ˆì„ ë¨¼ì € ì„¤ì •í•˜ì„¸ìš”"
+            return
+        }
+        val prompt = keyguard.createConfirmDeviceCredentialIntent(
+            "FFacio ê´€ë¦¬ìž í™•ì¸",
+            "ë¡œì»¬ ìƒì²´ í…œí”Œë¦¿ê³¼ ë¬¸ ì œì–´ ì„¤ì •ì„ ë³´í˜¸í•©ë‹ˆë‹¤"
+        )
+        if (prompt == null) {
+            status = "ê´€ë¦¬ìž í™•ì¸ì„ ì‹œìž‘í•  ìˆ˜ ì—†ìŠµë‹ˆë‹¤"
+            detail = "Android ë³´ì•ˆ ì„¤ì •ì„ í™•ì¸í•œ ë’¤ ë‹¤ì‹œ ì‹œë„í•˜ì„¸ìš”"
+            return
+        }
+        pendingAdminAction = action
+        adminLauncher.launch(prompt)
     }
 
     fun blockedReason(): String? = when {
@@ -413,8 +479,10 @@ private fun FFacioApp(
                         persistDoor()
                         status = "릴레이 URL이 필요합니다"
                         detail = "문 열림을 활성화하려면 HTTP 릴레이 URL을 먼저 입력하세요"
+                    } else if (it) {
+                        requestAdmin(AdminAction.ArmDoor)
                     } else {
-                        doorArmed = it
+                        doorArmed = false
                         persistDoor()
                     }
                 },
@@ -428,7 +496,8 @@ private fun FFacioApp(
                         status = "이름을 입력하세요"
                         detail = "등록할 사용자의 이름이 필요합니다"
                     } else {
-                        mode = AppMode.Enroll
+                        requestAdmin(AdminAction.StartEnroll)
+                        return@enroll
                         enrollSamples.clear()
                         resetTransient()
                         status = "얼굴을 중앙에 맞춰주세요"
@@ -472,7 +541,8 @@ private fun FFacioApp(
             text = { Text("이 기기에 저장된 얼굴 템플릿이 삭제됩니다. 이 작업은 되돌릴 수 없습니다.") },
             confirmButton = {
                 TextButton(onClick = {
-                    users.clear()
+                    requestAdmin(AdminAction.DeleteUsers)
+                    return@TextButton
                     saveUsers(context, prefs, users)
                     resetTransient()
                     confirmDelete = false
@@ -848,6 +918,7 @@ private class LivenessChallenge {
 }
 
 private enum class AppMode { Auth, Enroll }
+private enum class AdminAction { StartEnroll, DeleteUsers, ArmDoor }
 private data class Observation(val ok: Boolean, val message: String, val embedding: FloatArray, val pose: Int) {
     companion object {
         fun fail(message: String) = Observation(false, message, FloatArray(0), 0)
@@ -972,7 +1043,9 @@ private fun poseLabel(pose: Int): String = when {
 }
 
 private fun postDoor(url: String, token: String, user: String): Boolean = runCatching {
-    val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+    val endpoint = URL(url)
+    if (token.isNotBlank() && endpoint.protocol.lowercase() != "https") return@runCatching false
+    val conn = (endpoint.openConnection() as HttpURLConnection).apply {
         requestMethod = "POST"
         connectTimeout = 1800
         readTimeout = 1800
@@ -980,8 +1053,11 @@ private fun postDoor(url: String, token: String, user: String): Boolean = runCat
         setRequestProperty("Content-Type", "application/json")
         if (token.isNotBlank()) setRequestProperty("Authorization", "Bearer $token")
     }
-    conn.outputStream.use { it.write("""{"user":"${user.replace("\"", "")}"}""".toByteArray()) }
-    val ok = conn.responseCode in 200..299
-    conn.disconnect()
-    ok
+    try {
+        val body = JSONObject().put("user", user).toString().toByteArray(Charsets.UTF_8)
+        conn.outputStream.use { it.write(body) }
+        conn.responseCode in 200..299
+    } finally {
+        conn.disconnect()
+    }
 }.getOrDefault(false)

@@ -66,7 +66,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify_android_sta
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify_android_emulator.ps1
 ```
 
-결과물은 `release\FFacio-Android-debug.apk`입니다. 이 APK는 로컬 테스트용 debug-key 서명본이며, Play 배포용 release 서명본은 별도 keystore가 필요합니다.
+결과물은 `release\FFacio-Android-release.apk`와 `release\FFacio-Android-debug.apk`입니다. release APK는 로컬 sideload 테스트용 키로 서명되며, Play/production 배포에는 사용자 소유 keystore를 지정해야 합니다.
 
 ## 주요 기능
 

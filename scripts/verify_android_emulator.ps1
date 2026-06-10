@@ -44,6 +44,7 @@ for ($i = 0; $i -lt 150; $i++) {
 }
 if (-not $online) { throw "Android emulator did not become online and booted." }
 
+& $adb uninstall com.ffacio.mobile | Out-Null
 & $adb install -r $Apk
 if ($LASTEXITCODE -ne 0) { throw "adb install failed with exit code $LASTEXITCODE" }
 & $adb logcat -c

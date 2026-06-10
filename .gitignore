@@ -12,3 +12,4 @@ release/
 android/.gradle/
 android/**/build/
 android/local.properties
+*.jks
