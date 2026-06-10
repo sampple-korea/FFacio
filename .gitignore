@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+data/
+models/
+.insightface/
+resources/
+build/
+dist/
+release/
+*.spec.log
