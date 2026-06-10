@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 APP_NAME = "FFacio"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 
 
 def is_frozen() -> bool:
@@ -61,4 +61,3 @@ ROOT = repo_root()
 DATA_DIR = user_data_dir()
 MODEL_DIR = models_dir()
 STORE_PATH = store_path()
-
