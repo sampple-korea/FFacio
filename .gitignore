@@ -9,3 +9,6 @@ build/
 dist/
 release/
 *.spec.log
+android/.gradle/
+android/**/build/
+android/local.properties
