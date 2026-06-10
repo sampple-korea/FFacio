@@ -35,7 +35,7 @@ def smoke_test() -> int:
             ok = False
             while time.monotonic() < deadline:
                 app.processEvents()
-                if window.runtime_ready and window.engine and window.camera_error == "카메라 smoke skip":
+                if window.runtime_ready and window.engine and window.camera_error == "Camera smoke skip":
                     ok = True
                     break
                 time.sleep(0.05)

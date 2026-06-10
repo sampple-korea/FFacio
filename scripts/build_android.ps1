@@ -24,6 +24,15 @@ $env:PATH = (Join-Path $env:JAVA_HOME "bin") + ";" + $env:PATH
 
 New-Item -ItemType Directory -Force $ReleaseDir | Out-Null
 
+$modelManifest = Join-Path $PSScriptRoot "..\resources\models\models.manifest.json"
+if (-not (Test-Path $modelManifest)) {
+    & (Join-Path $PSScriptRoot "prepare_models.ps1")
+    if ($LASTEXITCODE -ne 0) { throw "Model preparation failed with exit code $LASTEXITCODE." }
+}
+if (-not (Test-Path $modelManifest)) {
+    throw "Offline model manifest is missing after preparation: $modelManifest"
+}
+
 $keyStore = $env:FFACIO_ANDROID_KEYSTORE
 if (-not $keyStore) { $keyStore = Join-Path $ReleaseDir "ffacio-local-release.jks" }
 $storePassword = $env:FFACIO_ANDROID_KEYSTORE_PASSWORD
@@ -61,6 +70,8 @@ $debugFile = Get-Item $debugOut
 $releaseFile = Get-Item $releaseOut
 $debugHash = (Get-FileHash $debugOut -Algorithm SHA256).Hash.ToLowerInvariant()
 $releaseHash = (Get-FileHash $releaseOut -Algorithm SHA256).Hash.ToLowerInvariant()
+$gitCommit = (& git -C (Join-Path $PSScriptRoot "..") rev-parse HEAD 2>$null)
+if ($LASTEXITCODE -ne 0) { $gitCommit = $null }
 $manifest = [ordered]@{
     name = "FFacio Android"
     version = "0.1.0"
@@ -71,11 +82,14 @@ $manifest = [ordered]@{
     debug_size = $debugFile.Length
     debug_sha256 = $debugHash
     generated_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    git_commit = $gitCommit
     signed = $true
     signing = "local sideload release key; replace with your own keystore for production distribution"
     debug_signed = $true
     notes = "Release APK is locally signed for sideload testing, not Play production signing. OpenCV YuNet/SFace and the shared model bundle are included; no cloud subscription is used."
 }
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $ReleaseDir "android-release-manifest.json")
+& (Join-Path $PSScriptRoot "verify_android_static.ps1") -Apk $releaseOut -Manifest (Join-Path $ReleaseDir "android-release-manifest.json") -ModelManifest $modelManifest
+if ($LASTEXITCODE -ne 0) { throw "Android static verification failed with exit code $LASTEXITCODE." }
 Write-Host "Android release APK ready: $releaseOut"
 Write-Host "Android debug APK ready: $debugOut"

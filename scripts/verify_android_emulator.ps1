@@ -1,5 +1,5 @@
 param(
-    [string]$Apk = "$PSScriptRoot\..\release\FFacio-Android-debug.apk",
+    [string]$Apk = "$PSScriptRoot\..\release\FFacio-Android-release.apk",
     [string]$AvdName = "FFacio_API36",
     [switch]$KeepRunning
 )

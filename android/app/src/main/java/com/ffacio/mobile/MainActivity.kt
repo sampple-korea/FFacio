@@ -120,6 +120,7 @@ private const val DOOR_TOKEN_KEY = "door_token"
 private const val DOOR_ARMED_KEY = "door_armed"
 private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key"
 private const val MATCH_THRESHOLD = 0.42
+private const val MATCH_MARGIN = 0.04
 private const val ENROLL_SAMPLES = 5
 
 class MainActivity : ComponentActivity() {
@@ -235,8 +236,8 @@ private fun FFacioApp(
                     stableUser = -1
                     stableCount = 0
                     liveness.reset()
-                    status = "ì–¼êµ´ì„ ì¤‘ì•™ì— ë§žì¶°ì£¼ì„¸ìš”"
-                    detail = "ì—¬ëŸ¬ ê°ë„ì˜ ìƒ˜í”Œì„ ìžë™ìœ¼ë¡œ ìˆ˜ì§‘í•©ë‹ˆë‹¤"
+                    status = "Center your face"
+                    detail = "FFacio is collecting samples from several angles"
                 }
                 AdminAction.DeleteUsers -> {
                     users.clear()
@@ -246,8 +247,8 @@ private fun FFacioApp(
                     stableCount = 0
                     liveness.reset()
                     confirmDelete = false
-                    status = "ë“±ë¡ ì‚¬ìš©ìžë¥¼ ì‚­ì œí–ˆìŠµë‹ˆë‹¤"
-                    detail = "ìƒˆ ì‚¬ìš©ìž ë“±ë¡ì„ ì‹œìž‘í•  ìˆ˜ ìžˆìŠµë‹ˆë‹¤"
+                    status = "Registered users deleted"
+                    detail = "You can start a new user enrollment"
                 }
                 AdminAction.ArmDoor -> {
                     doorArmed = true
@@ -256,13 +257,13 @@ private fun FFacioApp(
                         .putBoolean(DOOR_ARMED_KEY, doorArmed)
                         .apply()
                     securePutString(context, prefs, DOOR_TOKEN_KEY, doorToken.trim())
-                    status = "ë¦´ë ˆì´ ì—´ê¸°ê°€ í™œì„±í™”ë˜ì—ˆìŠµë‹ˆë‹¤"
-                    detail = "ì¸ì¦ê³¼ ë¼ì´ë¸Œë‹ˆìŠ¤ê°€ ëª¨ë‘ í†µê³¼í•œ ê²½ìš°ì—ë§Œ ìš”ì²­í•©ë‹ˆë‹¤"
+                    status = "Relay opening enabled"
+                    detail = "Requests are sent only after recognition and liveness pass"
                 }
             }
         } else {
-            status = "ê´€ë¦¬ìž í™•ì¸ì´ ì·¨ì†Œë˜ì—ˆìŠµë‹ˆë‹¤"
-            detail = "ë“±ë¡, ì‚­ì œ, ë¬¸ ì œì–´ í™œì„±í™”ì€ ê¸°ê¸° ìž ê¸ˆ í™•ì¸ì´ í•„ìš”í•©ë‹ˆë‹¤"
+            status = "Admin confirmation cancelled"
+            detail = "Enrollment, deletion, and door control changes require device unlock"
         }
     }
 
@@ -303,17 +304,17 @@ private fun FFacioApp(
     fun requestAdmin(action: AdminAction) {
         val keyguard = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         if (!keyguard.isDeviceSecure) {
-            status = "ê¸°ê¸° ìž ê¸ˆì´ í•„ìš”í•©ë‹ˆë‹¤"
-            detail = "ë“±ë¡, ì‚­ì œ, ë¦´ë ˆì´ í™œì„±í™”ì„ ìœ„í•´ Android í™”ë©´ ìž ê¸ˆì„ ë¨¼ì € ì„¤ì •í•˜ì„¸ìš”"
+            status = "Device lock is required"
+            detail = "Set an Android screen lock before enrollment, deletion, or relay arming"
             return
         }
         val prompt = keyguard.createConfirmDeviceCredentialIntent(
-            "FFacio ê´€ë¦¬ìž í™•ì¸",
-            "ë¡œì»¬ ìƒì²´ í…œí”Œë¦¿ê³¼ ë¬¸ ì œì–´ ì„¤ì •ì„ ë³´í˜¸í•©ë‹ˆë‹¤"
+            "FFacio admin confirmation",
+            "Protect local biometric templates and door-control settings"
         )
         if (prompt == null) {
-            status = "ê´€ë¦¬ìž í™•ì¸ì„ ì‹œìž‘í•  ìˆ˜ ì—†ìŠµë‹ˆë‹¤"
-            detail = "Android ë³´ì•ˆ ì„¤ì •ì„ í™•ì¸í•œ ë’¤ ë‹¤ì‹œ ì‹œë„í•˜ì„¸ìš”"
+            status = "Admin confirmation unavailable"
+            detail = "Check Android security settings and try again"
             return
         }
         pendingAdminAction = action
@@ -387,6 +388,12 @@ private fun FFacioApp(
             detail = "조명과 거리를 맞춘 뒤 다시 시도해 주세요"
             return
         }
+        if (match.secondScore > 0.0 && match.score - match.secondScore < MATCH_MARGIN) {
+            resetTransient()
+            status = "인증 보류"
+            detail = "두 등록 사용자와 너무 비슷합니다. 다시 정면을 유지해 주세요"
+            return
+        }
         if (liveCandidate != match.index) {
             liveCandidate = match.index
             stableUser = -1
@@ -438,7 +445,7 @@ private fun FFacioApp(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             CameraStage(
-                enabled = modelError == null && hasCameraPermission,
+                enabled = modelError == null && hasCameraPermission && cameraAvailable,
                 cameraRetryNonce = cameraRetryNonce,
                 stageMessage = blockedReason() ?: "카메라 준비 중",
                 engineProvider = engineProvider,
@@ -582,41 +589,41 @@ private fun CameraStage(
         if (enabled) {
             providerFuture = ProcessCameraProvider.getInstance(context)
             providerFuture.addListener({
-                val provider = providerFuture.get()
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(previewView.surfaceProvider)
-                }
-                val analysis = ImageAnalysis.Builder()
-                    .setTargetResolution(AndroidSize(640, 480))
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-                    .also {
-                        it.setAnalyzer(analyzerExecutor) { proxy ->
-                            analyzeProxy(proxy, engineProvider, processing, context, onObservation)
-                        }
+                runCatching {
+                    val provider = providerFuture.get()
+                    val preview = Preview.Builder().build().also {
+                        it.setSurfaceProvider(previewView.surfaceProvider)
                     }
-                provider.unbindAll()
-                val selector = runCatching {
-                    when {
+                    val analysis = ImageAnalysis.Builder()
+                        .setTargetResolution(AndroidSize(640, 480))
+                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
+                        .also {
+                            it.setAnalyzer(analyzerExecutor) { proxy ->
+                                analyzeProxy(proxy, engineProvider, processing, context, onObservation)
+                            }
+                        }
+                    provider.unbindAll()
+                    val selector = when {
                         provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) -> CameraSelector.DEFAULT_FRONT_CAMERA
                         provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) -> CameraSelector.DEFAULT_BACK_CAMERA
                         else -> null
                     }
-                }.getOrNull()
-                if (selector == null) {
-                    onCameraUnavailable()
-                } else {
-                    runCatching {
-                        provider.bindToLifecycle(context as ComponentActivity, selector, preview, analysis)
-                    }.onFailure {
+                    if (selector == null) {
                         onCameraUnavailable()
+                    } else {
+                        provider.bindToLifecycle(context as ComponentActivity, selector, preview, analysis)
                     }
+                }.onFailure {
+                    onCameraUnavailable()
                 }
             }, ContextCompat.getMainExecutor(context))
         }
         onDispose {
-            runCatching { ProcessCameraProvider.getInstance(context).get().unbindAll() }
+            providerFuture?.addListener({
+                runCatching { providerFuture?.get()?.unbindAll() }
+            }, ContextCompat.getMainExecutor(context))
         }
     }
 
@@ -726,7 +733,7 @@ private fun ControlPanel(
                     Text("인증")
                 }
             }
-            Button(onClick = onDelete, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFFFF3B30))) {
+            Button(onClick = onDelete, enabled = userCount > 0, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFFFF3B30))) {
                 Text("등록 사용자 삭제")
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -801,9 +808,16 @@ private fun analyzeProxy(
 
 private fun imageProxyToBitmap(proxy: ImageProxy): Bitmap {
     val plane = proxy.planes.firstOrNull() ?: error("No image plane")
-    val bitmap = Bitmap.createBitmap(proxy.width, proxy.height, Bitmap.Config.ARGB_8888)
+    if (plane.pixelStride != 4) error("Unexpected RGBA pixel stride: ${plane.pixelStride}")
+    val stridePixels = plane.rowStride / plane.pixelStride
+    val padded = Bitmap.createBitmap(stridePixels, proxy.height, Bitmap.Config.ARGB_8888)
     plane.buffer.rewind()
-    bitmap.copyPixelsFromBuffer(plane.buffer)
+    padded.copyPixelsFromBuffer(plane.buffer)
+    val bitmap = if (stridePixels == proxy.width) {
+        padded
+    } else {
+        Bitmap.createBitmap(padded, 0, 0, proxy.width, proxy.height).also { padded.recycle() }
+    }
     val matrix = Matrix().apply {
         postRotate(proxy.imageInfo.rotationDegrees.toFloat())
         postScale(-1f, 1f)
@@ -925,7 +939,7 @@ private data class Observation(val ok: Boolean, val message: String, val embeddi
     }
 }
 private data class UserTemplate(val name: String, val embedding: FloatArray)
-private data class Match(val index: Int, val score: Double)
+private data class Match(val index: Int, val score: Double, val secondScore: Double)
 
 private fun MutableList<UserTemplate>.replaceWith(items: List<UserTemplate>) {
     clear()
@@ -1005,15 +1019,19 @@ private fun keystoreKey(context: Context): SecretKey {
 
 private fun match(embedding: FloatArray, users: List<UserTemplate>): Match {
     var best = -1.0
+    var second = -1.0
     var bestIndex = -1
     users.forEachIndexed { index, user ->
         val score = cosine(embedding, user.embedding)
         if (score > best) {
+            second = best
             best = score
             bestIndex = index
+        } else if (score > second) {
+            second = score
         }
     }
-    return Match(bestIndex, best)
+    return Match(bestIndex, best, second)
 }
 
 private fun average(samples: List<FloatArray>): FloatArray {

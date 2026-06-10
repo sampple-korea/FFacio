@@ -42,10 +42,11 @@ if (Test-Path (Join-Path $javaHome "bin\java.exe")) {
 $apksigner = Get-ChildItem (Join-Path $sdk "build-tools") -Recurse -Filter apksigner.bat -ErrorAction SilentlyContinue |
     Sort-Object FullName -Descending |
     Select-Object -First 1
-if ($apksigner) {
-    & $apksigner.FullName verify --print-certs $apkPath | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "apksigner verification failed with exit code $LASTEXITCODE." }
+if (-not $apksigner) {
+    throw "apksigner.bat is required for release verification. Install Android build-tools."
 }
+& $apksigner.FullName verify --print-certs $apkPath | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "apksigner verification failed with exit code $LASTEXITCODE." }
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $sha = [System.Security.Cryptography.SHA256]::Create()

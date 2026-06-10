@@ -306,11 +306,18 @@ class CoreTests(unittest.TestCase):
         response.__exit__ = Mock(return_value=False)
         with patch("ffacio.door.urlopen", return_value=response) as opener:
             door.open(decision)
+        self.assertEqual(store.logs[-1]["event"], "door_open_failed")
+        self.assertFalse(opener.called)
+
+        store.settings.door_http_token = ""
+        door = create_door_controller(store)
+        with patch("ffacio.door.urlopen", return_value=response) as opener:
+            door.open(decision)
         self.assertEqual(store.logs[-1]["event"], "door_open_http")
         self.assertEqual(store.logs[-1]["status"], 204)
         self.assertTrue(opener.called)
         request = opener.call_args.args[0]
-        self.assertEqual(request.get_header("Authorization"), "Bearer relay-secret")
+        self.assertIsNone(request.get_header("Authorization"))
         self.assertEqual(request.full_url, "http://127.0.0.1/open")
 
         with patch("ffacio.door.urlopen", return_value=response) as opener:

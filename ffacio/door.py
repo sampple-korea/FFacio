@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .store import Settings, Store
@@ -90,6 +91,9 @@ class HttpDoorController:
         return ok, message
 
     def _send(self, url: str, payload: dict) -> tuple[bool, int | None, str | None]:
+        parsed = urlparse(url)
+        if self.settings.door_http_token and parsed.scheme.lower() != "https":
+            return False, None, "Bearer token requires HTTPS. Use HTTPS or leave token empty for isolated LAN testing."
         data_payload = json.dumps(payload).encode("utf-8")
         method = self.settings.door_http_method
         data = data_payload if method == "POST" else None

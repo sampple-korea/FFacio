@@ -277,6 +277,7 @@ class FFacioWindow(QMainWindow):
         self.recent_matches: deque[MatchResult] = deque(maxlen=6)
         self.liveness = LivenessChallenge()
         self.liveness.reset(self.store.settings.liveness_steps)
+        self.liveness_candidate_user_id: str | None = None
         self.last_open_at = 0.0
         self.enrolling = False
         self.enroll_embeddings: list[np.ndarray] = []
@@ -484,29 +485,33 @@ class FFacioWindow(QMainWindow):
     def startup_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        header = QLabel("시스템 준비")
+        header = QLabel("System Ready")
         header.setFont(QFont("Segoe UI", 32, QFont.Bold))
         self.startup_status = QLabel(self.startup_summary())
+        self.startup_status.setWordWrap(True)
         self.startup_status.setStyleSheet("color:#6e6e73; font-size:16px;")
         notice = QLabel(
-            "모든 얼굴 템플릿과 로그는 이 PC에만 저장됩니다. 원본 얼굴 이미지는 기본 저장하지 않습니다."
+            "Face templates and logs stay on this PC. Original face images are not stored by default."
         )
         notice.setWordWrap(True)
         notice.setStyleSheet("color:#6e6e73; font-size:15px;")
-        begin_text = "등록 시작" if not self.store.active_users() else "인증 화면으로 이동"
+        begin_text = "Start enrollment" if not self.store.active_users() else "Go to authentication"
         begin = QPushButton(begin_text)
         self.begin_btn = begin
         begin.setObjectName("primary")
         begin.setEnabled(self.engine is not None and self.camera_error is None and not self.runtime_initializing)
         begin.clicked.connect(lambda: self.stack.setCurrentIndex(2 if not self.store.active_users() else 1))
-        camera_btn = QPushButton("카메라 다시 연결")
+        camera_btn = QPushButton("Reconnect camera")
         camera_btn.clicked.connect(self.retry_camera)
+        camera_settings_btn = QPushButton("Open Windows camera privacy")
+        camera_settings_btn.clicked.connect(open_windows_camera_settings)
         layout.addWidget(header)
         layout.addWidget(self.startup_status)
         layout.addSpacing(8)
         layout.addWidget(notice)
         layout.addStretch()
         layout.addWidget(camera_btn)
+        layout.addWidget(camera_settings_btn)
         layout.addWidget(begin)
         return page
 
@@ -514,7 +519,7 @@ class FFacioWindow(QMainWindow):
         if self.runtime_initializing:
             return "모델과 엔진을 확인하는 중입니다.\n잠시만 기다려 주세요."
         engine = self.engine.name if self.engine else "엔진을 시작할 수 없습니다. 앱을 다시 설치해 주세요."
-        camera = "카메라 준비 완료" if not self.camera_error else "카메라를 사용할 수 없습니다. 연결 상태를 확인해 주세요."
+        camera = "Camera ready" if not self.camera_error else self.camera_error
         model_status = self.model_status
         if self.engine is None and self.engine_error:
             model_status = "모델을 검증할 수 없습니다. 앱을 다시 설치해 주세요."
@@ -728,21 +733,32 @@ class FFacioWindow(QMainWindow):
             if self.stack.currentIndex() == 2:
                 self.handle_enroll(obs)
             elif obs.embedding is not None and self.frame_count % 4 == 0:
-                if self.store.settings.liveness_enabled and not self.liveness.update(obs.pose, obs.quality):
-                    self.recent_matches.clear()
-                    done, total = self.liveness.progress()
-                    self.auth_status.setText(self.liveness.prompt())
-                    self.auth_detail.setText(f"라이브니스 {done}/{total} · 품질 {obs.quality:.2f}")
-                else:
-                    users = self.store.active_users(self.engine.engine_id)
-                    match = self.engine.match(obs.embedding, users, self.store.settings)
+                users = self.store.active_users(self.engine.engine_id)
+                match = self.engine.match(obs.embedding, users, self.store.settings)
+                if match.state != "accepted" or not match.user:
+                    self.liveness_candidate_user_id = None
+                    self.liveness.reset(self.store.settings.liveness_steps)
                     self.recent_matches.append(match)
-                    decision = self.stable_decision()
-                    accepted = decision.state == "accepted"
-                    self.render_auth(decision)
+                    self.render_auth(match)
+                else:
+                    if self.liveness_candidate_user_id != match.user.id:
+                        self.liveness_candidate_user_id = match.user.id
+                        self.liveness.reset(self.store.settings.liveness_steps)
+                        self.recent_matches.clear()
+                    if self.store.settings.liveness_enabled and not self.liveness.update(obs.pose, obs.quality):
+                        self.recent_matches.clear()
+                        done, total = self.liveness.progress()
+                        self.auth_status.setText(self.liveness.prompt())
+                        self.auth_detail.setText(f"Liveness {done}/{total} - quality {obs.quality:.2f}")
+                    else:
+                        self.recent_matches.append(match)
+                        decision = self.stable_decision()
+                        accepted = decision.state == "accepted"
+                        self.render_auth(decision)
             else:
                 if obs.embedding is None or obs.confidence <= 0:
                     self.recent_matches.clear()
+                    self.liveness_candidate_user_id = None
                 compatible = len(self.store.active_users(self.engine.engine_id))
                 self.auth_status.setText(obs.message)
                 self.auth_detail.setText(f"품질 {obs.quality:.2f} · 호환 등록자 {compatible}명")
@@ -868,6 +884,7 @@ class FFacioWindow(QMainWindow):
     def delete_selected_user(self) -> None:
         item = self.user_list.currentItem()
         if not item:
+            QMessageBox.information(self, "FFacio", "삭제할 사용자를 먼저 선택하세요.")
             return
         user_id = item.data(Qt.UserRole)
         answer = QMessageBox.question(
