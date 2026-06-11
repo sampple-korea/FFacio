@@ -91,6 +91,176 @@ class AdminOperationGateTest {
     }
 
     @Test
+    fun adminScreenAutoLocksOnlyAfterIdleAdminSessionExpires() {
+        assertTrue(
+            shouldAutoLockAdminScreen(
+                nowMillis = 120_000L,
+                expiresAtMillis = 120_000L,
+                isAdminScreen = true,
+                isEnrollmentMode = false,
+                storageBusy = false,
+                adminPromptInFlight = false
+            )
+        )
+        assertFalse(
+            shouldAutoLockAdminScreen(
+                nowMillis = 120_000L,
+                expiresAtMillis = 120_000L,
+                isAdminScreen = true,
+                isEnrollmentMode = true,
+                storageBusy = false,
+                adminPromptInFlight = false
+            )
+        )
+        assertFalse(
+            shouldAutoLockAdminScreen(
+                nowMillis = 119_999L,
+                expiresAtMillis = 120_000L,
+                isAdminScreen = true,
+                isEnrollmentMode = false,
+                storageBusy = false,
+                adminPromptInFlight = false
+            )
+        )
+        assertFalse(
+            shouldAutoLockAdminScreen(
+                nowMillis = 120_000L,
+                expiresAtMillis = 120_000L,
+                isAdminScreen = true,
+                isEnrollmentMode = false,
+                storageBusy = true,
+                adminPromptInFlight = false
+            )
+        )
+        assertFalse(
+            shouldAutoLockAdminScreen(
+                nowMillis = 120_000L,
+                expiresAtMillis = 120_000L,
+                isAdminScreen = true,
+                isEnrollmentMode = false,
+                storageBusy = false,
+                adminPromptInFlight = true
+            )
+        )
+        assertFalse(
+            shouldAutoLockAdminScreen(
+                nowMillis = 120_000L,
+                expiresAtMillis = 120_000L,
+                isAdminScreen = false,
+                isEnrollmentMode = false,
+                storageBusy = false,
+                adminPromptInFlight = false
+            )
+        )
+        assertFalse(
+            shouldAutoLockAdminScreen(
+                nowMillis = 120_000L,
+                expiresAtMillis = 0L,
+                isAdminScreen = true,
+                isEnrollmentMode = false,
+                storageBusy = false,
+                adminPromptInFlight = false
+            )
+        )
+    }
+
+    @Test
+    fun adminAutoLockResetPlanClearsSensitiveAdminState() {
+        val plan = adminAutoLockResetPlan()
+
+        assertTrue(plan.returnToOperation)
+        assertTrue(plan.exitEnrollment)
+        assertTrue(plan.clearAdminSession)
+        assertTrue(plan.clearEnrollmentSession)
+        assertTrue(plan.clearAdminDialogs)
+        assertTrue(plan.clearEnrollment)
+        assertTrue(plan.clearAuthHold)
+        assertTrue(plan.clearAccessFeedback)
+        assertTrue(plan.resetTransientRecognition)
+
+        val reset = applyAdminAutoLockReset(AdminAutoLockState())
+
+        assertTrue(reset.returnToOperation)
+        assertTrue(reset.authMode)
+        assertEquals(0L, reset.adminSessionExpiresAt)
+        assertEquals(0L, reset.enrollmentExpiresAt)
+        assertFalse(reset.confirmDelete)
+        assertEquals(-1, reset.pendingDeleteUserIndex)
+        assertEquals("", reset.enrollmentName)
+        assertEquals(0, reset.enrollSampleCount)
+        assertEquals(0, reset.enrollPoseCount)
+        assertEquals(0L, reset.authResultHoldUntil)
+        assertFalse(reset.hasAccessFeedback)
+        assertEquals(-1, reset.liveCandidate)
+        assertEquals(-1, reset.stableUser)
+        assertEquals(0, reset.stableCount)
+    }
+
+    @Test
+    fun enrollmentAutoLocksOnlyAfterIdleEnrollmentExpires() {
+        assertTrue(
+            shouldAutoLockEnrollment(
+                nowMillis = 60_000L,
+                expiresAtMillis = 60_000L,
+                isAdminScreen = true,
+                isEnrollmentMode = true,
+                storageBusy = false,
+                adminPromptInFlight = false
+            )
+        )
+        assertFalse(
+            shouldAutoLockEnrollment(
+                nowMillis = 60_000L,
+                expiresAtMillis = 60_000L,
+                isAdminScreen = true,
+                isEnrollmentMode = true,
+                storageBusy = true,
+                adminPromptInFlight = false
+            )
+        )
+        assertFalse(
+            shouldAutoLockEnrollment(
+                nowMillis = 60_000L,
+                expiresAtMillis = 60_000L,
+                isAdminScreen = true,
+                isEnrollmentMode = true,
+                storageBusy = false,
+                adminPromptInFlight = true
+            )
+        )
+        assertFalse(
+            shouldAutoLockEnrollment(
+                nowMillis = 59_999L,
+                expiresAtMillis = 60_000L,
+                isAdminScreen = true,
+                isEnrollmentMode = true,
+                storageBusy = false,
+                adminPromptInFlight = false
+            )
+        )
+        assertFalse(
+            shouldAutoLockEnrollment(
+                nowMillis = 60_000L,
+                expiresAtMillis = 60_000L,
+                isAdminScreen = false,
+                isEnrollmentMode = true,
+                storageBusy = false,
+                adminPromptInFlight = false
+            )
+        )
+        assertFalse(
+            shouldAutoLockEnrollment(
+                nowMillis = 60_000L,
+                expiresAtMillis = 60_000L,
+                isAdminScreen = true,
+                isEnrollmentMode = false,
+                storageBusy = false,
+                adminPromptInFlight = false
+            )
+        )
+    }
+
+    @Test
     fun removingRegisteredUserRemovesOnlySelectedIndex() {
         assertEquals(listOf("alice", "carol"), removeRegisteredUserAt(listOf("alice", "bob", "carol"), 1))
     }

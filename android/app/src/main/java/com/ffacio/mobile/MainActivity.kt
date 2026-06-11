@@ -11,6 +11,7 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -163,6 +164,8 @@ private const val ANALYSIS_INTERVAL_MS = 180L
 private const val ANTISPOOF_THRESHOLD = 0.55f
 private const val AUTH_RESULT_HOLD_MS = 3500L
 private const val APPROVAL_LOG_LIMIT = 8
+private const val ADMIN_SESSION_TIMEOUT_MS = 120_000L
+private const val ENROLLMENT_IDLE_TIMEOUT_MS = 60_000L
 
 class MainActivity : ComponentActivity() {
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
@@ -357,6 +360,8 @@ private fun FFacioApp(
     var stableCount by remember { mutableIntStateOf(0) }
     var lastOpenAt by remember { mutableLongStateOf(0L) }
     var authResultHoldUntil by remember { mutableLongStateOf(0L) }
+    var adminSessionExpiresAt by remember { mutableLongStateOf(0L) }
+    var enrollmentExpiresAt by remember { mutableLongStateOf(0L) }
     var hasCameraPermission by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
@@ -377,6 +382,90 @@ private fun FFacioApp(
             }
         }
     }
+    LaunchedEffect(appScreen, mode, storageBusy, adminPromptInFlight, adminSessionExpiresAt) {
+        if (appScreen == AppScreen.Admin && mode != AppMode.Enroll && !storageBusy && !adminPromptInFlight && adminSessionExpiresAt > 0L) {
+            val remaining = adminSessionExpiresAt - SystemClock.elapsedRealtime()
+            if (remaining > 0L) delay(remaining)
+            if (shouldAutoLockAdminScreen(
+                    nowMillis = SystemClock.elapsedRealtime(),
+                    expiresAtMillis = adminSessionExpiresAt,
+                    isAdminScreen = appScreen == AppScreen.Admin,
+                    isEnrollmentMode = mode == AppMode.Enroll,
+                    storageBusy = storageBusy,
+                    adminPromptInFlight = adminPromptInFlight
+                )
+            ) {
+                val reset = applyAdminAutoLockReset(AdminAutoLockState(
+                    enrollmentName = enrollmentName,
+                    enrollSampleCount = enrollSamples.size,
+                    enrollPoseCount = enrollPoses.size,
+                    pendingDeleteUserIndex = pendingDeleteUserIndex,
+                    liveCandidate = liveCandidate,
+                    stableUser = stableUser,
+                    stableCount = stableCount
+                ))
+                appScreen = AppScreen.Operation
+                mode = AppMode.Auth
+                adminSessionExpiresAt = 0L
+                enrollmentExpiresAt = 0L
+                confirmDelete = reset.confirmDelete
+                pendingDeleteUserIndex = reset.pendingDeleteUserIndex
+                enrollmentName = reset.enrollmentName
+                enrollSamples.clear()
+                enrollPoses.clear()
+                authResultHoldUntil = 0L
+                accessFeedback = null
+                liveCandidate = reset.liveCandidate
+                stableUser = reset.stableUser
+                stableCount = reset.stableCount
+                liveness.reset()
+                status = "관리자 화면 잠금"
+                detail = "보안을 위해 운영 화면으로 돌아왔습니다"
+            }
+        }
+    }
+    LaunchedEffect(appScreen, mode, storageBusy, adminPromptInFlight, enrollmentExpiresAt) {
+        if (appScreen == AppScreen.Admin && mode == AppMode.Enroll && !storageBusy && !adminPromptInFlight && enrollmentExpiresAt > 0L) {
+            val remaining = enrollmentExpiresAt - SystemClock.elapsedRealtime()
+            if (remaining > 0L) delay(remaining)
+            if (shouldAutoLockEnrollment(
+                    nowMillis = SystemClock.elapsedRealtime(),
+                    expiresAtMillis = enrollmentExpiresAt,
+                    isAdminScreen = appScreen == AppScreen.Admin,
+                    isEnrollmentMode = mode == AppMode.Enroll,
+                    storageBusy = storageBusy,
+                    adminPromptInFlight = adminPromptInFlight
+                )
+            ) {
+                val reset = applyAdminAutoLockReset(AdminAutoLockState(
+                    enrollmentName = enrollmentName,
+                    enrollSampleCount = enrollSamples.size,
+                    enrollPoseCount = enrollPoses.size,
+                    pendingDeleteUserIndex = pendingDeleteUserIndex,
+                    liveCandidate = liveCandidate,
+                    stableUser = stableUser,
+                    stableCount = stableCount
+                ))
+                appScreen = AppScreen.Operation
+                mode = AppMode.Auth
+                adminSessionExpiresAt = 0L
+                enrollmentExpiresAt = 0L
+                confirmDelete = reset.confirmDelete
+                pendingDeleteUserIndex = reset.pendingDeleteUserIndex
+                enrollmentName = reset.enrollmentName
+                enrollSamples.clear()
+                enrollPoses.clear()
+                authResultHoldUntil = 0L
+                accessFeedback = null
+                liveCandidate = reset.liveCandidate
+                stableUser = reset.stableUser
+                stableCount = reset.stableCount
+                liveness.reset()
+                status = "등록 세션 만료"
+                detail = "보안을 위해 등록을 취소하고 운영 화면으로 돌아왔습니다"
+            }
+        }
+    }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         hasCameraPermission = it
         if (!it) {
@@ -390,6 +479,7 @@ private fun FFacioApp(
         pendingAdminAction = null
         adminPromptInFlight = false
         if (it.resultCode == Activity.RESULT_OK && action != null) {
+            adminSessionExpiresAt = SystemClock.elapsedRealtime() + ADMIN_SESSION_TIMEOUT_MS
             when (action) {
                 AdminAction.OpenAdmin -> {
                     appScreen = AppScreen.Admin
@@ -411,6 +501,7 @@ private fun FFacioApp(
                             storeError = null
                             appScreen = AppScreen.Admin
                             mode = AppMode.Enroll
+                            enrollmentExpiresAt = SystemClock.elapsedRealtime() + ENROLLMENT_IDLE_TIMEOUT_MS
                             enrollmentName = name.trim()
                             enrollSamples.clear()
                             enrollPoses.clear()
@@ -492,6 +583,8 @@ private fun FFacioApp(
                         }.onSuccess {
                             storeError = null
                             appScreen = AppScreen.Admin
+                            mode = AppMode.Auth
+                            enrollmentExpiresAt = 0L
                             users.clear()
                             liveCandidate = -1
                             stableUser = -1
@@ -516,6 +609,7 @@ private fun FFacioApp(
                             appScreen = AppScreen.Admin
                             users.replaceWith(loaded.users)
                             mode = AppMode.Auth
+                            enrollmentExpiresAt = 0L
                             enrollmentName = ""
                             enrollSamples.clear()
                             enrollPoses.clear()
@@ -652,6 +746,8 @@ private fun FFacioApp(
             adminPromptInFlight = false
             appScreen = AppScreen.Operation
             mode = AppMode.Auth
+            adminSessionExpiresAt = 0L
+            enrollmentExpiresAt = 0L
             authResultHoldUntil = 0L
             liveCandidate = -1
             stableUser = -1
@@ -687,6 +783,8 @@ private fun FFacioApp(
                 if (shouldReturnToOperationOnLifecyclePause(currentAdminPromptInFlight)) {
                     appScreen = AppScreen.Operation
                     mode = AppMode.Auth
+                    adminSessionExpiresAt = 0L
+                    enrollmentExpiresAt = 0L
                     enrollmentName = ""
                     enrollSamples.clear()
                     enrollPoses.clear()
@@ -783,6 +881,7 @@ private fun FFacioApp(
             }.onFailure {
                 storeError = it
                 mode = AppMode.Auth
+                enrollmentExpiresAt = 0L
                 enrollmentName = ""
                 enrollSamples.clear()
                 enrollPoses.clear()
@@ -915,6 +1014,7 @@ private fun FFacioApp(
             val duplicateSample = duplicateUserForEnrollment(obs.embedding, users)
             if (duplicateSample != null) {
                 mode = AppMode.Auth
+                enrollmentExpiresAt = 0L
                 enrollmentName = ""
                 enrollSamples.clear()
                 enrollPoses.clear()
@@ -931,6 +1031,7 @@ private fun FFacioApp(
             }
             enrollSamples.add(obs.embedding)
             enrollPoses.add(obs.pose)
+            enrollmentExpiresAt = SystemClock.elapsedRealtime() + ENROLLMENT_IDLE_TIMEOUT_MS
             status = "샘플 수집 중"
             detail = "${enrollSamples.size}/$ENROLL_SAMPLES · 실제 얼굴 확인 완료 · ${poseLabel(obs.pose)}"
             if (enrollSamples.size >= ENROLL_SAMPLES) {
@@ -940,6 +1041,7 @@ private fun FFacioApp(
                     val duplicate = duplicateUserForEnrollment(averaged, users)
                     if (duplicate != null) {
                         mode = AppMode.Auth
+                        enrollmentExpiresAt = 0L
                         enrollmentName = ""
                         enrollSamples.clear()
                         enrollPoses.clear()
@@ -952,6 +1054,7 @@ private fun FFacioApp(
                     persistUsersAsync(nextUsers) {
                         users.replaceWith(nextUsers)
                         mode = AppMode.Auth
+                        enrollmentExpiresAt = 0L
                         enrollmentName = ""
                         enrollSamples.clear()
                         enrollPoses.clear()
@@ -1045,6 +1148,8 @@ private fun FFacioApp(
                         TextButton(onClick = {
                             appScreen = AppScreen.Operation
                             mode = AppMode.Auth
+                            adminSessionExpiresAt = 0L
+                            enrollmentExpiresAt = 0L
                             clearAuthResultHold()
                             resetTransient()
                             status = if (users.isEmpty()) "등록된 사용자가 없습니다" else "출입 인증 대기 중"
@@ -1200,6 +1305,7 @@ private fun FFacioApp(
                         return@auth
                     }
                     mode = AppMode.Auth
+                    enrollmentExpiresAt = 0L
                     enrollmentName = ""
                     enrollSamples.clear()
                     enrollPoses.clear()
@@ -2260,6 +2366,85 @@ internal fun shouldAnalyzeCameraFrame(
 
 internal fun shouldReturnToOperationOnLifecyclePause(adminPromptInFlight: Boolean): Boolean =
     !adminPromptInFlight
+
+internal fun shouldAutoLockAdminScreen(
+    nowMillis: Long,
+    expiresAtMillis: Long,
+    isAdminScreen: Boolean,
+    isEnrollmentMode: Boolean,
+    storageBusy: Boolean,
+    adminPromptInFlight: Boolean
+): Boolean = isAdminScreen &&
+    !isEnrollmentMode &&
+    !storageBusy &&
+    !adminPromptInFlight &&
+    expiresAtMillis > 0L &&
+    nowMillis >= expiresAtMillis
+
+internal data class AdminAutoLockResetPlan(
+    val returnToOperation: Boolean = true,
+    val exitEnrollment: Boolean = true,
+    val clearAdminSession: Boolean = true,
+    val clearEnrollmentSession: Boolean = true,
+    val clearAdminDialogs: Boolean = true,
+    val clearEnrollment: Boolean = true,
+    val clearAuthHold: Boolean = true,
+    val clearAccessFeedback: Boolean = true,
+    val resetTransientRecognition: Boolean = true
+)
+
+internal fun adminAutoLockResetPlan(): AdminAutoLockResetPlan = AdminAutoLockResetPlan()
+
+internal data class AdminAutoLockState(
+    val returnToOperation: Boolean = false,
+    val authMode: Boolean = false,
+    val adminSessionExpiresAt: Long = 1L,
+    val enrollmentExpiresAt: Long = 1L,
+    val confirmDelete: Boolean = true,
+    val pendingDeleteUserIndex: Int = 0,
+    val enrollmentName: String = "pending",
+    val enrollSampleCount: Int = 1,
+    val enrollPoseCount: Int = 1,
+    val authResultHoldUntil: Long = 1L,
+    val hasAccessFeedback: Boolean = true,
+    val liveCandidate: Int = 1,
+    val stableUser: Int = 1,
+    val stableCount: Int = 1
+)
+
+internal fun applyAdminAutoLockReset(
+    state: AdminAutoLockState,
+    plan: AdminAutoLockResetPlan = adminAutoLockResetPlan()
+): AdminAutoLockState = state.copy(
+    returnToOperation = if (plan.returnToOperation) true else state.returnToOperation,
+    authMode = if (plan.exitEnrollment) true else state.authMode,
+    adminSessionExpiresAt = if (plan.clearAdminSession) 0L else state.adminSessionExpiresAt,
+    enrollmentExpiresAt = if (plan.clearEnrollmentSession) 0L else state.enrollmentExpiresAt,
+    confirmDelete = if (plan.clearAdminDialogs) false else state.confirmDelete,
+    pendingDeleteUserIndex = if (plan.clearAdminDialogs) -1 else state.pendingDeleteUserIndex,
+    enrollmentName = if (plan.clearEnrollment) "" else state.enrollmentName,
+    enrollSampleCount = if (plan.clearEnrollment) 0 else state.enrollSampleCount,
+    enrollPoseCount = if (plan.clearEnrollment) 0 else state.enrollPoseCount,
+    authResultHoldUntil = if (plan.clearAuthHold) 0L else state.authResultHoldUntil,
+    hasAccessFeedback = if (plan.clearAccessFeedback) false else state.hasAccessFeedback,
+    liveCandidate = if (plan.resetTransientRecognition) -1 else state.liveCandidate,
+    stableUser = if (plan.resetTransientRecognition) -1 else state.stableUser,
+    stableCount = if (plan.resetTransientRecognition) 0 else state.stableCount
+)
+
+internal fun shouldAutoLockEnrollment(
+    nowMillis: Long,
+    expiresAtMillis: Long,
+    isAdminScreen: Boolean,
+    isEnrollmentMode: Boolean,
+    storageBusy: Boolean,
+    adminPromptInFlight: Boolean
+): Boolean = isAdminScreen &&
+    isEnrollmentMode &&
+    !storageBusy &&
+    !adminPromptInFlight &&
+    expiresAtMillis > 0L &&
+    nowMillis >= expiresAtMillis
 
 internal fun <T> removeRegisteredUserAt(users: List<T>, index: Int): List<T>? =
     if (index in users.indices) users.filterIndexed { itemIndex, _ -> itemIndex != index } else null
