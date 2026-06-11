@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 APP_NAME = "FFacio"
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.3.0"
 
 
 def is_frozen() -> bool:

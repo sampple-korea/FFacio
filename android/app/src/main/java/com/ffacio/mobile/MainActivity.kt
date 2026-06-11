@@ -105,7 +105,6 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.KeyStore
-import java.security.SecureRandom
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -1508,10 +1507,9 @@ private fun secureGetString(context: Context, prefs: SharedPreferences, key: Str
 }
 
 private fun securePutString(context: Context, prefs: SharedPreferences, key: String, value: String) {
-    val iv = ByteArray(12)
-    SecureRandom().nextBytes(iv)
     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    cipher.init(Cipher.ENCRYPT_MODE, keystoreKey(context, KEYSTORE_ALIAS, authRequired = true), GCMParameterSpec(128, iv))
+    cipher.init(Cipher.ENCRYPT_MODE, keystoreKey(context, KEYSTORE_ALIAS, authRequired = true))
+    val iv = cipher.iv ?: error("Android Keystore did not provide an AES-GCM IV")
     val cipherText = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
     val payload = iv + cipherText
     prefs.edit()
