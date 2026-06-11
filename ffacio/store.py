@@ -72,7 +72,7 @@ class Settings:
     ambiguous_margin: float = 0.05
     enroll_samples: int = 8
     detection_confidence: float = 0.85
-    antispoof_threshold: float = 0.70
+    antispoof_threshold: float = 0.55
     open_duration_ms: int = 1200
     liveness_enabled: bool = True
     liveness_steps: int = 3

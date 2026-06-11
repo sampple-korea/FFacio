@@ -31,9 +31,12 @@ def softmax(values: np.ndarray) -> np.ndarray:
 
 def classify_antispoof_logits(logits: np.ndarray, threshold: float) -> AntiSpoofResult:
     probs = softmax(logits)
-    live = float(probs[0]) if probs.size > 0 else 0.0
-    printed = float(probs[1]) if probs.size > 1 else 0.0
-    replay = float(probs[2]) if probs.size > 2 else 0.0
+    if probs.size < 3:
+        return AntiSpoofResult(0.0, 0.0, 0.0, "invalid_output")
+    # MiniVision's upstream test.py treats class index 1 as the real/live class.
+    printed = float(probs[0])
+    live = float(probs[1])
+    replay = float(probs[2])
     if live >= threshold and live >= printed and live >= replay:
         state = "live"
     elif replay >= printed:
@@ -43,7 +46,7 @@ def classify_antispoof_logits(logits: np.ndarray, threshold: float) -> AntiSpoof
     return AntiSpoofResult(live, printed, replay, state)
 
 
-def expanded_face_crop(frame: np.ndarray, bbox: tuple[int, int, int, int], scale: float = 1.25) -> np.ndarray:
+def expanded_face_crop(frame: np.ndarray, bbox: tuple[int, int, int, int], scale: float = 2.7) -> np.ndarray:
     x, y, w, h = bbox
     height, width = frame.shape[:2]
     side_w = int(w * scale)
@@ -69,8 +72,11 @@ class MiniFASNetAntiSpoof:
         crop = expanded_face_crop(frame_bgr, bbox)
         if crop.size == 0:
             return AntiSpoofResult(0.0, 0.0, 0.0, "invalid_crop")
-        resized = cv2.resize(crop, ANTISPOOF_INPUT_SIZE, interpolation=cv2.INTER_LINEAR)
-        blob = ((resized.astype(np.float32) - 127.5) / 128.0).transpose(2, 0, 1)[np.newaxis, :]
-        self.net.setInput(blob)
-        logits = self.net.forward()
-        return classify_antispoof_logits(logits, threshold)
+        try:
+            resized = cv2.resize(crop, ANTISPOOF_INPUT_SIZE, interpolation=cv2.INTER_LINEAR)
+            blob = (resized.astype(np.float32) / 255.0).transpose(2, 0, 1)[np.newaxis, :]
+            self.net.setInput(blob)
+            logits = self.net.forward()
+            return classify_antispoof_logits(logits, threshold)
+        except Exception:
+            return AntiSpoofResult(0.0, 0.0, 0.0, "model_error")

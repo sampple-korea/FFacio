@@ -127,14 +127,17 @@ private const val PREFS = "ffacio_store"
 private const val USERS_KEY = "users"
 private const val DOOR_URL_KEY = "door_url"
 private const val DOOR_TOKEN_KEY = "door_token"
-private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key_v2"
-private const val SECURE_SUFFIX = "_enc_v2"
-private const val LEGACY_SECURE_SUFFIX = "_enc"
+private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key_v3"
+private const val LEGACY_KEYSTORE_ALIAS = "ffacio_mobile_store_key_v2"
+private const val SECURE_SUFFIX = "_enc_v3"
+private const val LEGACY_SECURE_SUFFIX = "_enc_v2"
+private const val OLDER_SECURE_SUFFIX = "_enc"
+private const val STORE_PREFLIGHT_KEY = "__store_preflight"
 private const val MATCH_THRESHOLD = 0.42
 private const val MATCH_MARGIN = 0.04
 private const val ENROLL_SAMPLES = 5
 private const val ANALYSIS_INTERVAL_MS = 180L
-private const val ANTISPOOF_THRESHOLD = 0.70f
+private const val ANTISPOOF_THRESHOLD = 0.55f
 
 class MainActivity : ComponentActivity() {
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
@@ -284,15 +287,36 @@ private fun FFacioApp(
         if (it.resultCode == Activity.RESULT_OK && action != null) {
             when (action) {
                 AdminAction.StartEnroll -> {
-                    mode = AppMode.Enroll
-                    enrollmentName = name.trim()
-                    enrollSamples.clear()
-                    liveCandidate = -1
-                    stableUser = -1
-                    stableCount = 0
-                    liveness.reset()
-                    status = "얼굴을 중앙에 맞춰주세요"
-                    detail = "FFacio가 안정적인 얼굴 템플릿을 수집하고 있습니다"
+                    storageBusy = true
+                    status = "로컬 저장소를 확인하는 중입니다"
+                    detail = "얼굴 템플릿을 안전하게 저장할 수 있는지 먼저 확인합니다"
+                    appScope.launch {
+                        val checked = withContext(Dispatchers.IO) {
+                            runCatching { preflightSecureStore(context, prefs) }
+                        }
+                        if (!active.get()) return@launch
+                        storageBusy = false
+                        checked.onSuccess {
+                            storeError = null
+                            mode = AppMode.Enroll
+                            enrollmentName = name.trim()
+                            enrollSamples.clear()
+                            liveCandidate = -1
+                            stableUser = -1
+                            stableCount = 0
+                            liveness.reset()
+                            status = "얼굴을 중앙에 맞춰주세요"
+                            detail = "FFacio가 안정적인 얼굴 템플릿을 수집하고 있습니다"
+                        }.onFailure {
+                            storeError = it
+                            liveCandidate = -1
+                            stableUser = -1
+                            stableCount = 0
+                            liveness.reset()
+                            status = "로컬 생체 저장소를 사용할 수 없습니다"
+                            detail = "얼굴 등록 전에 암호화 저장소 확인에 실패했습니다"
+                        }
+                    }
                 }
                 AdminAction.DeleteUsers -> {
                     storageBusy = true
@@ -352,13 +376,19 @@ private fun FFacioApp(
                                     .remove(USERS_KEY)
                                     .remove("$USERS_KEY$SECURE_SUFFIX")
                                     .remove("$USERS_KEY$LEGACY_SECURE_SUFFIX")
+                                    .remove("$USERS_KEY$OLDER_SECURE_SUFFIX")
                                     .remove(DOOR_URL_KEY)
                                     .remove(DOOR_TOKEN_KEY)
                                     .remove("$DOOR_TOKEN_KEY$SECURE_SUFFIX")
                                     .remove("$DOOR_TOKEN_KEY$LEGACY_SECURE_SUFFIX")
+                                    .remove("$DOOR_TOKEN_KEY$OLDER_SECURE_SUFFIX")
+                                    .remove("$STORE_PREFLIGHT_KEY$SECURE_SUFFIX")
+                                    .remove("$STORE_PREFLIGHT_KEY$LEGACY_SECURE_SUFFIX")
+                                    .remove("$STORE_PREFLIGHT_KEY$OLDER_SECURE_SUFFIX")
                                     .commit()
                                 if (!removed) error("Local template reset could not be saved")
                                 deleteKeystoreAlias(KEYSTORE_ALIAS)
+                                deleteKeystoreAlias(LEGACY_KEYSTORE_ALIAS)
                             }
                         }
                         if (!active.get()) return@launch
@@ -618,7 +648,7 @@ private fun FFacioApp(
             resetTransient()
             status = obs.message
             detail = if (obs.liveScore > 0.0f) {
-                "PAD ${"%.2f".format(obs.liveScore)} · 실제 얼굴만 인증할 수 있습니다"
+                "실제 얼굴 여부를 확인하고 있습니다"
             } else {
                 "얼굴을 화면 중앙에 맞춰 주세요"
             }
@@ -627,7 +657,7 @@ private fun FFacioApp(
         if (mode == AppMode.Enroll) {
             enrollSamples.add(obs.embedding)
             status = "샘플 수집 중"
-            detail = "${enrollSamples.size}/$ENROLL_SAMPLES · PAD ${"%.2f".format(obs.liveScore)} · ${poseLabel(obs.pose)}"
+            detail = "${enrollSamples.size}/$ENROLL_SAMPLES · 실제 얼굴 확인 완료 · ${poseLabel(obs.pose)}"
             if (enrollSamples.size >= ENROLL_SAMPLES) {
                 val cleanName = enrollmentName.ifBlank { name.trim() }
                 if (cleanName.isNotEmpty()) {
@@ -1282,7 +1312,7 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
             if ((row.getOrNull(2) ?: 0.0f) < bgr.cols().toFloat() * 0.16f) return Observation.fail("조금 더 가까이 와 주세요")
             val passiveLiveness = predictPassiveLiveness(bgr, row)
             if (!passiveLiveness.isLive) {
-                return Observation.fail("사진이나 화면으로 보이는 얼굴입니다. 실제 얼굴을 보여주세요", passiveLiveness.liveScore)
+                return Observation.fail(passiveLiveness.message(), passiveLiveness.liveScore)
             }
             aligned = Mat()
             runCatching {
@@ -1314,9 +1344,9 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
             Imgproc.resize(crop, resized, Size(80.0, 80.0))
             blob = Dnn.blobFromImage(
                 resized,
-                1.0 / 128.0,
+                1.0 / 255.0,
                 Size(80.0, 80.0),
-                Scalar(127.5, 127.5, 127.5),
+                Scalar(0.0, 0.0, 0.0),
                 false,
                 false
             )
@@ -1342,8 +1372,8 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
         val y = face[1].toInt()
         val w = max(1, face[2].toInt())
         val h = max(1, face[3].toInt())
-        val expandedW = (w * 1.25f).toInt()
-        val expandedH = (h * 1.25f).toInt()
+        val expandedW = (w * 2.7f).toInt()
+        val expandedH = (h * 2.7f).toInt()
         val cx = x + w / 2
         val cy = y + h / 2
         val left = max(0, cx - expandedW / 2)
@@ -1357,8 +1387,8 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
     private fun classifyPassiveLiveness(values: FloatArray): PassiveLiveness {
         if (values.size < 3) return PassiveLiveness(0.0f, "invalid_output")
         val maxLogit = max(values[0], max(values[1], values[2]))
-        val liveExp = exp((values[0] - maxLogit).toDouble())
-        val printExp = exp((values[1] - maxLogit).toDouble())
+        val printExp = exp((values[0] - maxLogit).toDouble())
+        val liveExp = exp((values[1] - maxLogit).toDouble())
         val replayExp = exp((values[2] - maxLogit).toDouble())
         val sum = max(1e-8, liveExp + printExp + replayExp)
         val live = (liveExp / sum).toFloat()
@@ -1447,6 +1477,12 @@ private sealed class ModelLoadState {
 private data class PassiveLiveness(val liveScore: Float, val state: String) {
     val isLive: Boolean
         get() = state == "live"
+
+    fun message(): String = when (state) {
+        "model_error", "invalid_output" -> "실제 얼굴 확인 모델을 사용할 수 없습니다. 앱을 다시 시작해 주세요"
+        "invalid_crop" -> "얼굴을 화면 안에 맞춰 주세요"
+        else -> "사진이나 화면으로 보이는 얼굴입니다. 실제 얼굴을 보여주세요"
+    }
 }
 private data class Observation(
     val ok: Boolean,
@@ -1495,20 +1531,40 @@ private fun saveUsers(context: Context, prefs: SharedPreferences, users: List<Us
 }
 
 private fun secureGetString(context: Context, prefs: SharedPreferences, key: String, default: String, failClosed: Boolean): String {
-    val encrypted = prefs.getString("$key$SECURE_SUFFIX", null)
-    if (encrypted == null) return default
-    return runCatching {
-        val payload = Base64.decode(encrypted, Base64.NO_WRAP)
-        decryptPayload(context, payload, KEYSTORE_ALIAS, authRequired = true)
-    }.getOrElse {
-        if (failClosed) throw IllegalStateException("Encrypted local store authentication failed", it)
-        default
+    prefs.getString("$key$SECURE_SUFFIX", null)?.let { encrypted ->
+        return runCatching {
+            val payload = Base64.decode(encrypted, Base64.NO_WRAP)
+            decryptPayload(context, payload, KEYSTORE_ALIAS, authRequired = false)
+        }.getOrElse {
+            if (failClosed) throw IllegalStateException("Encrypted local store authentication failed", it)
+            default
+        }
     }
+    for (suffix in listOf(LEGACY_SECURE_SUFFIX, OLDER_SECURE_SUFFIX)) {
+        val legacy = prefs.getString("$key$suffix", null) ?: continue
+        val migrated = runCatching {
+            val payload = Base64.decode(legacy, Base64.NO_WRAP)
+            decryptPayload(context, payload, LEGACY_KEYSTORE_ALIAS, authRequired = true)
+        }
+        if (migrated.isSuccess) {
+            val value = migrated.getOrThrow()
+            securePutString(context, prefs, key, value)
+            prefs.edit().remove("$key$suffix").remove(key).commit()
+            return value
+        }
+        if (failClosed) throw IllegalStateException("Legacy encrypted local store migration failed", migrated.exceptionOrNull())
+    }
+    prefs.getString(key, null)?.let { plaintext ->
+        securePutString(context, prefs, key, plaintext)
+        prefs.edit().remove(key).commit()
+        return plaintext
+    }
+    return default
 }
 
 private fun securePutString(context: Context, prefs: SharedPreferences, key: String, value: String) {
     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    cipher.init(Cipher.ENCRYPT_MODE, keystoreKey(context, KEYSTORE_ALIAS, authRequired = true))
+    cipher.init(Cipher.ENCRYPT_MODE, keystoreKey(context, KEYSTORE_ALIAS, authRequired = false))
     val iv = cipher.iv ?: error("Android Keystore did not provide an AES-GCM IV")
     val cipherText = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
     val payload = iv + cipherText
@@ -1526,6 +1582,14 @@ private fun decryptPayload(context: Context, payload: ByteArray, alias: String, 
     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
     cipher.init(Cipher.DECRYPT_MODE, keystoreKey(context, alias, authRequired), GCMParameterSpec(128, iv))
     return String(cipher.doFinal(cipherText), Charsets.UTF_8)
+}
+
+private fun preflightSecureStore(context: Context, prefs: SharedPreferences) {
+    val probe = "ok-${System.currentTimeMillis()}"
+    securePutString(context, prefs, STORE_PREFLIGHT_KEY, probe)
+    val roundTrip = secureGetString(context, prefs, STORE_PREFLIGHT_KEY, "", failClosed = true)
+    if (roundTrip != probe) error("Encrypted local store preflight mismatch")
+    prefs.edit().remove("$STORE_PREFLIGHT_KEY$SECURE_SUFFIX").commit()
 }
 
 private fun keystoreKey(context: Context, alias: String, authRequired: Boolean): SecretKey {

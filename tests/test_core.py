@@ -137,11 +137,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(message, "빛 반사가 너무 강합니다")
 
     def test_passive_antispoof_classification(self) -> None:
-        live = classify_antispoof_logits(np.array([4.0, 0.1, -0.2], dtype=np.float32), threshold=0.70)
+        live = classify_antispoof_logits(np.array([0.1, 4.0, -0.2], dtype=np.float32), threshold=0.55)
         self.assertEqual(live.state, "live")
-        self.assertGreater(live.live_score, 0.70)
+        self.assertGreater(live.live_score, 0.55)
 
-        printed = classify_antispoof_logits(np.array([0.1, 3.0, 0.0], dtype=np.float32), threshold=0.70)
+        printed = classify_antispoof_logits(np.array([3.0, 0.1, 0.0], dtype=np.float32), threshold=0.70)
         self.assertEqual(printed.state, "print_attack")
         self.assertFalse(printed.is_live)
 

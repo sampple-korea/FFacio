@@ -116,7 +116,7 @@ class OpenCVSFaceEngine(FaceEngine):
             antispoof_state = antispoof.state
             if not antispoof.is_live:
                 quality = min(quality, 0.25)
-                message = ANTISPOOF_MESSAGE
+                message = antispoof_message(antispoof_state)
             else:
                 aligned = self.recognizer.alignCrop(frame, face)
                 raw = self.recognizer.feature(aligned)
@@ -180,7 +180,7 @@ class InsightFaceEngine(FaceEngine):
             antispoof_state = antispoof.state
             if not antispoof.is_live:
                 quality = min(quality, 0.25)
-                message = ANTISPOOF_MESSAGE
+                message = antispoof_message(antispoof_state)
             else:
                 embedding = normalize(np.array(face.normed_embedding, dtype=np.float32))
         pose = estimate_pose_from_keypoints(getattr(face, "kps", None))
@@ -211,6 +211,14 @@ def create_engine(prefer_insightface: bool = True) -> FaceEngine:
 def largest_face(faces: np.ndarray) -> np.ndarray:
     areas = faces[:, 2] * faces[:, 3]
     return faces[int(np.argmax(areas))]
+
+
+def antispoof_message(state: str) -> str:
+    if state == "model_error" or state == "invalid_output":
+        return "실제 얼굴 확인 모델을 사용할 수 없습니다. 앱을 다시 시작해 주세요"
+    if state == "invalid_crop":
+        return "얼굴을 화면 안에 맞춰 주세요"
+    return ANTISPOOF_MESSAGE
 
 
 def normalize(vector: np.ndarray) -> np.ndarray:
