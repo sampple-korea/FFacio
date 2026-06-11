@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-
-from ffacio.paths import APP_VERSION
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,6 +21,14 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def app_version() -> str:
+    source = (ROOT / "ffacio" / "paths.py").read_text(encoding="utf-8")
+    match = re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', source, re.MULTILINE)
+    if not match:
+        raise RuntimeError("Could not read APP_VERSION from ffacio/paths.py")
+    return match.group(1)
+
+
 def main() -> None:
     if not SETUP.exists():
         raise SystemExit(f"Missing installer: {SETUP}")
@@ -34,7 +41,7 @@ def main() -> None:
     ).stdout.strip()
     manifest = {
         "name": "FFacio",
-        "version": APP_VERSION,
+        "version": app_version(),
         "artifact": str(SETUP.name),
         "size": SETUP.stat().st_size,
         "sha256": sha256_file(SETUP),
