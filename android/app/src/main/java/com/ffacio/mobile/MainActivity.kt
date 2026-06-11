@@ -108,6 +108,7 @@ import java.security.KeyStore
 import java.security.MessageDigest
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Cipher
@@ -184,9 +185,15 @@ class MainActivity : ComponentActivity() {
                     copyAsset("models/antispoof/minifasnet_v2.onnx")
                 )
             }.exceptionOrNull()
-            if (!active.get()) return@execute
+            if (!active.get()) {
+                createdEngine?.close()
+                return@execute
+            }
             ContextCompat.getMainExecutor(this).execute {
-                if (!active.get()) return@execute
+                if (!active.get()) {
+                    createdEngine?.close()
+                    return@execute
+                }
                 if (error == null) engine = createdEngine
                 if (error == null) {
                     Log.i("FFacio", "Offline models ready")
@@ -200,9 +207,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         active.set(false)
-        engine?.close()
+        val engineToClose = engine
         engine = null
-        analyzerExecutor.shutdownNow()
+        if (engineToClose != null) {
+            runCatching {
+                analyzerExecutor.execute {
+                    engineToClose.close()
+                }
+            }.onFailure {
+                engineToClose.close()
+            }
+        }
+        analyzerExecutor.shutdown()
+        if (!analyzerExecutor.awaitTermination(1500, TimeUnit.MILLISECONDS)) {
+            analyzerExecutor.shutdownNow()
+        }
         doorExecutor.shutdownNow()
         modelExecutor.shutdownNow()
         super.onDestroy()
@@ -211,9 +230,10 @@ class MainActivity : ComponentActivity() {
     private fun copyAsset(assetPath: String): File {
         val out = File(filesDir, assetPath.replace("/", "_"))
         val modelEntry = modelManifestEntry(assetPath)
-        val expectedLength = modelEntry?.getLong("size") ?: assets.openFd(assetPath).use { it.length }
-        val expectedSha = modelEntry?.optString("sha256")?.lowercase()?.takeIf { it.isNotBlank() }
-        if (out.exists() && out.length() == expectedLength && (expectedSha == null || sha256(out) == expectedSha)) {
+        val expectedLength = modelEntry.getLong("size")
+        val expectedSha = modelEntry.getString("sha256").lowercase().takeIf { it.isNotBlank() }
+            ?: error("Bundled model manifest entry is missing sha256: $assetPath")
+        if (out.exists() && out.length() == expectedLength && sha256(out) == expectedSha) {
             return out
         }
         val tmp = File(out.parentFile, "${out.name}.tmp")
@@ -222,7 +242,7 @@ class MainActivity : ComponentActivity() {
                 input.copyTo(output, 1024 * 1024)
             }
         }
-        if (tmp.length() != expectedLength || (expectedSha != null && sha256(tmp) != expectedSha)) {
+        if (tmp.length() != expectedLength || sha256(tmp) != expectedSha) {
             tmp.delete()
             error("Bundled model copy failed: $assetPath")
         }
@@ -234,7 +254,7 @@ class MainActivity : ComponentActivity() {
         return out
     }
 
-    private fun modelManifestEntry(assetPath: String): JSONObject? {
+    private fun modelManifestEntry(assetPath: String): JSONObject {
         val modelPath = assetPath.removePrefix("models/")
         val raw = assets.open("models/models.manifest.json").bufferedReader(Charsets.UTF_8).use { it.readText() }
         val files = JSONObject(raw).getJSONArray("files")
@@ -242,7 +262,7 @@ class MainActivity : ComponentActivity() {
             val item = files.getJSONObject(i)
             if (item.optString("path") == modelPath) return item
         }
-        return null
+        error("Bundled model manifest is missing required asset: $assetPath")
     }
 
     private fun sha256(file: File): String {
@@ -387,6 +407,13 @@ private fun FFacioApp(
                         storeError = loaded.error
                         if (loaded.error == null) {
                             users.replaceWith(loaded.users)
+                            mode = AppMode.Auth
+                            enrollmentName = ""
+                            enrollSamples.clear()
+                            liveCandidate = -1
+                            stableUser = -1
+                            stableCount = 0
+                            liveness.reset()
                             status = if (users.isEmpty()) "첫 사용자를 등록하세요" else "로컬 템플릿 잠금 해제 완료"
                             detail = if (users.isEmpty()) "기기에 저장된 얼굴 템플릿이 없습니다" else "등록 사용자 ${users.size}명"
                         } else {
@@ -604,6 +631,9 @@ private fun FFacioApp(
                 onSaved()
             }.onFailure {
                 storeError = it
+                mode = AppMode.Auth
+                enrollmentName = ""
+                enrollSamples.clear()
                 resetTransient()
                 status = "로컬 생체 저장소를 사용할 수 없습니다"
                 detail = "암호화된 얼굴 템플릿 저장에 실패해 인증을 차단했습니다"
@@ -679,6 +709,8 @@ private fun FFacioApp(
             status = obs.message
             detail = if (obs.liveScore > 0.0f) {
                 "실제 얼굴 여부를 확인하고 있습니다"
+            } else if (obs.message.contains("모델")) {
+                "앱을 완전히 종료한 뒤 다시 실행해 주세요"
             } else {
                 "얼굴을 화면 중앙에 맞춰 주세요"
             }
@@ -825,7 +857,7 @@ private fun FFacioApp(
                 enrollCount = enrollSamples.size,
                 canResetStore = storeError != null,
                 canUnlockDoor = doorConfigError != null,
-                canRetryBlocked = blockedReason() != null && !modelLoading && modelError == null && !storageBusy && !noCameraHardware,
+                canRetryBlocked = blockedReason() != null && !modelLoading && modelError == null && !storageBusy,
                 canMutate = !storageBusy,
                 onName = { if (mode != AppMode.Enroll) name = it },
                 onDoorUrl = { doorUrl = it },
