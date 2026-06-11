@@ -30,9 +30,9 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $modelRoot = Join-Path $repoRoot "resources\models"
 $modelManifest = Join-Path $modelRoot "models.manifest.json"
 $androidModelFiles = @(
-    Join-Path $modelRoot "opencv\face_detection_yunet_2023mar.onnx",
-    Join-Path $modelRoot "opencv\face_recognition_sface_2021dec.onnx",
-    Join-Path $modelRoot "antispoof\minifasnet_v2.onnx"
+    (Join-Path $modelRoot "opencv\face_detection_yunet_2023mar.onnx"),
+    (Join-Path $modelRoot "opencv\face_recognition_sface_2021dec.onnx"),
+    (Join-Path $modelRoot "antispoof\minifasnet_v2.onnx")
 )
 $missingAndroidModelFiles = @($androidModelFiles | Where-Object { -not (Test-Path $_) })
 if ((-not (Test-Path $modelManifest)) -or $missingAndroidModelFiles.Count -gt 0) {
