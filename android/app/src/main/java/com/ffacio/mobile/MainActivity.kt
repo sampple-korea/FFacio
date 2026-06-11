@@ -1290,11 +1290,10 @@ private fun saveUsers(context: Context, prefs: SharedPreferences, users: List<Us
 
 private fun secureGetString(context: Context, prefs: SharedPreferences, key: String, default: String, failClosed: Boolean): String {
     val encrypted = prefs.getString("$key$SECURE_SUFFIX", null)
-    val legacyEncrypted = prefs.getString("$key$LEGACY_SECURE_SUFFIX", null)
-    if (encrypted == null && legacyEncrypted == null) return default
+    if (encrypted == null) return default
     return runCatching {
-        val payload = Base64.decode(encrypted ?: legacyEncrypted, Base64.NO_WRAP)
-        decryptPayload(context, payload, if (encrypted != null) KEYSTORE_ALIAS else LEGACY_KEYSTORE_ALIAS, encrypted != null)
+        val payload = Base64.decode(encrypted, Base64.NO_WRAP)
+        decryptPayload(context, payload, KEYSTORE_ALIAS, authRequired = true)
     }.getOrElse {
         if (failClosed) throw IllegalStateException("Encrypted local store authentication failed", it)
         default
