@@ -24,6 +24,8 @@ class AntiSpoofResult:
 
 def softmax(values: np.ndarray) -> np.ndarray:
     logits = values.astype(np.float32).reshape(-1)
+    if logits.size == 0:
+        return logits
     shifted = logits - float(np.max(logits))
     exp = np.exp(shifted)
     return exp / max(float(np.sum(exp)), 1e-8)

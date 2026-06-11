@@ -156,6 +156,10 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(probability_live.state, "live")
         self.assertGreater(probability_live.live_score, 0.69)
 
+        invalid_empty = classify_antispoof_logits(np.array([], dtype=np.float32), threshold=0.55)
+        self.assertEqual(invalid_empty.state, "invalid_output")
+        self.assertFalse(invalid_empty.is_live)
+
     def test_model_manifest_verification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

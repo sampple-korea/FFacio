@@ -19,6 +19,21 @@ class EnrollmentQualityTest {
     }
 
     @Test
+    fun repeatedEarlierSampleIsRejected() {
+        val result = enrollmentSampleDecision(
+            embedding = floatArrayOf(1.0f, 0.0f, 0.0f),
+            pose = 0,
+            samples = listOf(
+                floatArrayOf(1.0f, 0.0f, 0.0f),
+                floatArrayOf(0.0f, 1.0f, 0.0f)
+            ),
+            poses = listOf(0, 1)
+        )
+
+        assertFalse(result.accepted)
+    }
+
+    @Test
     fun finalSampleNeedsPoseDiversity() {
         val samples = listOf(
             floatArrayOf(1.0f, 0.0f, 0.0f),

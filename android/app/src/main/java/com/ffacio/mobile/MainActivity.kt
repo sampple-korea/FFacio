@@ -72,6 +72,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -320,7 +321,7 @@ private fun FFacioApp(
     var doorToken by remember { mutableStateOf("") }
     var doorConfigError by remember { mutableStateOf<Throwable?>(null) }
     var doorArmed by remember { mutableStateOf(false) }
-    var passiveLivenessEnabled by remember { mutableStateOf(prefs.getBoolean(PASSIVE_LIVENESS_ENABLED_KEY, true)) }
+    var passiveLivenessEnabled by remember { mutableStateOf(true) }
     var cameraAvailable by remember { mutableStateOf(true) }
     var noCameraHardware by remember { mutableStateOf(false) }
     var cameraRetryNonce by remember { mutableIntStateOf(0) }
@@ -335,6 +336,9 @@ private fun FFacioApp(
     var lastOpenAt by remember { mutableLongStateOf(0L) }
     var hasCameraPermission by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+    }
+    LaunchedEffect(Unit) {
+        prefs.edit().remove(PASSIVE_LIVENESS_ENABLED_KEY).apply()
     }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         hasCameraPermission = it
@@ -750,6 +754,17 @@ private fun FFacioApp(
             return
         }
         if (mode == AppMode.Enroll) {
+            val duplicateSample = duplicateUserForEnrollment(obs.embedding, users)
+            if (duplicateSample != null) {
+                mode = AppMode.Auth
+                enrollmentName = ""
+                enrollSamples.clear()
+                enrollPoses.clear()
+                resetTransient()
+                status = "이미 등록된 얼굴입니다"
+                detail = "${duplicateSample.name} 사용자와 너무 비슷합니다. 기존 사용자로 인증하거나 다른 사람을 등록해 주세요"
+                return
+            }
             val sampleDecision = enrollmentSampleDecision(obs.embedding, obs.pose, enrollSamples, enrollPoses)
             if (!sampleDecision.accepted) {
                 status = sampleDecision.status
@@ -831,6 +846,13 @@ private fun FFacioApp(
             detail = "잠시 그대로 유지해 주세요"
             return
         }
+        if (!passiveLivenessEnabled) {
+            doorArmed = false
+            resetTransient()
+            status = "디버그 인증 확인"
+            detail = "사진/화면 차단 모델이 꺼져 있어 문 열림은 차단됩니다"
+            return
+        }
         val user = users[match.index]
         status = "환영합니다, ${user.name}님"
         detail = "인증이 안정적으로 확인되었습니다"
@@ -891,6 +913,21 @@ private fun FFacioApp(
                     .weight(1f)
                     .heightIn(min = 260.dp, max = 430.dp)
             )
+            if (!passiveLivenessEnabled) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    color = ComposeColor(0xFFFFE8E6)
+                ) {
+                    Text(
+                        "디버그: 사진/화면 차단 모델 꺼짐 · 문 열림 차단",
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        color = ComposeColor(0xFFB42318),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
             ControlPanel(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -914,7 +951,11 @@ private fun FFacioApp(
                 onDoorUrl = { doorUrl = it },
                 onDoorToken = { doorToken = it },
                 onDoorArmed = {
-                    if (it && doorUrl.trim().isEmpty()) {
+                    if (it && !passiveLivenessEnabled) {
+                        doorArmed = false
+                        status = "문 열림 차단됨"
+                        detail = "사진/화면 차단 모델을 켠 뒤에만 릴레이 문 열림을 활성화할 수 있습니다"
+                    } else if (it && doorUrl.trim().isEmpty()) {
                         doorArmed = false
                         status = "릴레이 URL이 필요합니다"
                         detail = "문 열림을 활성화하려면 HTTPS 릴레이 URL을 먼저 입력하세요"
@@ -935,11 +976,12 @@ private fun FFacioApp(
                 },
                 onPassiveLivenessEnabled = {
                     passiveLivenessEnabled = it
-                    prefs.edit().putBoolean(PASSIVE_LIVENESS_ENABLED_KEY, it).apply()
+                    prefs.edit().remove(PASSIVE_LIVENESS_ENABLED_KEY).apply()
                     doorArmed = false
+                    if (!it) disableDoorForSession()
                     resetTransient()
-                    status = if (it) "실제 얼굴 체크 켜짐" else "실제 얼굴 체크 꺼짐"
-                    detail = if (it) "사진/화면 공격 차단 모델을 다시 사용합니다" else "디버그 모드입니다. 사진/화면 공격 차단 모델을 우회합니다"
+                    status = if (it) "사진/화면 차단 모델 켜짐" else "사진/화면 차단 모델 꺼짐"
+                    detail = if (it) "릴레이 문 열림을 다시 활성화할 수 있습니다" else "디버그 진단 모드입니다. 문 열림은 자동으로 차단됩니다"
                 },
                 onEnroll = enroll@{
                     blockedReason()?.let {
@@ -1044,6 +1086,7 @@ private fun CameraStage(
     onNoCameraHardware: () -> Unit
 ) {
     val context = LocalContext.current
+    val currentPassiveLivenessEnabled by rememberUpdatedState(passiveLivenessEnabled)
     val previewView = remember {
         PreviewView(context).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
@@ -1075,7 +1118,7 @@ private fun CameraStage(
                             .build()
                             .also {
                                 it.setAnalyzer(analyzerExecutor) { proxy ->
-                                    analyzeProxy(proxy, engineProvider, processing, firstAnalyzedFrameLogged, lastAnalysisAt, active, context, mirrorFrames.get(), passiveLivenessEnabled, onObservation)
+                                    analyzeProxy(proxy, engineProvider, processing, firstAnalyzedFrameLogged, lastAnalysisAt, active, context, mirrorFrames.get(), currentPassiveLivenessEnabled, onObservation)
                                 }
                             }
                     } else {
@@ -1284,11 +1327,18 @@ private fun ControlPanel(
             }
             if (advancedExpanded || doorArmed) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Switch(checked = passiveLivenessEnabled, onCheckedChange = onPassiveLivenessEnabled, enabled = canMutate)
-                    Text("실제 얼굴 체크", color = ComposeColor(0xFF1D1D1F))
+                    Switch(
+                        checked = passiveLivenessEnabled,
+                        onCheckedChange = {
+                            advancedExpanded = true
+                            onPassiveLivenessEnabled(it)
+                        },
+                        enabled = canMutate
+                    )
+                    Text("사진/화면 차단 모델", color = ComposeColor(0xFF1D1D1F))
                 }
                 if (!passiveLivenessEnabled) {
-                    Text("디버그 모드: 사진/화면 공격 차단 모델을 우회합니다", color = ComposeColor(0xFFFF3B30), fontSize = 13.sp)
+                    Text("디버그 모드: 패시브 PAD만 우회합니다. 포즈 체크는 유지되지만 문 열림은 차단됩니다", color = ComposeColor(0xFFFF3B30), fontSize = 13.sp)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Switch(checked = doorArmed, onCheckedChange = onDoorArmed, enabled = canMutate)
@@ -1837,8 +1887,8 @@ internal fun enrollmentSampleDecision(
     if (samples.isNotEmpty() && samples.last().size != embedding.size) {
         return EnrollmentSampleDecision(false, "얼굴 특징을 다시 추출해 주세요", "등록 샘플 형식이 일치하지 않습니다")
     }
-    if (samples.isNotEmpty() && cosine(embedding, samples.last()) > ENROLL_REPEAT_THRESHOLD) {
-        return EnrollmentSampleDecision(false, "고개를 아주 조금 움직여 주세요", "${samples.size}/$ENROLL_SAMPLES · 같은 각도의 샘플이 반복되고 있습니다")
+    if (samples.any { cosine(embedding, it) > ENROLL_REPEAT_THRESHOLD }) {
+        return EnrollmentSampleDecision(false, "고개를 좌우로 천천히 돌려 주세요", "${samples.size}/$ENROLL_SAMPLES · 이미 수집한 각도와 너무 비슷합니다")
     }
     if (samples.size >= ENROLL_SAMPLES - 1) {
         val distinctPoses = (poses + pose).toSet().size
