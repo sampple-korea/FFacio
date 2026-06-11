@@ -1,5 +1,6 @@
 param(
     [string]$Apk = "$PSScriptRoot\..\release\FFacio-Android-release.apk",
+    [string]$Manifest = "$PSScriptRoot\..\release\android-release-manifest.json",
     [string]$AvdName = "FFacio_API36",
     [string]$Serial = "",
     [string]$Report = "$PSScriptRoot\..\release\android-emulator-verification.json",
@@ -30,8 +31,10 @@ if (-not $existing) {
 
 $devices = (& $adb devices) -join "`n"
 $actualAvd = ""
+$startedEmulator = $false
 if (-not $Serial -and $devices -notmatch "emulator-\d+\s+device") {
     Start-Process -FilePath $emulator -ArgumentList @("-avd", $AvdName, "-no-snapshot-load", "-no-audio", "-no-window", "-gpu", "swiftshader_indirect", "-no-boot-anim") -WindowStyle Hidden
+    $startedEmulator = $true
 }
 
 & $adb wait-for-device
@@ -94,10 +97,21 @@ if ($Report) {
     $reportPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Report)
     $reportDir = Split-Path -Parent $reportPath
     if ($reportDir) { New-Item -ItemType Directory -Force $reportDir | Out-Null }
+    $manifestJson = $null
+    $manifestPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Manifest)
+    if (Test-Path $manifestPath) {
+        $manifestJson = Get-Content -Raw -Encoding UTF8 $manifestPath | ConvertFrom-Json
+    }
     [ordered]@{
         status = "passed"
         apk = (Split-Path -Leaf $Apk)
         apk_sha256 = (Get-FileHash $Apk -Algorithm SHA256).Hash.ToLowerInvariant()
+        manifest = if (Test-Path $manifestPath) { Split-Path -Leaf $manifestPath } else { $null }
+        manifest_sha256 = if (Test-Path $manifestPath) { (Get-FileHash $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+        git_commit = if ($manifestJson) { $manifestJson.git_commit } else { $null }
+        version = if ($manifestJson) { $manifestJson.version } else { $null }
+        version_code = if ($manifestJson) { $manifestJson.version_code } else { $null }
+        signer_cert_sha256 = if ($manifestJson) { $manifestJson.signer_cert_sha256 } else { $null }
         requested_avd = $AvdName
         avd_name = $actualAvd
         serial = $Serial
@@ -106,9 +120,10 @@ if ($Report) {
         launch_method = "adb monkey launcher"
         model_ready_verified = $true
         verified_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        started_emulator = $startedEmulator
         keep_running = [bool]$KeepRunning
     } | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 $reportPath
 }
-if (-not $KeepRunning) {
+if ($startedEmulator -and -not $KeepRunning) {
     & $adb -s $Serial emu kill 2>$null | Out-Null
 }

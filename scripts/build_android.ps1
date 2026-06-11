@@ -1,6 +1,7 @@
 param(
     [string]$AndroidDir = "$PSScriptRoot\..\android",
     [string]$ReleaseDir = "$PSScriptRoot\..\release",
+    [switch]$AllowGeneratedSigningKey,
     [switch]$SkipEmulatorVerification
 )
 
@@ -27,21 +28,38 @@ New-Item -ItemType Directory -Force $ReleaseDir | Out-Null
 
 $modelManifest = Join-Path $PSScriptRoot "..\resources\models\models.manifest.json"
 if (-not (Test-Path $modelManifest)) {
-    & (Join-Path $PSScriptRoot "prepare_models.ps1")
-    if ($LASTEXITCODE -ne 0) { throw "Model preparation failed with exit code $LASTEXITCODE." }
+    $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+    $python = Join-Path $repoRoot ".venv\Scripts\python.exe"
+    if (-not (Test-Path $python)) {
+        $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+        if (-not $pythonCmd) { throw "Python is required to fetch pinned Android model assets." }
+        $python = $pythonCmd.Source
+    }
+    & $python (Join-Path $PSScriptRoot "fetch_models.py")
+    if ($LASTEXITCODE -ne 0) { throw "Pinned model fetch failed with exit code $LASTEXITCODE." }
 }
 if (-not (Test-Path $modelManifest)) {
     throw "Offline model manifest is missing after preparation: $modelManifest"
 }
 
 $keyStore = $env:FFACIO_ANDROID_KEYSTORE
-if (-not $keyStore) { $keyStore = Join-Path $ReleaseDir "ffacio-local-release.jks" }
 $storePassword = $env:FFACIO_ANDROID_KEYSTORE_PASSWORD
-if (-not $storePassword) { $storePassword = "ffacio-local-release-change-me" }
 $keyAlias = $env:FFACIO_ANDROID_KEY_ALIAS
-if (-not $keyAlias) { $keyAlias = "ffacio-local-release" }
 $keyPassword = $env:FFACIO_ANDROID_KEY_PASSWORD
-if (-not $keyPassword) { $keyPassword = $storePassword }
+$signingSource = "external environment keystore"
+if (-not $keyStore) {
+    if (-not $AllowGeneratedSigningKey) {
+        throw "FFACIO_ANDROID_KEYSTORE, FFACIO_ANDROID_KEYSTORE_PASSWORD, FFACIO_ANDROID_KEY_ALIAS, and FFACIO_ANDROID_KEY_PASSWORD are required for reproducible release signing. Use -AllowGeneratedSigningKey only for disposable local sideload builds."
+    }
+    $keyStore = Join-Path $ReleaseDir "ffacio-local-release.jks"
+    if (-not $storePassword) { $storePassword = "ffacio-local-release-change-me" }
+    if (-not $keyAlias) { $keyAlias = "ffacio-local-release" }
+    if (-not $keyPassword) { $keyPassword = $storePassword }
+    $signingSource = "generated disposable local sideload keystore"
+}
+if (-not $storePassword -or -not $keyAlias -or -not $keyPassword) {
+    throw "Android release signing requires FFACIO_ANDROID_KEYSTORE_PASSWORD, FFACIO_ANDROID_KEY_ALIAS, and FFACIO_ANDROID_KEY_PASSWORD."
+}
 
 if (-not (Test-Path $keyStore)) {
     $keytool = Join-Path $env:JAVA_HOME "bin\keytool.exe"
@@ -105,7 +123,8 @@ $manifest = [ordered]@{
     git_dirty_paths = @($gitStatus)
     signed = $true
     signer_cert_sha256 = $signerCertSha256
-    signing = "local sideload release key; replace with your own keystore for production distribution"
+    signing = $signingSource
+    signing_reproducibility = "APK SHA-256 is reproducible only when the same private keystore and pinned model bundle are supplied; the private key is intentionally not stored in git."
     debug_signed = $true
     static_verified = $false
     emulator_verified = $false
@@ -129,7 +148,7 @@ $verified = Get-Content -Raw $manifestPath -Encoding UTF8 | ConvertFrom-Json
 $verified.static_verified = $true
 if (-not $SkipEmulatorVerification) {
     $emulatorReport = Join-Path $ReleaseDir "android-emulator-verification.json"
-    & (Join-Path $PSScriptRoot "verify_android_emulator.ps1") -Apk $releaseOut -Report $emulatorReport
+    & (Join-Path $PSScriptRoot "verify_android_emulator.ps1") -Apk $releaseOut -Manifest $manifestPath -Report $emulatorReport
     if ($LASTEXITCODE -ne 0) { throw "Android emulator verification failed with exit code $LASTEXITCODE." }
     $emulatorEvidence = Get-Content -Raw $emulatorReport -Encoding UTF8 | ConvertFrom-Json
     $verified.emulator_verified = $true

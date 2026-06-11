@@ -125,7 +125,6 @@ private const val PREFS = "ffacio_store"
 private const val USERS_KEY = "users"
 private const val DOOR_URL_KEY = "door_url"
 private const val DOOR_TOKEN_KEY = "door_token"
-private const val DOOR_ARMED_KEY = "door_armed"
 private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key_v2"
 private const val SECURE_SUFFIX = "_enc_v2"
 private const val LEGACY_SECURE_SUFFIX = "_enc"
@@ -252,7 +251,7 @@ private fun FFacioApp(
     var doorUrl by remember { mutableStateOf(prefs.getString(DOOR_URL_KEY, "") ?: "") }
     var doorToken by remember { mutableStateOf("") }
     var doorConfigError by remember { mutableStateOf<Throwable?>(null) }
-    var doorArmed by remember { mutableStateOf(prefs.getBoolean(DOOR_ARMED_KEY, false)) }
+    var doorArmed by remember { mutableStateOf(false) }
     var cameraAvailable by remember { mutableStateOf(true) }
     var noCameraHardware by remember { mutableStateOf(false) }
     var cameraRetryNonce by remember { mutableIntStateOf(0) }
@@ -352,7 +351,6 @@ private fun FFacioApp(
                                     .remove(DOOR_TOKEN_KEY)
                                     .remove("$DOOR_TOKEN_KEY$SECURE_SUFFIX")
                                     .remove("$DOOR_TOKEN_KEY$LEGACY_SECURE_SUFFIX")
-                                    .remove(DOOR_ARMED_KEY)
                                     .commit()
                                 if (!removed) error("Local template reset could not be saved")
                                 deleteKeystoreAlias(KEYSTORE_ALIAS)
@@ -360,14 +358,7 @@ private fun FFacioApp(
                         }
                         if (!active.get()) return@launch
                         storageBusy = false
-                        if (reset.isFailure) {
-                            storeError = IllegalStateException("Local template reset could not be saved", reset.exceptionOrNull())
-                            status = "로컬 템플릿 초기화 실패"
-                            detail = "기기 저장소 상태를 확인한 뒤 다시 시도하세요"
-                            return@launch
-                        }
                         users.clear()
-                        storeError = null
                         liveCandidate = -1
                         stableUser = -1
                         stableCount = 0
@@ -377,6 +368,13 @@ private fun FFacioApp(
                         doorToken = ""
                         doorConfigError = null
                         doorArmed = false
+                        if (reset.isFailure) {
+                            storeError = IllegalStateException("Local template reset could not be saved", reset.exceptionOrNull())
+                            status = "로컬 템플릿 초기화 실패"
+                            detail = "현재 세션의 인증과 문 제어 상태는 비웠습니다. 기기 저장소 상태를 확인한 뒤 다시 시도하세요"
+                            return@launch
+                        }
+                        storeError = null
                         status = "로컬 템플릿 저장소 초기화 완료"
                         detail = "기기 안의 얼굴 템플릿을 지웠습니다. 새 사용자를 등록하세요"
                     }
@@ -395,7 +393,6 @@ private fun FFacioApp(
                                 if (URL(relayUrl).protocol.lowercase() != "https") error("HTTPS 릴레이 URL만 사용할 수 있습니다")
                                 if (!prefs.edit().putString(DOOR_URL_KEY, relayUrl).commit()) error("릴레이 URL을 저장하지 못했습니다")
                                 securePutString(context, prefs, DOOR_TOKEN_KEY, relayToken)
-                                if (!prefs.edit().putBoolean(DOOR_ARMED_KEY, true).commit()) error("릴레이 활성화 상태를 저장하지 못했습니다")
                             }
                         }
                         if (!active.get()) return@launch
@@ -407,7 +404,6 @@ private fun FFacioApp(
                             detail = "얼굴 인증과 라이브니스 확인을 모두 통과한 뒤에만 요청합니다"
                         } else {
                             doorArmed = false
-                            withContext(Dispatchers.IO) { prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit() }
                             doorConfigError = saved.exceptionOrNull()
                             status = "릴레이 설정을 저장할 수 없습니다"
                             detail = saved.exceptionOrNull()?.message ?: "암호화된 릴레이 토큰 저장에 실패했습니다"
@@ -435,7 +431,6 @@ private fun FFacioApp(
                             detail = if (doorArmed) "인증 성공 시 저장된 HTTPS 릴레이로 요청합니다" else "필요하면 문 열림 스위치를 다시 활성화하세요"
                         } else {
                             doorArmed = false
-                            withContext(Dispatchers.IO) { prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit() }
                             doorConfigError = loaded.exceptionOrNull()
                             status = "릴레이 토큰을 열 수 없습니다"
                             detail = "토큰을 다시 입력하고 기기 인증 후 활성화하세요"
@@ -483,14 +478,10 @@ private fun FFacioApp(
         tokenLoad.onSuccess {
             doorConfigError = null
             doorToken = it
-            if (doorArmed && it.isBlank()) {
-                doorArmed = false
-                withContext(Dispatchers.IO) { prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit() }
-            }
+            doorArmed = false
         }.onFailure {
             doorConfigError = it
             doorArmed = false
-            withContext(Dispatchers.IO) { prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit() }
         }
         storeError = loaded.error
         users.replaceWith(loaded.users)
@@ -521,22 +512,9 @@ private fun FFacioApp(
         if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    fun persistDoorDisabled() {
-        appScope.launch {
-            val saved = withContext(Dispatchers.IO) {
-                runCatching {
-                    if (!prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit()) error("릴레이 비활성화 상태를 저장하지 못했습니다")
-                }
-            }
-            if (!active.get()) return@launch
-            saved.onSuccess {
-                doorConfigError = null
-            }.onFailure {
-                doorArmed = false
-                status = "릴레이 설정을 저장할 수 없습니다"
-                detail = it.message ?: "암호화된 릴레이 토큰 저장에 실패했습니다"
-            }
-        }
+    fun disableDoorForSession() {
+        doorArmed = false
+        doorConfigError = null
     }
 
     fun resetTransient() {
@@ -611,7 +589,6 @@ private fun FFacioApp(
         val relayToken = doorToken.trim()
         if (relayUrl.isEmpty() || relayToken.isEmpty()) {
             doorArmed = false
-            appScope.launch { withContext(Dispatchers.IO) { prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit() } }
             status = "문 제어가 설정되지 않았습니다"
             detail = "릴레이 URL과 토큰을 저장한 뒤 다시 활성화하세요"
             return
@@ -780,6 +757,7 @@ private fun FFacioApp(
                 canResetStore = storeError != null,
                 canUnlockDoor = doorConfigError != null,
                 canRetryBlocked = blockedReason() != null && !modelLoading && modelError == null && !storageBusy && !noCameraHardware,
+                canMutate = !storageBusy,
                 onName = { if (mode != AppMode.Enroll) name = it },
                 onDoorUrl = { doorUrl = it },
                 onDoorToken = { doorToken = it },
@@ -800,7 +778,7 @@ private fun FFacioApp(
                         requestAdmin(AdminAction.ArmDoor)
                     } else {
                         doorArmed = false
-                        persistDoorDisabled()
+                        disableDoorForSession()
                     }
                 },
                 onEnroll = enroll@{
@@ -915,6 +893,7 @@ private fun CameraStage(
         var boundPreview: Preview? = null
         var boundAnalysis: ImageAnalysis? = null
         var disposed = false
+        val mirrorFrames = AtomicBoolean(true)
         if (enabled) {
             providerFuture = ProcessCameraProvider.getInstance(context)
             providerFuture.addListener({
@@ -932,7 +911,7 @@ private fun CameraStage(
                         .build()
                         .also {
                             it.setAnalyzer(analyzerExecutor) { proxy ->
-                                analyzeProxy(proxy, engineProvider, processing, firstAnalyzedFrameLogged, lastAnalysisAt, active, context, onObservation)
+                                analyzeProxy(proxy, engineProvider, processing, firstAnalyzedFrameLogged, lastAnalysisAt, active, context, mirrorFrames.get(), onObservation)
                             }
                         }
                     val selector = when {
@@ -943,6 +922,7 @@ private fun CameraStage(
                     if (selector == null) {
                         onNoCameraHardware()
                     } else {
+                        mirrorFrames.set(selector == CameraSelector.DEFAULT_FRONT_CAMERA)
                         if (disposed) return@addListener
                         provider.bindToLifecycle(context as ComponentActivity, selector, preview, analysis)
                         boundProvider = provider
@@ -1015,6 +995,7 @@ private fun ControlPanel(
     canResetStore: Boolean,
     canUnlockDoor: Boolean,
     canRetryBlocked: Boolean,
+    canMutate: Boolean,
     onName: (String) -> Unit,
     onDoorUrl: (String) -> Unit,
     onDoorToken: (String) -> Unit,
@@ -1062,7 +1043,7 @@ private fun ControlPanel(
                 value = name,
                 onValueChange = onName,
                 label = { Text("등록 이름") },
-                enabled = mode != AppMode.Enroll,
+                enabled = canMutate && mode != AppMode.Enroll,
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -1101,18 +1082,18 @@ private fun ControlPanel(
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = onEnroll, enabled = blockedReason == null, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF0071E3))) {
+                Button(onClick = onEnroll, enabled = canMutate && blockedReason == null, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF0071E3))) {
                     Text("등록")
                 }
-                Button(onClick = onAuth, enabled = blockedReason == null, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF1D1D1F))) {
+                Button(onClick = onAuth, enabled = canMutate && blockedReason == null, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF1D1D1F))) {
                     Text("인증")
                 }
             }
-            Button(onClick = onDelete, enabled = userCount > 0, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFFFF3B30))) {
+            Button(onClick = onDelete, enabled = canMutate && userCount > 0, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFFFF3B30))) {
                 Text("등록 사용자 삭제")
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Switch(checked = doorArmed, onCheckedChange = onDoorArmed)
+                Switch(checked = doorArmed, onCheckedChange = onDoorArmed, enabled = canMutate)
                 Text("인증 성공 시 HTTPS 릴레이 열기", color = ComposeColor(0xFF1D1D1F))
             }
             if (doorArmed && doorUrl.trim().isEmpty()) {
@@ -1121,7 +1102,7 @@ private fun ControlPanel(
             OutlinedTextField(
                 value = doorUrl,
                 onValueChange = onDoorUrl,
-                enabled = !doorArmed,
+                enabled = canMutate && !doorArmed,
                 label = { Text("HTTPS 릴레이 URL") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
@@ -1129,7 +1110,7 @@ private fun ControlPanel(
             OutlinedTextField(
                 value = doorToken,
                 onValueChange = onDoorToken,
-                enabled = !doorArmed,
+                enabled = canMutate && !doorArmed,
                 label = { Text("Bearer 토큰") },
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -1161,6 +1142,7 @@ private fun analyzeProxy(
     lastAnalysisAt: AtomicLong,
     active: AtomicBoolean,
     context: Context,
+    mirrorHorizontal: Boolean,
     onObservation: (Observation) -> Unit
 ) {
     val now = System.currentTimeMillis()
@@ -1180,7 +1162,7 @@ private fun analyzeProxy(
     }
     try {
         val engine = engineProvider() ?: return
-        val rgba = imageProxyToRgbaMat(proxy)
+        val rgba = imageProxyToRgbaMat(proxy, mirrorHorizontal)
         try {
             if (firstAnalyzedFrameLogged.compareAndSet(false, true)) {
                 Log.i("FFacio", "Camera analysis frame received")
@@ -1203,7 +1185,7 @@ private fun analyzeProxy(
     }
 }
 
-private fun imageProxyToRgbaMat(proxy: ImageProxy): Mat {
+private fun imageProxyToRgbaMat(proxy: ImageProxy, mirrorHorizontal: Boolean): Mat {
     if (proxy.format != PixelFormat.RGBA_8888) {
         error("Unexpected image format: ${proxy.format}")
     }
@@ -1229,19 +1211,29 @@ private fun imageProxyToRgbaMat(proxy: ImageProxy): Mat {
         }
     }
     val raw = Mat(proxy.height, proxy.width, CvType.CV_8UC4)
-    raw.put(0, 0, packed)
     val rotated = Mat()
-    when (proxy.imageInfo.rotationDegrees) {
-        90 -> Core.rotate(raw, rotated, Core.ROTATE_90_CLOCKWISE)
-        180 -> Core.rotate(raw, rotated, Core.ROTATE_180)
-        270 -> Core.rotate(raw, rotated, Core.ROTATE_90_COUNTERCLOCKWISE)
-        else -> raw.copyTo(rotated)
+    val output = Mat()
+    try {
+        raw.put(0, 0, packed)
+        when (proxy.imageInfo.rotationDegrees) {
+            90 -> Core.rotate(raw, rotated, Core.ROTATE_90_CLOCKWISE)
+            180 -> Core.rotate(raw, rotated, Core.ROTATE_180)
+            270 -> Core.rotate(raw, rotated, Core.ROTATE_90_COUNTERCLOCKWISE)
+            else -> raw.copyTo(rotated)
+        }
+        if (mirrorHorizontal) {
+            Core.flip(rotated, output, 1)
+        } else {
+            rotated.copyTo(output)
+        }
+        return output
+    } catch (error: Throwable) {
+        output.release()
+        throw error
+    } finally {
+        rotated.release()
+        raw.release()
     }
-    raw.release()
-    val mirrored = Mat()
-    Core.flip(rotated, mirrored, 1)
-    rotated.release()
-    return mirrored
 }
 
 private class MobileFaceEngine(detectorModel: File, recognizerModel: File) {
