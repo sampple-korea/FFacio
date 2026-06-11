@@ -33,9 +33,9 @@ def classify_antispoof_logits(logits: np.ndarray, threshold: float) -> AntiSpoof
     probs = softmax(logits)
     if probs.size < 3:
         return AntiSpoofResult(0.0, 0.0, 0.0, "invalid_output")
-    # MiniVision's upstream test.py treats class index 1 as the real/live class.
-    printed = float(probs[0])
-    live = float(probs[1])
+    # The bundled MiniFASNet-V2 ONNX model returns [live, print-attack, replay-attack].
+    live = float(probs[0])
+    printed = float(probs[1])
     replay = float(probs[2])
     if live >= threshold and live >= printed and live >= replay:
         state = "live"

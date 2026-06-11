@@ -7,8 +7,8 @@ import org.junit.Test
 
 class PassiveLivenessTest {
     @Test
-    fun classIndexOneIsLiveFace() {
-        val result = classifyPassiveLiveness(floatArrayOf(0.1f, 4.0f, -0.2f), threshold = 0.55f)
+    fun classIndexZeroIsLiveFace() {
+        val result = classifyPassiveLiveness(floatArrayOf(4.0f, 0.1f, -0.2f), threshold = 0.55f)
 
         assertEquals("live", result.state)
         assertTrue(result.isLive)
@@ -16,8 +16,8 @@ class PassiveLivenessTest {
     }
 
     @Test
-    fun classIndexZeroIsPrintAttack() {
-        val result = classifyPassiveLiveness(floatArrayOf(3.0f, 0.1f, 0.0f), threshold = 0.55f)
+    fun classIndexOneIsPrintAttack() {
+        val result = classifyPassiveLiveness(floatArrayOf(0.1f, 3.0f, 0.0f), threshold = 0.55f)
 
         assertEquals("print_attack", result.state)
         assertFalse(result.isLive)

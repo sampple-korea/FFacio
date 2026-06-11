@@ -1532,8 +1532,9 @@ internal data class PassiveLiveness(val liveScore: Float, val state: String) {
 internal fun classifyPassiveLiveness(values: FloatArray, threshold: Float = ANTISPOOF_THRESHOLD): PassiveLiveness {
     if (values.size < 3) return PassiveLiveness(0.0f, "invalid_output")
     val maxLogit = max(values[0], max(values[1], values[2]))
-    val printExp = exp((values[0] - maxLogit).toDouble())
-    val liveExp = exp((values[1] - maxLogit).toDouble())
+    // The bundled MiniFASNet-V2 ONNX model returns [live, print-attack, replay-attack].
+    val liveExp = exp((values[0] - maxLogit).toDouble())
+    val printExp = exp((values[1] - maxLogit).toDouble())
     val replayExp = exp((values[2] - maxLogit).toDouble())
     val sum = max(1e-8, liveExp + printExp + replayExp)
     val live = (liveExp / sum).toFloat()
