@@ -21,6 +21,7 @@ The build script:
 - runs an OpenCV model smoke test
 - builds `dist/FFacio` with PyInstaller
 - writes a release manifest with size, SHA-256, architecture, and git commit
+- verifies the tarball, packaged executable, bundled model hashes, and a packaged offscreen OpenCV/UI smoke test
 
 ## GitHub Actions
 
@@ -30,6 +31,16 @@ The workflow `.github/workflows/linux-release.yml` builds:
 - ARM64 on `ubuntu-24.04-arm`
 
 Run it manually from GitHub Actions or by pushing a version tag. Download the workflow artifacts, then attach the tarballs and manifests to the GitHub Release.
+
+## Verification
+
+After a Linux build, run:
+
+```bash
+bash scripts/verify_linux_static.sh
+```
+
+This checks the release manifest, tarball SHA-256, executable presence, bundled model manifest IDs, model sizes, model SHA-256 hashes, and a packaged offscreen smoke test.
 
 ## Caveats
 

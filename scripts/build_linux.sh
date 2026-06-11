@@ -51,3 +51,5 @@ manifest = {
 Path(f"release/linux-${ARCH}-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 print(json.dumps(manifest, indent=2))
 PY
+
+bash scripts/verify_linux_static.sh "release/${TAR_NAME}" "release/linux-${ARCH}-manifest.json"
