@@ -44,14 +44,15 @@
 일반 RGB 웹캠만으로 Face ID 수준의 위조 방지를 보장할 수는 없다. NIST FATE PAD도 얼굴 presentation attack detection을 별도 평가 영역으로 다룬다. 그래서 MVP에서는 다음을 넣었다.
 
 - 얼굴 품질 게이트: 단일 얼굴, 크기, 중앙 정렬, 밝기, 흐림, 검출 신뢰도
+- passive anti-spoofing: MiniFASNet-V2 ONNX 실제 얼굴 점수를 등록/인증 임베딩 전 fail-closed 게이트로 사용
 - active liveness: 인증 전에 중앙/좌/우 랜덤 응시 챌린지와 짧은 포즈 유지 확인
 - 안정화: 단일 프레임 승인 금지, 최근 프레임 다수결
 - unknown/ambiguous 거부
 - 문 열림 쿨다운
 
-다음 단계로 넣을 것:
+다음 단계로 강화할 것:
 
-- MiniFASNet/Silent-Face-Anti-Spoofing ONNX passive score
+- MiniFASNet 임계값/카메라별 캘리브레이션과 실기기 photo/replay 테스트
 - MediaPipe Face Landmarker 기반 blink/head pose/표정 challenge
 - PIN/카드 2차 인증
 - IR/depth 카메라

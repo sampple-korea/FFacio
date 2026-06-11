@@ -89,7 +89,7 @@ GitHub Actions workflow `.github/workflows/linux-release.yml` builds x64 and ARM
 - 실시간 얼굴 인증
 - 얼굴 등록 샘플 다중 수집
 - 얼굴 품질 게이트: 단일 얼굴, 검출 신뢰도, 크기, 중앙 정렬, 밝기, 흐림
-- 사진/정지 화면 방어용 active liveness 챌린지: 랜덤 방향 응시와 짧은 포즈 유지 요구
+- 사진/화면 공격 방어용 passive MiniFASNet anti-spoofing + active liveness 챌린지: 실제 얼굴 점수, 랜덤 방향 응시, 짧은 포즈 유지 요구
 - 중복 등록 방지
 - Unknown/Ambiguous 거부
 - 최근 프레임 다수결 기반 승인
@@ -110,7 +110,7 @@ GitHub Actions workflow `.github/workflows/linux-release.yml` builds x64 and ARM
 
 일반 RGB 웹캠만 쓰는 얼굴인식은 사진, 휴대폰 화면, 영상 재생 공격에 취약합니다. 실제 문 개방 전에는 최소한 PIN/카드/관리자 승인 또는 라이브니스 모델을 추가하고, 실패 시 fail-closed 정책을 유지해야 합니다.
 
-현재 앱은 정지 사진 공격을 줄이기 위해 중앙/좌/우 랜덤 응시 챌린지와 짧은 포즈 유지 확인을 먼저 통과해야 인증하도록 했습니다. 휴대폰 영상 재생 같은 고급 공격까지 막으려면 MiniFASNet 같은 passive anti-spoofing 모델, IR/depth 카메라, 또는 PIN/카드 2차 인증을 붙이는 것이 다음 단계입니다.
+현재 앱은 정지 사진/화면 공격을 줄이기 위해 MiniFASNet passive anti-spoofing 모델과 중앙/좌/우 랜덤 응시 챌린지, 짧은 포즈 유지 확인을 모두 통과해야 인증하도록 했습니다. 다만 일반 RGB 카메라 기반 PAD는 IR/depth 기반 Face ID와 동급이 아니므로, 고위험 실제 문 제어에는 IR/depth 카메라 또는 PIN/카드 2차 인증을 함께 쓰는 것이 안전합니다.
 
 HTTP 릴레이를 실제 문에 연결할 때는 공유 Wi-Fi에 평문 Bearer 토큰을 노출하지 않는 구성이 필요합니다. 가능하면 localhost 브리지, 유선/격리 네트워크, HTTPS 지원 컨트롤러, 또는 nonce/HMAC 검증이 있는 릴레이를 사용하세요.
 
