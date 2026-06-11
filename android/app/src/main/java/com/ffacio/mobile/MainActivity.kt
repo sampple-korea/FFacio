@@ -292,6 +292,7 @@ private fun FFacioApp(
                 }
                 AdminAction.DeleteUsers -> {
                     storageBusy = true
+                    confirmDelete = false
                     status = "로컬 템플릿을 삭제하는 중입니다"
                     detail = "암호화된 저장소를 업데이트하고 있습니다"
                     appScope.launch {
@@ -848,16 +849,17 @@ private fun FFacioApp(
     }
     if (confirmDelete) {
         AlertDialog(
-            onDismissRequest = { confirmDelete = false },
+            onDismissRequest = { if (!storageBusy) confirmDelete = false },
             title = { Text("등록 사용자를 삭제할까요?") },
             text = { Text("이 기기에 저장된 얼굴 템플릿이 삭제됩니다. 이 작업은 되돌릴 수 없습니다.") },
             confirmButton = {
-                TextButton(onClick = {
-                    requestAdmin(AdminAction.DeleteUsers)
-                }) { Text("삭제") }
+                TextButton(
+                    enabled = !storageBusy,
+                    onClick = { requestAdmin(AdminAction.DeleteUsers) }
+                ) { Text("삭제") }
             },
             dismissButton = {
-                TextButton(onClick = { confirmDelete = false }) { Text("취소") }
+                TextButton(enabled = !storageBusy, onClick = { confirmDelete = false }) { Text("취소") }
             }
         )
     }
@@ -1062,11 +1064,13 @@ private fun ControlPanel(
                         if (canResetStore) {
                             Button(
                                 onClick = onUnlockStore,
+                                enabled = canMutate,
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF0071E3))
                             ) { Text("로컬 템플릿 다시 열기") }
                             Button(
                                 onClick = onResetStore,
+                                enabled = canMutate,
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFFFF3B30))
                             ) { Text("로컬 템플릿 초기화") }
@@ -1074,6 +1078,7 @@ private fun ControlPanel(
                         if (canUnlockDoor) {
                             Button(
                                 onClick = onUnlockDoor,
+                                enabled = canMutate,
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF0071E3))
                             ) { Text("릴레이 토큰 다시 열기") }
