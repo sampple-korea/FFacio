@@ -72,7 +72,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify_android_emu
 
 For disposable sideload builds only, `scripts\build_android.ps1 -AllowGeneratedSigningKey` can generate `release\ffacio-local-release.jks`. Normal release builds require the `FFACIO_ANDROID_KEYSTORE*` environment variables so signing provenance stays explicit.
 
-결과물은 `release\FFacio-Android-release.apk`와 `release\FFacio-Android-debug.apk`입니다. release APK는 로컬 sideload 테스트용 키로 서명되며, Play/production 배포에는 사용자 소유 keystore를 지정해야 합니다.
+결과물은 `release\FFacio-Android-release.apk`와 `release\FFacio-Android-debug.apk`입니다. 일반 release APK는 지정한 외부 Android keystore로 서명됩니다. `-AllowGeneratedSigningKey`로 만든 로컬 sideload 키는 일회성 테스트용이며, Play/production 배포에는 사용자 소유 keystore를 지정해야 합니다.
 
 ## Linux x64/ARM64
 
