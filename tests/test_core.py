@@ -152,6 +152,10 @@ class CoreTests(unittest.TestCase):
         low_confidence_live = classify_antispoof_logits(np.array([0.3, 0.2, 0.1], dtype=np.float32), threshold=0.70)
         self.assertFalse(low_confidence_live.is_live)
 
+        probability_live = classify_antispoof_logits(np.array([0.70, 0.20, 0.10], dtype=np.float32), threshold=0.55)
+        self.assertEqual(probability_live.state, "live")
+        self.assertGreater(probability_live.live_score, 0.69)
+
     def test_model_manifest_verification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

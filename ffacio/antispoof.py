@@ -29,8 +29,18 @@ def softmax(values: np.ndarray) -> np.ndarray:
     return exp / max(float(np.sum(exp)), 1e-8)
 
 
+def probabilities(values: np.ndarray) -> np.ndarray:
+    flattened = values.astype(np.float32).reshape(-1)
+    if flattened.size >= 3:
+        first_three = flattened[:3]
+        total = float(np.sum(first_three))
+        if np.all(first_three >= 0.0) and np.all(first_three <= 1.0) and 0.98 <= total <= 1.02:
+            return first_three / max(total, 1e-8)
+    return softmax(flattened)
+
+
 def classify_antispoof_logits(logits: np.ndarray, threshold: float) -> AntiSpoofResult:
-    probs = softmax(logits)
+    probs = probabilities(logits)
     if probs.size < 3:
         return AntiSpoofResult(0.0, 0.0, 0.0, "invalid_output")
     # The bundled MiniFASNet-V2 ONNX model returns [live, print-attack, replay-attack].

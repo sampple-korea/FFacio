@@ -135,6 +135,7 @@ private const val PREFS = "ffacio_store"
 private const val USERS_KEY = "users"
 private const val DOOR_URL_KEY = "door_url"
 private const val DOOR_TOKEN_KEY = "door_token"
+private const val PASSIVE_LIVENESS_ENABLED_KEY = "passive_liveness_enabled"
 private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key_v3"
 private const val LEGACY_KEYSTORE_ALIAS = "ffacio_mobile_store_key_v2"
 private const val OLDER_KEYSTORE_ALIAS = "ffacio_mobile_store_key"
@@ -145,6 +146,9 @@ private const val STORE_PREFLIGHT_KEY = "__store_preflight"
 private const val MATCH_THRESHOLD = 0.42
 private const val MATCH_MARGIN = 0.04
 private const val ENROLL_SAMPLES = 5
+private const val ENROLL_REPEAT_THRESHOLD = 0.985
+private const val ENROLL_DUPLICATE_THRESHOLD = MATCH_THRESHOLD
+private const val ENROLL_MIN_DISTINCT_POSES = 2
 private const val ANALYSIS_INTERVAL_MS = 180L
 private const val ANTISPOOF_THRESHOLD = 0.55f
 
@@ -316,12 +320,14 @@ private fun FFacioApp(
     var doorToken by remember { mutableStateOf("") }
     var doorConfigError by remember { mutableStateOf<Throwable?>(null) }
     var doorArmed by remember { mutableStateOf(false) }
+    var passiveLivenessEnabled by remember { mutableStateOf(prefs.getBoolean(PASSIVE_LIVENESS_ENABLED_KEY, true)) }
     var cameraAvailable by remember { mutableStateOf(true) }
     var noCameraHardware by remember { mutableStateOf(false) }
     var cameraRetryNonce by remember { mutableIntStateOf(0) }
     var confirmDelete by remember { mutableStateOf(false) }
     var pendingAdminAction by remember { mutableStateOf<AdminAction?>(null) }
     val enrollSamples = remember { mutableStateListOf<FloatArray>() }
+    val enrollPoses = remember { mutableStateListOf<Int>() }
     val liveness = remember { LivenessChallenge() }
     var liveCandidate by remember { mutableIntStateOf(-1) }
     var stableUser by remember { mutableIntStateOf(-1) }
@@ -358,6 +364,7 @@ private fun FFacioApp(
                             mode = AppMode.Enroll
                             enrollmentName = name.trim()
                             enrollSamples.clear()
+                            enrollPoses.clear()
                             liveCandidate = -1
                             stableUser = -1
                             stableCount = 0
@@ -417,6 +424,7 @@ private fun FFacioApp(
                             mode = AppMode.Auth
                             enrollmentName = ""
                             enrollSamples.clear()
+                            enrollPoses.clear()
                             liveCandidate = -1
                             stableUser = -1
                             stableCount = 0
@@ -648,6 +656,7 @@ private fun FFacioApp(
                 mode = AppMode.Auth
                 enrollmentName = ""
                 enrollSamples.clear()
+                enrollPoses.clear()
                 resetTransient()
                 status = "로컬 생체 저장소를 사용할 수 없습니다"
                 detail = "암호화된 얼굴 템플릿 저장에 실패해 인증을 차단했습니다"
@@ -741,18 +750,38 @@ private fun FFacioApp(
             return
         }
         if (mode == AppMode.Enroll) {
+            val sampleDecision = enrollmentSampleDecision(obs.embedding, obs.pose, enrollSamples, enrollPoses)
+            if (!sampleDecision.accepted) {
+                status = sampleDecision.status
+                detail = sampleDecision.detail
+                return
+            }
             enrollSamples.add(obs.embedding)
+            enrollPoses.add(obs.pose)
             status = "샘플 수집 중"
             detail = "${enrollSamples.size}/$ENROLL_SAMPLES · 실제 얼굴 확인 완료 · ${poseLabel(obs.pose)}"
             if (enrollSamples.size >= ENROLL_SAMPLES) {
                 val cleanName = enrollmentName.ifBlank { name.trim() }
                 if (cleanName.isNotEmpty()) {
-                    val nextUsers = users.toList() + UserTemplate(cleanName, average(enrollSamples))
+                    val averaged = average(enrollSamples)
+                    val duplicate = duplicateUserForEnrollment(averaged, users)
+                    if (duplicate != null) {
+                        mode = AppMode.Auth
+                        enrollmentName = ""
+                        enrollSamples.clear()
+                        enrollPoses.clear()
+                        resetTransient()
+                        status = "이미 등록된 얼굴입니다"
+                        detail = "${duplicate.name} 사용자와 너무 비슷합니다"
+                        return
+                    }
+                    val nextUsers = users.toList() + UserTemplate(cleanName, averaged)
                     persistUsersAsync(nextUsers) {
                         users.replaceWith(nextUsers)
                         mode = AppMode.Auth
                         enrollmentName = ""
                         enrollSamples.clear()
+                        enrollPoses.clear()
                         resetTransient()
                         status = "얼굴 등록이 완료되었습니다"
                         detail = "$cleanName · 등록 사용자 ${users.size}명"
@@ -841,6 +870,7 @@ private fun FFacioApp(
                 processing = processing,
                 firstAnalyzedFrameLogged = firstAnalyzedFrameLogged,
                 lastAnalysisAt = lastAnalysisAt,
+                passiveLivenessEnabled = passiveLivenessEnabled,
                 active = active,
                 onObservation = ::onObservation,
                 onCameraUnavailable = {
@@ -873,6 +903,7 @@ private fun FFacioApp(
                 doorUrl = doorUrl,
                 doorToken = doorToken,
                 doorArmed = doorArmed,
+                passiveLivenessEnabled = passiveLivenessEnabled,
                 userCount = users.size,
                 enrollCount = enrollSamples.size,
                 canResetStore = storeError != null,
@@ -902,6 +933,14 @@ private fun FFacioApp(
                         disableDoorForSession()
                     }
                 },
+                onPassiveLivenessEnabled = {
+                    passiveLivenessEnabled = it
+                    prefs.edit().putBoolean(PASSIVE_LIVENESS_ENABLED_KEY, it).apply()
+                    doorArmed = false
+                    resetTransient()
+                    status = if (it) "실제 얼굴 체크 켜짐" else "실제 얼굴 체크 꺼짐"
+                    detail = if (it) "사진/화면 공격 차단 모델을 다시 사용합니다" else "디버그 모드입니다. 사진/화면 공격 차단 모델을 우회합니다"
+                },
                 onEnroll = enroll@{
                     blockedReason()?.let {
                         status = it
@@ -924,6 +963,7 @@ private fun FFacioApp(
                     mode = AppMode.Auth
                     enrollmentName = ""
                     enrollSamples.clear()
+                    enrollPoses.clear()
                     resetTransient()
                     status = if (users.isEmpty()) "먼저 얼굴을 등록하세요" else "인증 모드"
                     detail = if (users.isEmpty()) "등록 사용자 0명" else "카메라를 바라봐 주세요"
@@ -997,6 +1037,7 @@ private fun CameraStage(
     processing: AtomicBoolean,
     firstAnalyzedFrameLogged: AtomicBoolean,
     lastAnalysisAt: AtomicLong,
+    passiveLivenessEnabled: Boolean,
     active: AtomicBoolean,
     onObservation: (Observation) -> Unit,
     onCameraUnavailable: () -> Unit,
@@ -1034,7 +1075,7 @@ private fun CameraStage(
                             .build()
                             .also {
                                 it.setAnalyzer(analyzerExecutor) { proxy ->
-                                    analyzeProxy(proxy, engineProvider, processing, firstAnalyzedFrameLogged, lastAnalysisAt, active, context, mirrorFrames.get(), onObservation)
+                                    analyzeProxy(proxy, engineProvider, processing, firstAnalyzedFrameLogged, lastAnalysisAt, active, context, mirrorFrames.get(), passiveLivenessEnabled, onObservation)
                                 }
                             }
                     } else {
@@ -1118,6 +1159,7 @@ private fun ControlPanel(
     doorUrl: String,
     doorToken: String,
     doorArmed: Boolean,
+    passiveLivenessEnabled: Boolean,
     userCount: Int,
     enrollCount: Int,
     canResetStore: Boolean,
@@ -1128,6 +1170,7 @@ private fun ControlPanel(
     onDoorUrl: (String) -> Unit,
     onDoorToken: (String) -> Unit,
     onDoorArmed: (Boolean) -> Unit,
+    onPassiveLivenessEnabled: (Boolean) -> Unit,
     onEnroll: () -> Unit,
     onAuth: () -> Unit,
     onDelete: () -> Unit,
@@ -1237,13 +1280,20 @@ private fun ControlPanel(
                 Text("등록 사용자 삭제")
             }
             TextButton(onClick = { advancedExpanded = !advancedExpanded }, modifier = Modifier.fillMaxWidth()) {
-                Text(if (advancedExpanded || doorArmed) "릴레이 설정 접기" else "릴레이 설정")
+                Text(if (advancedExpanded || doorArmed) "고급 설정 접기" else "고급 설정")
             }
             if (advancedExpanded || doorArmed) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Switch(checked = doorArmed, onCheckedChange = onDoorArmed, enabled = canMutate)
-                Text("인증 성공 시 HTTPS 릴레이 열기", color = ComposeColor(0xFF1D1D1F))
-            }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Switch(checked = passiveLivenessEnabled, onCheckedChange = onPassiveLivenessEnabled, enabled = canMutate)
+                    Text("실제 얼굴 체크", color = ComposeColor(0xFF1D1D1F))
+                }
+                if (!passiveLivenessEnabled) {
+                    Text("디버그 모드: 사진/화면 공격 차단 모델을 우회합니다", color = ComposeColor(0xFFFF3B30), fontSize = 13.sp)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Switch(checked = doorArmed, onCheckedChange = onDoorArmed, enabled = canMutate)
+                    Text("인증 성공 시 HTTPS 릴레이 열기", color = ComposeColor(0xFF1D1D1F))
+                }
             if (doorArmed && doorUrl.trim().isEmpty()) {
                 Text("릴레이 URL을 입력해야 문 열림이 활성화됩니다", color = ComposeColor(0xFFFF3B30), fontSize = 13.sp)
             }
@@ -1299,6 +1349,7 @@ private fun analyzeProxy(
     active: AtomicBoolean,
     context: Context,
     mirrorHorizontal: Boolean,
+    passiveLivenessEnabled: Boolean,
     onObservation: (Observation) -> Unit
 ) {
     val now = System.currentTimeMillis()
@@ -1323,7 +1374,7 @@ private fun analyzeProxy(
             if (firstAnalyzedFrameLogged.compareAndSet(false, true)) {
                 Log.i("FFacio", "Camera analysis frame received")
             }
-            val obs = engine.observe(rgba)
+            val obs = engine.observe(rgba, passiveLivenessEnabled)
             ContextCompat.getMainExecutor(context).execute {
                 if (active.get()) onObservation(obs)
             }
@@ -1404,7 +1455,7 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
     private val aligned = Mat()
     private val resizedAntiSpoof = Mat()
 
-    fun observe(rgba: Mat): Observation {
+    fun observe(rgba: Mat, passiveLivenessEnabled: Boolean): Observation {
         try {
             Imgproc.cvtColor(rgba, bgr, Imgproc.COLOR_RGBA2BGR)
             if (currentSize.width != bgr.cols().toDouble() || currentSize.height != bgr.rows().toDouble()) {
@@ -1423,9 +1474,13 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
             val row = FloatArray(face.total().toInt())
             face.get(0, 0, row)
             if ((row.getOrNull(2) ?: 0.0f) < bgr.cols().toFloat() * 0.16f) return Observation.fail("조금 더 가까이 와 주세요")
-            val passiveLiveness = predictPassiveLiveness(bgr, row)
+            val passiveLiveness = if (passiveLivenessEnabled) {
+                predictPassiveLiveness(bgr, row)
+            } else {
+                PassiveLiveness(1.0f, "disabled")
+            }
             if (!passiveLiveness.isLive) {
-                return Observation.fail(passiveLiveness.message(), passiveLiveness.liveScore)
+                return Observation.fail(passiveLiveness.message(), passiveLiveness.liveScore, passiveLiveness.state)
             }
             runCatching {
                 recognizer.alignCrop(bgr, face, aligned)
@@ -1436,7 +1491,7 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
                 Log.e("FFacio", "SFace alignment or feature extraction failed", it)
                 return Observation.fail("얼굴 특징을 추출할 수 없습니다. 정면을 유지하고 다시 시도해 주세요")
             }
-            return Observation(true, "확인 중", matToFloatArray(feature), estimatePose(row), passiveLiveness.liveScore)
+            return Observation(true, "확인 중", matToFloatArray(feature), estimatePose(row), passiveLiveness.liveScore, passiveLiveness.state)
         } catch (error: Exception) {
             Log.e("FFacio", "Face observation failed", error)
             return Observation.fail("프레임을 분석할 수 없습니다. 카메라와 조명을 확인해 주세요")
@@ -1569,26 +1624,47 @@ private sealed class ModelLoadState {
 
 internal data class PassiveLiveness(val liveScore: Float, val state: String) {
     val isLive: Boolean
-        get() = state == "live"
+        get() = state == "live" || state == "disabled"
 
     fun message(): String = when (state) {
         "model_error", "invalid_output" -> "실제 얼굴 확인 모델을 사용할 수 없습니다. 앱을 다시 시작해 주세요"
         "invalid_crop" -> "얼굴을 화면 안에 맞춰 주세요"
+        "disabled" -> "실제 얼굴 체크가 꺼져 있습니다"
         else -> "사진이나 화면으로 보이는 얼굴입니다. 실제 얼굴을 보여주세요"
     }
 }
 
-internal fun classifyPassiveLiveness(values: FloatArray, threshold: Float = ANTISPOOF_THRESHOLD): PassiveLiveness {
-    if (values.size < 3) return PassiveLiveness(0.0f, "invalid_output")
+internal fun passiveLivenessProbabilities(values: FloatArray): FloatArray {
+    if (values.size < 3) return FloatArray(0)
+    val live = values[0]
+    val printed = values[1]
+    val replay = values[2]
+    val probabilitySum = live + printed + replay
+    if (
+        live >= 0.0f && live <= 1.0f &&
+        printed >= 0.0f && printed <= 1.0f &&
+        replay >= 0.0f && replay <= 1.0f &&
+        probabilitySum >= 0.98f && probabilitySum <= 1.02f
+    ) {
+        val safeSum = max(1.0e-8f, probabilitySum)
+        return floatArrayOf(live / safeSum, printed / safeSum, replay / safeSum)
+    }
     val maxLogit = max(values[0], max(values[1], values[2]))
-    // The bundled MiniFASNet-V2 ONNX model returns [live, print-attack, replay-attack].
     val liveExp = exp((values[0] - maxLogit).toDouble())
     val printExp = exp((values[1] - maxLogit).toDouble())
     val replayExp = exp((values[2] - maxLogit).toDouble())
     val sum = max(1e-8, liveExp + printExp + replayExp)
-    val live = (liveExp / sum).toFloat()
-    val printed = (printExp / sum).toFloat()
-    val replay = (replayExp / sum).toFloat()
+    return floatArrayOf((liveExp / sum).toFloat(), (printExp / sum).toFloat(), (replayExp / sum).toFloat())
+}
+
+internal fun classifyPassiveLiveness(values: FloatArray, threshold: Float = ANTISPOOF_THRESHOLD): PassiveLiveness {
+    if (values.size < 3) return PassiveLiveness(0.0f, "invalid_output")
+    // The bundled MiniFASNet-V2 ONNX model returns [live, print-attack, replay-attack].
+    val probs = passiveLivenessProbabilities(values)
+    if (probs.size < 3) return PassiveLiveness(0.0f, "invalid_output")
+    val live = probs[0]
+    val printed = probs[1]
+    val replay = probs[2]
     val state = when {
         live >= threshold && live >= printed && live >= replay -> "live"
         replay >= printed -> "replay_attack"
@@ -1601,14 +1677,17 @@ private data class Observation(
     val message: String,
     val embedding: FloatArray,
     val pose: Int,
-    val liveScore: Float = 0.0f
+    val liveScore: Float = 0.0f,
+    val liveState: String = "unknown"
 ) {
     companion object {
-        fun fail(message: String, liveScore: Float = 0.0f) = Observation(false, message, FloatArray(0), 0, liveScore)
+        fun fail(message: String, liveScore: Float = 0.0f, liveState: String = "unknown") =
+            Observation(false, message, FloatArray(0), 0, liveScore, liveState)
     }
 }
 private data class UserTemplate(val name: String, val embedding: FloatArray)
 private data class Match(val index: Int, val score: Double, val secondScore: Double)
+internal data class EnrollmentSampleDecision(val accepted: Boolean, val status: String, val detail: String)
 private data class StoreLoadResult(val users: List<UserTemplate>, val error: Throwable?)
 
 private fun MutableList<UserTemplate>.replaceWith(items: List<UserTemplate>) {
@@ -1747,6 +1826,32 @@ private fun match(embedding: FloatArray, users: List<UserTemplate>): Match {
         }
     }
     return Match(bestIndex, best, second)
+}
+
+internal fun enrollmentSampleDecision(
+    embedding: FloatArray,
+    pose: Int,
+    samples: List<FloatArray>,
+    poses: List<Int>
+): EnrollmentSampleDecision {
+    if (samples.isNotEmpty() && samples.last().size != embedding.size) {
+        return EnrollmentSampleDecision(false, "얼굴 특징을 다시 추출해 주세요", "등록 샘플 형식이 일치하지 않습니다")
+    }
+    if (samples.isNotEmpty() && cosine(embedding, samples.last()) > ENROLL_REPEAT_THRESHOLD) {
+        return EnrollmentSampleDecision(false, "고개를 아주 조금 움직여 주세요", "${samples.size}/$ENROLL_SAMPLES · 같은 각도의 샘플이 반복되고 있습니다")
+    }
+    if (samples.size >= ENROLL_SAMPLES - 1) {
+        val distinctPoses = (poses + pose).toSet().size
+        if (distinctPoses < ENROLL_MIN_DISTINCT_POSES) {
+            return EnrollmentSampleDecision(false, "고개를 살짝 돌려 주세요", "${samples.size}/$ENROLL_SAMPLES · 정면과 좌/우 중 최소 두 각도가 필요합니다")
+        }
+    }
+    return EnrollmentSampleDecision(true, "", "")
+}
+
+private fun duplicateUserForEnrollment(embedding: FloatArray, users: List<UserTemplate>): UserTemplate? {
+    val duplicate = match(embedding, users)
+    return if (duplicate.index >= 0 && duplicate.score >= ENROLL_DUPLICATE_THRESHOLD) users[duplicate.index] else null
 }
 
 private fun average(samples: List<FloatArray>): FloatArray {

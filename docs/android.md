@@ -40,4 +40,6 @@ Output:
 - Android uses OpenCV YuNet/SFace plus MiniFASNet-V2. The larger desktop InsightFace `buffalo_l` bundle is not packaged into the APK.
 - `scripts\build_android.ps1` runs unit tests, release lint, debug/release assembly, static APK verification, and emulator launch/model-readiness smoke. The emulator check is still not a substitute for real-device enrollment/auth/liveness testing.
 - RGB-camera liveness now combines passive MiniFASNet anti-spoofing with the active pose challenge. It helps against many static photo and simple screen attacks, but it is not equivalent to hardware depth/IR Face ID.
+- Advanced settings include a debug-only `실제 얼굴 체크` switch. Turning it off bypasses the passive photo/screen PAD model for device troubleshooting; keep it on for any real access-control use.
+- Enrollment rejects near-duplicate samples, requires pose diversity before the final template is saved, and blocks faces that already match an enrolled user.
 - Real device camera/liveness testing is still required on actual phones.
