@@ -1,6 +1,7 @@
 param(
     [string]$AndroidDir = "$PSScriptRoot\..\android",
-    [string]$ReleaseDir = "$PSScriptRoot\..\release"
+    [string]$ReleaseDir = "$PSScriptRoot\..\release",
+    [switch]$SkipEmulatorVerification
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,9 +73,26 @@ $debugHash = (Get-FileHash $debugOut -Algorithm SHA256).Hash.ToLowerInvariant()
 $releaseHash = (Get-FileHash $releaseOut -Algorithm SHA256).Hash.ToLowerInvariant()
 $gitCommit = (& git -C (Join-Path $PSScriptRoot "..") rev-parse HEAD 2>$null)
 if ($LASTEXITCODE -ne 0) { $gitCommit = $null }
+$gitStatus = (& git -C (Join-Path $PSScriptRoot "..") status --porcelain 2>$null)
+if ($LASTEXITCODE -ne 0) { $gitStatus = @() }
+$gradleText = Get-Content -Raw (Join-Path $AndroidDir "app\build.gradle")
+$versionName = if ($gradleText -match 'versionName\s+"([^"]+)"') { $Matches[1] } else { "unknown" }
+$versionCode = if ($gradleText -match 'versionCode\s+([0-9]+)') { [int]$Matches[1] } else { 0 }
+$apksigner = Get-ChildItem (Join-Path $env:ANDROID_HOME "build-tools") -Recurse -Filter apksigner.bat -ErrorAction SilentlyContinue |
+    Sort-Object FullName -Descending |
+    Select-Object -First 1
+if (-not $apksigner) { throw "apksigner.bat is required to build a verifiable Android release." }
+$certOutput = (& $apksigner.FullName verify --print-certs $releaseOut) -join "`n"
+if ($LASTEXITCODE -ne 0) { throw "apksigner verification failed with exit code $LASTEXITCODE." }
+$signerCertSha256 = $null
+if ($certOutput -match "SHA-256 digest:\s*([0-9A-Fa-f:]+)") {
+    $signerCertSha256 = $Matches[1].Replace(":", "").ToLowerInvariant()
+}
+if (-not $signerCertSha256) { throw "Could not read release signer certificate digest." }
 $manifest = [ordered]@{
     name = "FFacio Android"
-    version = "0.1.1"
+    version = $versionName
+    version_code = $versionCode
     artifact = "FFacio-Android-release.apk"
     size = $releaseFile.Length
     sha256 = $releaseHash
@@ -83,13 +101,35 @@ $manifest = [ordered]@{
     debug_sha256 = $debugHash
     generated_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     git_commit = $gitCommit
+    git_dirty = @($gitStatus).Count -gt 0
+    git_dirty_paths = @($gitStatus)
     signed = $true
+    signer_cert_sha256 = $signerCertSha256
     signing = "local sideload release key; replace with your own keystore for production distribution"
     debug_signed = $true
+    static_verified = $false
+    emulator_verified = $false
+    launch_verified = $false
+    model_ready_verified = $false
+    verified_apk_sha256 = $null
+    verified_at = $null
     notes = "Release APK is locally signed for sideload testing, not Play production signing. OpenCV YuNet/SFace and the shared model bundle are included; no cloud subscription is used."
 }
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $ReleaseDir "android-release-manifest.json")
 & (Join-Path $PSScriptRoot "verify_android_static.ps1") -Apk $releaseOut -Manifest (Join-Path $ReleaseDir "android-release-manifest.json") -ModelManifest $modelManifest
 if ($LASTEXITCODE -ne 0) { throw "Android static verification failed with exit code $LASTEXITCODE." }
+$manifestPath = Join-Path $ReleaseDir "android-release-manifest.json"
+$verified = Get-Content -Raw $manifestPath -Encoding UTF8 | ConvertFrom-Json
+$verified.static_verified = $true
+if (-not $SkipEmulatorVerification) {
+    & (Join-Path $PSScriptRoot "verify_android_emulator.ps1") -Apk $releaseOut
+    if ($LASTEXITCODE -ne 0) { throw "Android emulator verification failed with exit code $LASTEXITCODE." }
+    $verified.emulator_verified = $true
+    $verified.launch_verified = $true
+    $verified.model_ready_verified = $true
+    $verified.verified_apk_sha256 = $releaseHash
+    $verified.verified_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+}
+$verified | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $manifestPath
 Write-Host "Android release APK ready: $releaseOut"
 Write-Host "Android debug APK ready: $debugOut"

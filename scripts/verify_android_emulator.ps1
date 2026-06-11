@@ -50,16 +50,30 @@ if ($LASTEXITCODE -ne 0) { throw "adb install failed with exit code $LASTEXITCOD
 & $adb logcat -c
 & $adb shell pm grant com.ffacio.mobile android.permission.CAMERA 2>$null
 & $adb shell am force-stop com.ffacio.mobile
-& $adb shell am start -W -n com.ffacio.mobile/.MainActivity | Out-Host
-Start-Sleep -Seconds 8
+$launch = (& $adb shell monkey -p com.ffacio.mobile -c android.intent.category.LAUNCHER 1) -join "`n"
+$launch | Out-Host
+if ($launch -notmatch "Events injected:\s*1") {
+    throw "Launcher start failed.`n$launch"
+}
 
-$appPidOut = & $adb shell pidof com.ffacio.mobile 2>$null
-$appPid = if ($appPidOut) { ($appPidOut -join "").Trim() } else { "" }
-$logs = (& $adb logcat -d -t 800 2>$null) -join "`n"
-if ($logs -match "FATAL EXCEPTION|AndroidRuntime") { throw "App crash detected in logcat.`n$logs" }
-if (-not $appPid) { throw "FFacio Android process is not running after launch." }
+$appPid = ""
+$logs = ""
+$modelsReady = $false
+for ($i = 0; $i -lt 60; $i++) {
+    Start-Sleep -Seconds 1
+    $appPidOut = & $adb shell pidof com.ffacio.mobile 2>$null
+    $appPid = if ($appPidOut) { ($appPidOut -join "").Trim() } else { "" }
+    if (-not $appPid) { throw "FFacio Android process stopped during launch verification.`n$logs" }
+    $logs = (& $adb logcat -d --pid=$appPid -t 500 2>$null) -join "`n"
+    if ($logs -match "FATAL EXCEPTION|AndroidRuntime") { throw "App crash detected in FFacio logcat.`n$logs" }
+    if ($logs -match "Offline models ready") {
+        $modelsReady = $true
+        break
+    }
+}
+if (-not $modelsReady) { throw "FFacio Android did not report bundled offline model readiness within 60 seconds.`n$logs" }
 
-Write-Host "FFacio Android emulator smoke passed with pid $appPid"
+Write-Host "FFacio Android emulator smoke passed with pid $appPid and bundled model readiness confirmed"
 if (-not $KeepRunning) {
     & $adb emu kill 2>$null | Out-Null
 }

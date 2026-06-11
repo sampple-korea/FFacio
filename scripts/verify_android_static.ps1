@@ -45,8 +45,16 @@ $apksigner = Get-ChildItem (Join-Path $sdk "build-tools") -Recurse -Filter apksi
 if (-not $apksigner) {
     throw "apksigner.bat is required for release verification. Install Android build-tools."
 }
-& $apksigner.FullName verify --print-certs $apkPath | Out-Null
+$certOutput = (& $apksigner.FullName verify --print-certs $apkPath) -join "`n"
 if ($LASTEXITCODE -ne 0) { throw "apksigner verification failed with exit code $LASTEXITCODE." }
+$certDigest = $null
+if ($certOutput -match "SHA-256 digest:\s*([0-9A-Fa-f:]+)") {
+    $certDigest = $Matches[1].Replace(":", "").ToLowerInvariant()
+}
+if (-not $certDigest) { throw "Could not read signer SHA-256 certificate digest from apksigner output." }
+if ($json.signer_cert_sha256 -and ([string]$json.signer_cert_sha256).ToLowerInvariant() -ne $certDigest) {
+    throw "Signer certificate digest $certDigest does not match manifest $($json.signer_cert_sha256)."
+}
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -66,6 +74,19 @@ try {
         if (-not $entries.ContainsKey($entry)) {
             throw "APK is missing required entry: $entry"
         }
+    }
+
+    $embeddedManifest = $entries["assets/models/models.manifest.json"]
+    $embeddedManifestStream = $embeddedManifest.Open()
+    try {
+        $embeddedManifestHash = [System.BitConverter]::ToString($sha.ComputeHash($embeddedManifestStream)).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $embeddedManifestStream.Dispose()
+    }
+    $sourceManifestHash = (Get-FileHash $modelManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($embeddedManifestHash -ne $sourceManifestHash) {
+        throw "Embedded models.manifest.json SHA-256 $embeddedManifestHash does not match source manifest $sourceManifestHash."
     }
 
     $modelManifestJson = Get-Content -Raw $modelManifestPath -Encoding UTF8 | ConvertFrom-Json

@@ -10,12 +10,14 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.PixelFormat
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import android.util.Size as AndroidSize
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -83,6 +85,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.common.util.concurrent.ListenableFuture
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import org.json.JSONArray
 import org.json.JSONObject
 import org.opencv.android.OpenCVLoader
@@ -107,6 +112,8 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -118,7 +125,10 @@ private const val USERS_KEY = "users"
 private const val DOOR_URL_KEY = "door_url"
 private const val DOOR_TOKEN_KEY = "door_token"
 private const val DOOR_ARMED_KEY = "door_armed"
-private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key"
+private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key_v2"
+private const val LEGACY_KEYSTORE_ALIAS = "ffacio_mobile_store_key"
+private const val SECURE_SUFFIX = "_enc_v2"
+private const val LEGACY_SECURE_SUFFIX = "_enc"
 private const val MATCH_THRESHOLD = 0.42
 private const val MATCH_MARGIN = 0.04
 private const val ENROLL_SAMPLES = 5
@@ -126,38 +136,58 @@ private const val ENROLL_SAMPLES = 5
 class MainActivity : ComponentActivity() {
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
     private val doorExecutor = Executors.newSingleThreadExecutor()
+    private val modelExecutor = Executors.newSingleThreadExecutor()
     private val processing = AtomicBoolean(false)
+    private val firstAnalyzedFrameLogged = AtomicBoolean(false)
+    private val active = AtomicBoolean(true)
     private lateinit var prefs: SharedPreferences
+    @Volatile
     private var engine: MobileFaceEngine? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-        val modelState = runCatching {
-            if (!OpenCVLoader.initDebug()) error("OpenCV init failed")
-            engine = MobileFaceEngine(
-                copyAsset("models/opencv/face_detection_yunet_2023mar.onnx"),
-                copyAsset("models/opencv/face_recognition_sface_2021dec.onnx")
-            )
-        }.exceptionOrNull()
+        var modelLoadState by mutableStateOf<ModelLoadState>(ModelLoadState.Loading)
 
         setContent {
             FFacioTheme {
                 FFacioApp(
-                    modelError = modelState,
+                    modelLoadState = modelLoadState,
                     prefs = prefs,
                     engineProvider = { engine },
                     analyzerExecutor = analyzerExecutor,
                     doorExecutor = doorExecutor,
-                    processing = processing
+                    processing = processing,
+                    firstAnalyzedFrameLogged = firstAnalyzedFrameLogged,
+                    active = active
                 )
+            }
+        }
+
+        modelExecutor.execute {
+            val error = runCatching {
+                if (!OpenCVLoader.initDebug()) error("OpenCV init failed")
+                engine = MobileFaceEngine(
+                    copyAsset("models/opencv/face_detection_yunet_2023mar.onnx"),
+                    copyAsset("models/opencv/face_recognition_sface_2021dec.onnx")
+                )
+            }.exceptionOrNull()
+            ContextCompat.getMainExecutor(this).execute {
+                if (error == null) {
+                    Log.i("FFacio", "Offline models ready")
+                } else {
+                    Log.e("FFacio", "Offline model initialization failed", error)
+                }
+                modelLoadState = if (error == null) ModelLoadState.Ready else ModelLoadState.Failed(error)
             }
         }
     }
 
     override fun onDestroy() {
+        active.set(false)
         analyzerExecutor.shutdownNow()
         doorExecutor.shutdownNow()
+        modelExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -187,21 +217,29 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FFacioApp(
-    modelError: Throwable?,
+    modelLoadState: ModelLoadState,
     prefs: SharedPreferences,
     engineProvider: () -> MobileFaceEngine?,
     analyzerExecutor: ExecutorService,
     doorExecutor: ExecutorService,
-    processing: AtomicBoolean
+    processing: AtomicBoolean,
+    firstAnalyzedFrameLogged: AtomicBoolean,
+    active: AtomicBoolean
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val users = remember { mutableStateListOf<UserTemplate>() }
+    val modelLoading = modelLoadState is ModelLoadState.Loading
+    val modelError = (modelLoadState as? ModelLoadState.Failed)?.error
+    var storeError by remember { mutableStateOf<Throwable?>(null) }
     var status by remember { mutableStateOf("시스템 준비 중") }
     var detail by remember { mutableStateOf("모델과 카메라를 확인하고 있습니다") }
     var mode by remember { mutableStateOf(AppMode.Auth) }
     var name by remember { mutableStateOf("") }
+    var enrollmentName by remember { mutableStateOf("") }
     var doorUrl by remember { mutableStateOf(prefs.getString(DOOR_URL_KEY, "") ?: "") }
-    var doorToken by remember { mutableStateOf(secureGetString(context, prefs, DOOR_TOKEN_KEY, "", failClosed = false)) }
+    var doorToken by remember { mutableStateOf("") }
+    var doorConfigError by remember { mutableStateOf<Throwable?>(null) }
     var doorArmed by remember { mutableStateOf(prefs.getBoolean(DOOR_ARMED_KEY, false)) }
     var cameraAvailable by remember { mutableStateOf(true) }
     var cameraRetryNonce by remember { mutableIntStateOf(0) }
@@ -231,6 +269,7 @@ private fun FFacioApp(
             when (action) {
                 AdminAction.StartEnroll -> {
                     mode = AppMode.Enroll
+                    enrollmentName = name.trim()
                     enrollSamples.clear()
                     liveCandidate = -1
                     stableUser = -1
@@ -240,25 +279,68 @@ private fun FFacioApp(
                     detail = "FFacio is collecting samples from several angles"
                 }
                 AdminAction.DeleteUsers -> {
+                    val deleted = runCatching { saveUsers(context, prefs, emptyList()) }
+                        .onFailure {
+                            storeError = it
+                            status = "Local biometric store unavailable"
+                            detail = it.message ?: "Encrypted template storage failed closed"
+                        }
+                        .isSuccess
+                    if (deleted) {
+                        storeError = null
+                        users.clear()
+                        liveCandidate = -1
+                        stableUser = -1
+                        stableCount = 0
+                        liveness.reset()
+                        confirmDelete = false
+                        status = "Registered users deleted"
+                        detail = "You can start a new user enrollment"
+                    }
+                }
+                AdminAction.ResetStore -> {
+                    prefs.edit()
+                        .remove(USERS_KEY)
+                        .remove("$USERS_KEY$SECURE_SUFFIX")
+                        .remove("$USERS_KEY$LEGACY_SECURE_SUFFIX")
+                        .apply()
                     users.clear()
-                    saveUsers(context, prefs, users)
+                    storeError = null
                     liveCandidate = -1
                     stableUser = -1
                     stableCount = 0
                     liveness.reset()
                     confirmDelete = false
-                    status = "Registered users deleted"
-                    detail = "You can start a new user enrollment"
+                    status = "로컬 템플릿 저장소 초기화 완료"
+                    detail = "기기 안의 얼굴 템플릿을 지웠습니다. 새 사용자를 등록하세요"
                 }
                 AdminAction.ArmDoor -> {
-                    doorArmed = true
-                    prefs.edit()
-                        .putString(DOOR_URL_KEY, doorUrl.trim())
-                        .putBoolean(DOOR_ARMED_KEY, doorArmed)
-                        .apply()
-                    securePutString(context, prefs, DOOR_TOKEN_KEY, doorToken.trim())
-                    status = "Relay opening enabled"
-                    detail = "Requests are sent only after recognition and liveness pass"
+                    val saved = runCatching {
+                        if (doorUrl.trim().isEmpty()) error("Relay URL is required")
+                        if (doorToken.trim().isEmpty()) error("Relay token is required")
+                        prefs.edit()
+                            .putString(DOOR_URL_KEY, doorUrl.trim())
+                            .apply()
+                        securePutString(context, prefs, DOOR_TOKEN_KEY, doorToken.trim())
+                        prefs.edit().putBoolean(DOOR_ARMED_KEY, true).apply()
+                    }.onSuccess {
+                        doorConfigError = null
+                        doorArmed = true
+                        status = "Relay opening enabled"
+                        detail = "Requests are sent only after recognition and liveness pass"
+                    }.onFailure {
+                        doorArmed = false
+                        prefs.edit().putBoolean(DOOR_ARMED_KEY, false).apply()
+                        doorConfigError = it
+                        status = "Door token storage unavailable"
+                        detail = it.message ?: "Encrypted relay token storage failed"
+                    }.isSuccess
+                    if (!saved) {
+                        liveCandidate = -1
+                        stableUser = -1
+                        stableCount = 0
+                        liveness.reset()
+                    }
                 }
             }
         } else {
@@ -267,8 +349,52 @@ private fun FFacioApp(
         }
     }
 
-    LaunchedEffect(Unit) {
-        users.replaceWith(loadUsers(context, prefs))
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                if (granted != hasCameraPermission) {
+                    hasCameraPermission = granted
+                    if (granted) {
+                        cameraAvailable = true
+                        cameraRetryNonce += 1
+                    }
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(modelLoadState) {
+        val loaded = withContext(Dispatchers.IO) { loadUsers(context, prefs) }
+        val tokenLoad = withContext(Dispatchers.IO) {
+            runCatching { secureGetString(context, prefs, DOOR_TOKEN_KEY, "", failClosed = true) }
+        }
+        tokenLoad.onSuccess {
+            doorConfigError = null
+            doorToken = it
+            if (doorArmed && it.isBlank()) {
+                doorArmed = false
+                prefs.edit().putBoolean(DOOR_ARMED_KEY, false).apply()
+            }
+        }.onFailure {
+            doorConfigError = it
+            doorArmed = false
+            prefs.edit().putBoolean(DOOR_ARMED_KEY, false).apply()
+        }
+        storeError = loaded.error
+        users.replaceWith(loaded.users)
+        if (storeError != null) {
+            status = "Local biometric store locked"
+            detail = "Stored templates could not be verified. Delete app data or re-enroll after confirming device security."
+            return@LaunchedEffect
+        }
+        if (modelLoading) {
+            status = "Loading offline models"
+            detail = "Preparing bundled face detection and recognition models on this device"
+            return@LaunchedEffect
+        }
         when {
             modelError != null -> {
                 status = "모델을 검증할 수 없습니다"
@@ -286,12 +412,16 @@ private fun FFacioApp(
         if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    fun persistDoor() {
-        prefs.edit()
-            .putString(DOOR_URL_KEY, doorUrl.trim())
-            .putBoolean(DOOR_ARMED_KEY, doorArmed)
-            .apply()
-        securePutString(context, prefs, DOOR_TOKEN_KEY, doorToken.trim())
+    fun persistDoorDisabled() {
+        runCatching {
+            prefs.edit().putBoolean(DOOR_ARMED_KEY, false).apply()
+        }.onSuccess {
+            doorConfigError = null
+        }.onFailure {
+            doorArmed = false
+            status = "Door token storage unavailable"
+            detail = it.message ?: "Encrypted relay token storage failed"
+        }
     }
 
     fun resetTransient() {
@@ -299,6 +429,19 @@ private fun FFacioApp(
         stableUser = -1
         stableCount = 0
         liveness.reset()
+    }
+
+    fun writeUsersOrBlock(nextUsers: List<UserTemplate>): Boolean {
+        return runCatching {
+            saveUsers(context, prefs, nextUsers)
+        }.onSuccess {
+            storeError = null
+        }.onFailure {
+            storeError = it
+            resetTransient()
+            status = "Local biometric store unavailable"
+            detail = it.message ?: "Encrypted template storage failed closed"
+        }.isSuccess
     }
 
     fun requestAdmin(action: AdminAction) {
@@ -322,7 +465,10 @@ private fun FFacioApp(
     }
 
     fun blockedReason(): String? = when {
+        modelLoading -> "Offline models are still loading"
         modelError != null -> "모델을 사용할 수 없습니다"
+        storeError != null -> "Local biometric store is locked"
+        doorConfigError != null && doorArmed -> "Door relay settings are locked"
         !hasCameraPermission -> "카메라 권한이 필요합니다"
         !cameraAvailable -> "카메라를 사용할 수 없습니다"
         else -> null
@@ -331,18 +477,23 @@ private fun FFacioApp(
     fun openDoor(user: UserTemplate) {
         val now = System.currentTimeMillis()
         if (!doorArmed || now - lastOpenAt < 3500L) return
-        if (doorUrl.trim().isEmpty()) {
+        val relayUrl = doorUrl.trim()
+        val relayToken = doorToken.trim()
+        if (relayUrl.isEmpty() || relayToken.isEmpty()) {
+            doorArmed = false
+            prefs.edit().putBoolean(DOOR_ARMED_KEY, false).apply()
             status = "문 제어가 설정되지 않았습니다"
-            detail = "HTTP 릴레이 URL을 입력하거나 비활성 상태로 사용하세요"
+            detail = "릴레이 URL과 토큰을 저장한 뒤 다시 활성화하세요"
             return
         }
         lastOpenAt = now
-        persistDoor()
         status = "문 제어를 요청하는 중입니다"
         detail = "릴레이 응답을 기다리고 있습니다"
+        if (doorExecutor.isShutdown) return
         doorExecutor.execute {
-            val ok = postDoor(doorUrl.trim(), doorToken.trim(), user.name)
+            val ok = postDoor(relayUrl, relayToken, user.name)
             ContextCompat.getMainExecutor(context).execute {
+                if (!active.get()) return@execute
                 status = if (ok) "문 열림 요청 완료" else "문 제어 실패"
                 detail = if (ok) "릴레이가 요청을 수락했습니다" else "URL, 토큰, 네트워크를 확인해 주세요"
             }
@@ -350,7 +501,7 @@ private fun FFacioApp(
     }
 
     fun onObservation(obs: Observation) {
-        if (modelError != null) return
+        if (modelLoading || modelError != null || storeError != null) return
         if (!obs.ok) {
             resetTransient()
             status = obs.message
@@ -362,11 +513,13 @@ private fun FFacioApp(
             status = "샘플 수집 중"
             detail = "${enrollSamples.size}/$ENROLL_SAMPLES · ${poseLabel(obs.pose)}"
             if (enrollSamples.size >= ENROLL_SAMPLES) {
-                val cleanName = name.trim()
+                val cleanName = enrollmentName.ifBlank { name.trim() }
                 if (cleanName.isNotEmpty()) {
-                    users.add(UserTemplate(cleanName, average(enrollSamples)))
-                    saveUsers(context, prefs, users)
+                    val nextUsers = users.toList() + UserTemplate(cleanName, average(enrollSamples))
+                    if (!writeUsersOrBlock(nextUsers)) return
+                    users.replaceWith(nextUsers)
                     mode = AppMode.Auth
+                    enrollmentName = ""
                     enrollSamples.clear()
                     resetTransient()
                     status = "얼굴 등록이 완료되었습니다"
@@ -445,12 +598,14 @@ private fun FFacioApp(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             CameraStage(
-                enabled = modelError == null && hasCameraPermission && cameraAvailable,
+                enabled = !modelLoading && modelError == null && storeError == null && hasCameraPermission && cameraAvailable,
                 cameraRetryNonce = cameraRetryNonce,
                 stageMessage = blockedReason() ?: "카메라 준비 중",
                 engineProvider = engineProvider,
                 analyzerExecutor = analyzerExecutor,
                 processing = processing,
+                firstAnalyzedFrameLogged = firstAnalyzedFrameLogged,
+                active = active,
                 onObservation = ::onObservation,
                 onCameraUnavailable = {
                     cameraAvailable = false
@@ -477,20 +632,24 @@ private fun FFacioApp(
                 doorArmed = doorArmed,
                 userCount = users.size,
                 enrollCount = enrollSamples.size,
-                onName = { name = it },
-                onDoorUrl = { doorUrl = it; persistDoor() },
-                onDoorToken = { doorToken = it; persistDoor() },
+                canResetStore = storeError != null,
+                onName = { if (mode != AppMode.Enroll) name = it },
+                onDoorUrl = { doorUrl = it },
+                onDoorToken = { doorToken = it },
                 onDoorArmed = {
                     if (it && doorUrl.trim().isEmpty()) {
                         doorArmed = false
-                        persistDoor()
                         status = "릴레이 URL이 필요합니다"
                         detail = "문 열림을 활성화하려면 HTTP 릴레이 URL을 먼저 입력하세요"
+                    } else if (it && doorToken.trim().isEmpty()) {
+                        doorArmed = false
+                        status = "릴레이 토큰이 필요합니다"
+                        detail = "문 열림을 활성화하려면 Bearer 토큰을 입력하세요"
                     } else if (it) {
                         requestAdmin(AdminAction.ArmDoor)
                     } else {
                         doorArmed = false
-                        persistDoor()
+                        persistDoorDisabled()
                     }
                 },
                 onEnroll = enroll@{
@@ -518,6 +677,7 @@ private fun FFacioApp(
                         return@auth
                     }
                     mode = AppMode.Auth
+                    enrollmentName = ""
                     enrollSamples.clear()
                     resetTransient()
                     status = if (users.isEmpty()) "먼저 얼굴을 등록하세요" else "인증 모드"
@@ -525,6 +685,9 @@ private fun FFacioApp(
                 },
                 onDelete = {
                     confirmDelete = true
+                },
+                onResetStore = {
+                    requestAdmin(AdminAction.ResetStore)
                 },
                 onRetry = {
                     cameraAvailable = true
@@ -573,6 +736,8 @@ private fun CameraStage(
     engineProvider: () -> MobileFaceEngine?,
     analyzerExecutor: ExecutorService,
     processing: AtomicBoolean,
+    firstAnalyzedFrameLogged: AtomicBoolean,
+    active: AtomicBoolean,
     onObservation: (Observation) -> Unit,
     onCameraUnavailable: () -> Unit
 ) {
@@ -601,7 +766,7 @@ private fun CameraStage(
                         .build()
                         .also {
                             it.setAnalyzer(analyzerExecutor) { proxy ->
-                                analyzeProxy(proxy, engineProvider, processing, context, onObservation)
+                                analyzeProxy(proxy, engineProvider, processing, firstAnalyzedFrameLogged, active, context, onObservation)
                             }
                         }
                     provider.unbindAll()
@@ -667,6 +832,7 @@ private fun ControlPanel(
     doorArmed: Boolean,
     userCount: Int,
     enrollCount: Int,
+    canResetStore: Boolean,
     onName: (String) -> Unit,
     onDoorUrl: (String) -> Unit,
     onDoorToken: (String) -> Unit,
@@ -674,6 +840,7 @@ private fun ControlPanel(
     onEnroll: () -> Unit,
     onAuth: () -> Unit,
     onDelete: () -> Unit,
+    onResetStore: () -> Unit,
     onRetry: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
@@ -721,6 +888,13 @@ private fun ControlPanel(
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                             Button(onClick = onRetry, modifier = Modifier.weight(1f)) { Text("다시 확인") }
                             Button(onClick = onOpenSettings, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF1D1D1F))) { Text("앱 설정") }
+                        }
+                        if (canResetStore) {
+                            Button(
+                                onClick = onResetStore,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFFFF3B30))
+                            ) { Text("로컬 템플릿 초기화") }
                         }
                     }
                 }
@@ -780,6 +954,8 @@ private fun analyzeProxy(
     proxy: ImageProxy,
     engineProvider: () -> MobileFaceEngine?,
     processing: AtomicBoolean,
+    firstAnalyzedFrameLogged: AtomicBoolean,
+    active: AtomicBoolean,
     context: Context,
     onObservation: (Observation) -> Unit
 ) {
@@ -787,18 +963,29 @@ private fun analyzeProxy(
         proxy.close()
         return
     }
+    if (!active.get()) {
+        proxy.close()
+        processing.set(false)
+        return
+    }
     try {
         val engine = engineProvider() ?: return
         val bitmap = imageProxyToBitmap(proxy)
         try {
+            if (firstAnalyzedFrameLogged.compareAndSet(false, true)) {
+                Log.i("FFacio", "Camera analysis frame received")
+            }
             val obs = engine.observe(bitmap)
-            ContextCompat.getMainExecutor(context).execute { onObservation(obs) }
+            ContextCompat.getMainExecutor(context).execute {
+                if (active.get()) onObservation(obs)
+            }
         } finally {
             bitmap.recycle()
         }
-    } catch (_: Exception) {
+    } catch (error: Exception) {
+        Log.e("FFacio", "Camera frame analysis failed", error)
         ContextCompat.getMainExecutor(context).execute {
-            onObservation(Observation.fail("프레임을 분석할 수 없습니다"))
+            if (active.get()) onObservation(Observation.fail("프레임 분석 오류가 발생했습니다"))
         }
     } finally {
         proxy.close()
@@ -807,17 +994,29 @@ private fun analyzeProxy(
 }
 
 private fun imageProxyToBitmap(proxy: ImageProxy): Bitmap {
+    if (proxy.format != PixelFormat.RGBA_8888) {
+        error("Unexpected image format: ${proxy.format}")
+    }
     val plane = proxy.planes.firstOrNull() ?: error("No image plane")
     if (plane.pixelStride != 4) error("Unexpected RGBA pixel stride: ${plane.pixelStride}")
-    val stridePixels = plane.rowStride / plane.pixelStride
-    val padded = Bitmap.createBitmap(stridePixels, proxy.height, Bitmap.Config.ARGB_8888)
-    plane.buffer.rewind()
-    padded.copyPixelsFromBuffer(plane.buffer)
-    val bitmap = if (stridePixels == proxy.width) {
-        padded
-    } else {
-        Bitmap.createBitmap(padded, 0, 0, proxy.width, proxy.height).also { padded.recycle() }
+    val rowStride = plane.rowStride
+    val pixelStride = plane.pixelStride
+    val buffer = plane.buffer.duplicate()
+    val pixels = IntArray(proxy.width * proxy.height)
+    for (y in 0 until proxy.height) {
+        val rowStart = y * rowStride
+        for (x in 0 until proxy.width) {
+            val offset = rowStart + x * pixelStride
+            if (offset + 3 >= buffer.limit()) error("RGBA buffer too small for ${proxy.width}x${proxy.height}")
+            val a = buffer.get(offset).toInt() and 0xFF
+            val r = buffer.get(offset + 1).toInt() and 0xFF
+            val g = buffer.get(offset + 2).toInt() and 0xFF
+            val b = buffer.get(offset + 3).toInt() and 0xFF
+            pixels[y * proxy.width + x] = Color.argb(a, r, g, b)
+        }
     }
+    val bitmap = Bitmap.createBitmap(proxy.width, proxy.height, Bitmap.Config.ARGB_8888)
+    bitmap.setPixels(pixels, 0, proxy.width, 0, 0, proxy.width, proxy.height)
     val matrix = Matrix().apply {
         postRotate(proxy.imageInfo.rotationDegrees.toFloat())
         postScale(-1f, 1f)
@@ -849,13 +1048,26 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File) {
             detector.detect(bgr, faces)
             if (faces.empty()) return Observation.fail("얼굴을 찾을 수 없습니다")
             if (faces.rows() > 1) return Observation.fail("한 명만 카메라 앞에 서 주세요")
-            face = faces.row(0)
-            val row = DoubleArray(face.total().toInt())
+            val faceRow = faces.row(0)
+            face = Mat()
+            try {
+                faceRow.convertTo(face, CvType.CV_32F)
+            } finally {
+                faceRow.release()
+            }
+            val row = FloatArray(face.total().toInt())
             face.get(0, 0, row)
-            if ((row.getOrNull(2) ?: 0.0) < bgr.cols() * 0.16) return Observation.fail("조금 더 가까이 와 주세요")
+            if ((row.getOrNull(2) ?: 0.0f) < bgr.cols().toFloat() * 0.16f) return Observation.fail("조금 더 가까이 와 주세요")
             aligned = Mat()
-            recognizer.alignCrop(bgr, face, aligned)
-            recognizer.feature(aligned, feature)
+            runCatching {
+                recognizer.alignCrop(bgr, face, aligned)
+                if (aligned.empty()) error("SFace alignCrop returned an empty aligned face")
+                recognizer.feature(aligned, feature)
+                if (feature.empty()) error("SFace feature returned an empty embedding")
+            }.getOrElse {
+                Log.e("FFacio", "SFace alignment or feature extraction failed", it)
+                return Observation.fail("얼굴 특징을 추출할 수 없습니다. 정면을 유지하고 다시 시도해 주세요")
+            }
             return Observation(true, "확인 중", matToFloatArray(feature), estimatePose(row))
         } finally {
             aligned?.release()
@@ -867,14 +1079,14 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File) {
         }
     }
 
-    private fun estimatePose(face: DoubleArray): Int {
+    private fun estimatePose(face: FloatArray): Int {
         if (face.size < 15) return 0
-        val mid = (face[4] + face[6]) / 2.0
-        val eyeDistance = max(1.0, abs(face[6] - face[4]))
+        val mid = (face[4] + face[6]) / 2.0f
+        val eyeDistance = max(1.0f, abs(face[6] - face[4]))
         val yaw = (face[8] - mid) / eyeDistance
         return when {
-            yaw < -0.08 -> -1
-            yaw > 0.08 -> 1
+            yaw < -0.08f -> -1
+            yaw > 0.08f -> 1
             else -> 0
         }
     }
@@ -932,7 +1144,12 @@ private class LivenessChallenge {
 }
 
 private enum class AppMode { Auth, Enroll }
-private enum class AdminAction { StartEnroll, DeleteUsers, ArmDoor }
+private enum class AdminAction { StartEnroll, DeleteUsers, ResetStore, ArmDoor }
+private sealed class ModelLoadState {
+    data object Loading : ModelLoadState()
+    data object Ready : ModelLoadState()
+    data class Failed(val error: Throwable) : ModelLoadState()
+}
 private data class Observation(val ok: Boolean, val message: String, val embedding: FloatArray, val pose: Int) {
     companion object {
         fun fail(message: String) = Observation(false, message, FloatArray(0), 0)
@@ -940,24 +1157,25 @@ private data class Observation(val ok: Boolean, val message: String, val embeddi
 }
 private data class UserTemplate(val name: String, val embedding: FloatArray)
 private data class Match(val index: Int, val score: Double, val secondScore: Double)
+private data class StoreLoadResult(val users: List<UserTemplate>, val error: Throwable?)
 
 private fun MutableList<UserTemplate>.replaceWith(items: List<UserTemplate>) {
     clear()
     addAll(items)
 }
 
-private fun loadUsers(context: Context, prefs: SharedPreferences): List<UserTemplate> = runCatching {
+private fun loadUsers(context: Context, prefs: SharedPreferences): StoreLoadResult = runCatching {
     val raw = secureGetString(context, prefs, USERS_KEY, prefs.getString(USERS_KEY, "[]") ?: "[]", failClosed = true)
     val array = JSONArray(raw)
-    buildList {
+    StoreLoadResult(buildList {
         for (i in 0 until array.length()) {
             val item = array.getJSONObject(i)
             val values = item.getJSONArray("embedding")
             val embedding = FloatArray(values.length()) { values.getDouble(it).toFloat() }
             add(UserTemplate(item.getString("name"), embedding))
         }
-    }
-}.getOrElse { emptyList() }
+    }, null)
+}.getOrElse { StoreLoadResult(emptyList(), it) }
 
 private fun saveUsers(context: Context, prefs: SharedPreferences, users: List<UserTemplate>) {
     val array = JSONArray()
@@ -973,14 +1191,12 @@ private fun saveUsers(context: Context, prefs: SharedPreferences, users: List<Us
 }
 
 private fun secureGetString(context: Context, prefs: SharedPreferences, key: String, default: String, failClosed: Boolean): String {
-    val encrypted = prefs.getString("${key}_enc", null) ?: return default
+    val encrypted = prefs.getString("$key$SECURE_SUFFIX", null)
+    val legacyEncrypted = prefs.getString("$key$LEGACY_SECURE_SUFFIX", null)
+    if (encrypted == null && legacyEncrypted == null) return default
     return runCatching {
-        val payload = Base64.decode(encrypted, Base64.NO_WRAP)
-        val iv = payload.copyOfRange(0, 12)
-        val cipherText = payload.copyOfRange(12, payload.size)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, keystoreKey(context), GCMParameterSpec(128, iv))
-        String(cipher.doFinal(cipherText), Charsets.UTF_8)
+        val payload = Base64.decode(encrypted ?: legacyEncrypted, Base64.NO_WRAP)
+        decryptPayload(context, payload, if (encrypted != null) KEYSTORE_ALIAS else LEGACY_KEYSTORE_ALIAS, encrypted != null)
     }.getOrElse {
         if (failClosed) throw IllegalStateException("Encrypted local store authentication failed", it)
         default
@@ -991,28 +1207,40 @@ private fun securePutString(context: Context, prefs: SharedPreferences, key: Str
     val iv = ByteArray(12)
     SecureRandom().nextBytes(iv)
     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    cipher.init(Cipher.ENCRYPT_MODE, keystoreKey(context), GCMParameterSpec(128, iv))
+    cipher.init(Cipher.ENCRYPT_MODE, keystoreKey(context, KEYSTORE_ALIAS, authRequired = true), GCMParameterSpec(128, iv))
     val cipherText = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
     val payload = iv + cipherText
     prefs.edit()
-        .putString("${key}_enc", Base64.encodeToString(payload, Base64.NO_WRAP))
+        .putString("$key$SECURE_SUFFIX", Base64.encodeToString(payload, Base64.NO_WRAP))
+        .remove("$key$LEGACY_SECURE_SUFFIX")
         .remove(key)
         .apply()
 }
 
-private fun keystoreKey(context: Context): SecretKey {
+private fun decryptPayload(context: Context, payload: ByteArray, alias: String, authRequired: Boolean): String {
+    val iv = payload.copyOfRange(0, 12)
+    val cipherText = payload.copyOfRange(12, payload.size)
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    cipher.init(Cipher.DECRYPT_MODE, keystoreKey(context, alias, authRequired), GCMParameterSpec(128, iv))
+    return String(cipher.doFinal(cipherText), Charsets.UTF_8)
+}
+
+private fun keystoreKey(context: Context, alias: String, authRequired: Boolean): SecretKey {
     val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-    keyStore.getKey(KEYSTORE_ALIAS, null)?.let { return it as SecretKey }
+    keyStore.getKey(alias, null)?.let { return it as SecretKey }
     val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-    val spec = KeyGenParameterSpec.Builder(
-        KEYSTORE_ALIAS,
+    val builder = KeyGenParameterSpec.Builder(
+        alias,
         KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
     )
         .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
         .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
         .setRandomizedEncryptionRequired(true)
-        .setUserAuthenticationRequired(false)
-        .build()
+        .setUserAuthenticationRequired(authRequired)
+    if (authRequired) {
+        builder.setUserAuthenticationValidityDurationSeconds(120)
+    }
+    val spec = builder.build()
     generator.init(spec)
     return generator.generateKey()
 }
