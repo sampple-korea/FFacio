@@ -78,6 +78,7 @@ if ($launch -notmatch "Events injected:\s*1") {
 $appPid = ""
 $logs = ""
 $modelsReady = $false
+$operationImmersiveRequested = $false
 for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Seconds 1
     $appPidOut = & $adb -s $Serial shell pidof com.ffacio.mobile 2>$null
@@ -85,14 +86,18 @@ for ($i = 0; $i -lt 60; $i++) {
     if (-not $appPid) { throw "FFacio Android process stopped during launch verification.`n$logs" }
     $logs = (& $adb -s $Serial logcat -d --pid=$appPid -t 500 2>$null) -join "`n"
     if ($logs -match "FATAL EXCEPTION|AndroidRuntime") { throw "App crash detected in FFacio logcat.`n$logs" }
+    if ($logs -match "Door terminal immersive enabled") {
+        $operationImmersiveRequested = $true
+    }
     if ($logs -match "Offline models ready") {
         $modelsReady = $true
         break
     }
 }
 if (-not $modelsReady) { throw "FFacio Android did not report bundled offline model readiness within 60 seconds.`n$logs" }
+if (-not $operationImmersiveRequested) { throw "FFacio Android did not request operation immersive mode within launch verification.`n$logs" }
 
-Write-Host "FFacio Android emulator smoke passed with pid $appPid and bundled model readiness confirmed"
+Write-Host "FFacio Android emulator smoke passed with pid $appPid, operation immersive request, and bundled model readiness confirmed"
 if ($Report) {
     $reportPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Report)
     $reportDir = Split-Path -Parent $reportPath
@@ -119,6 +124,7 @@ if ($Report) {
         app_pid = $appPid
         launch_method = "adb monkey launcher"
         model_ready_verified = $true
+        operation_immersive_requested_verified = $true
         verified_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
         started_emulator = $startedEmulator
         keep_running = [bool]$KeepRunning

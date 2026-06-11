@@ -10,7 +10,7 @@ Android build target for the same offline face access goal.
 - Android Keystore AES-GCM for stored face templates and HTTP relay token.
 - The APK bundles an Android-only offline model set generated from `resources/models/`: OpenCV YuNet, OpenCV SFace, and MiniFASNet-V2. It does not need a model download on first launch, and it intentionally omits desktop-only InsightFace assets. YuNet/SFace are required for the default active face-turn flow; release APKs include MiniFASNet-V2 for the optional passive PAD switch, but runtime load failure degrades to active face-turn mode instead of blocking the whole app.
 - Sensitive screens run with Android `FLAG_SECURE`, so camera preview, recognized names, and relay settings are blocked from screenshots, screen recording, and recent-app thumbnails on compliant devices.
-- While the app is active it keeps the display awake for door-terminal operation; the admin view still auto-locks back to the operation view after the admin session timeout.
+- While the app is active it keeps the display awake for door-terminal operation. The operation view also hides system bars with transient swipe reveal to reduce accidental navigation on a mounted terminal; this immersive mode is disabled when touch exploration accessibility is active. The admin view restores normal system UI and still auto-locks back to the operation view after the admin session timeout.
 - The default screen is an operation view for door use: camera guidance, current status, recent approvals, relay failures, and camera retry only. Registration, user management, relay settings, and destructive actions live behind Android screen-lock verification in the admin view.
 - The admin view automatically returns to the operation view after the admin session timeout, with a separate idle timeout that cancels stalled enrollment. Secure prompts and storage operations are not interrupted.
 
@@ -52,3 +52,4 @@ Output:
 - The admin view supports selecting and deleting individual registered users, plus a separate all-users reset path for destructive maintenance.
 - Individual user deletion requires a name-specific confirmation dialog and then Android screen-lock verification. Relay activation is stored as an admin setting and remains enabled across normal app lifecycle changes until an admin disables it or the encrypted relay token cannot be opened.
 - Real device camera/liveness testing is still required on actual phones.
+- Full Android lock-task kiosk enforcement still requires device-owner / managed-device setup outside the app. The app's immersive operation view is an ergonomic guard, not a replacement for MDM/device-owner lock task mode.

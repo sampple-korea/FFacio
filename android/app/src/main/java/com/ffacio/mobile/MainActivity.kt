@@ -18,7 +18,9 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
 import android.util.Size as AndroidSize
+import android.view.Window
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -96,6 +98,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.google.common.util.concurrent.ListenableFuture
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -347,6 +352,7 @@ private fun FFacioApp(
     var cameraAvailable by remember { mutableStateOf(true) }
     var noCameraHardware by remember { mutableStateOf(false) }
     var cameraRetryNonce by remember { mutableIntStateOf(0) }
+    var touchExplorationEnabled by remember { mutableStateOf(isTouchExplorationEnabled(context)) }
     var confirmDelete by remember { mutableStateOf(false) }
     var pendingDeleteUserIndex by remember { mutableIntStateOf(-1) }
     var pendingAdminAction by remember { mutableStateOf<AdminAction?>(null) }
@@ -366,7 +372,27 @@ private fun FFacioApp(
     var hasCameraPermission by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
+    val currentAppScreen by rememberUpdatedState(appScreen)
     val currentAdminPromptInFlight by rememberUpdatedState(adminPromptInFlight)
+    DisposableEffect(appScreen, adminPromptInFlight, touchExplorationEnabled) {
+        val activity = context as? Activity
+        val window = activity?.window
+        if (window != null) {
+            applyDoorTerminalSystemUi(
+                window = window,
+                immersive = shouldUseDoorTerminalImmersive(
+                    isOperationScreen = appScreen == AppScreen.Operation,
+                    adminPromptInFlight = adminPromptInFlight,
+                    touchExplorationEnabled = touchExplorationEnabled
+                )
+            )
+        }
+        onDispose {
+            if (window != null) {
+                applyDoorTerminalSystemUi(window = window, immersive = false)
+            }
+        }
+    }
     LaunchedEffect(Unit) {
         prefs.edit().remove(PASSIVE_LIVENESS_ENABLED_KEY).apply()
     }
@@ -763,6 +789,18 @@ private fun FFacioApp(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
+                val resumedTouchExplorationEnabled = isTouchExplorationEnabled(context)
+                touchExplorationEnabled = resumedTouchExplorationEnabled
+                (context as? Activity)?.window?.let { window ->
+                    applyDoorTerminalSystemUi(
+                        window = window,
+                        immersive = shouldUseDoorTerminalImmersive(
+                            isOperationScreen = currentAppScreen == AppScreen.Operation,
+                            adminPromptInFlight = currentAdminPromptInFlight,
+                            touchExplorationEnabled = resumedTouchExplorationEnabled
+                        )
+                    )
+                }
                 val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
                 if (granted != hasCameraPermission) {
                     hasCameraPermission = granted
@@ -896,6 +934,7 @@ private fun FFacioApp(
     fun requestAdmin(action: AdminAction) {
         val keyguard = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         if (!keyguard.isDeviceSecure) {
+            (context as? Activity)?.window?.let { applyDoorTerminalSystemUi(window = it, immersive = false) }
             status = "기기 잠금 설정이 필요합니다"
             detail = "등록, 삭제, 문 열림 활성화 전에 Android 화면 잠금을 설정하세요"
             return
@@ -905,6 +944,7 @@ private fun FFacioApp(
             "로컬 생체 템플릿과 문 제어 설정을 보호합니다"
         )
         if (prompt == null) {
+            (context as? Activity)?.window?.let { applyDoorTerminalSystemUi(window = it, immersive = false) }
             status = "기기 인증을 사용할 수 없습니다"
             detail = "Android 보안 설정을 확인한 뒤 다시 시도하세요"
             return
@@ -916,6 +956,7 @@ private fun FFacioApp(
         stableUser = -1
         stableCount = 0
         liveness.reset()
+        (context as? Activity)?.window?.let { applyDoorTerminalSystemUi(window = it, immersive = false) }
         adminLauncher.launch(prompt)
     }
 
@@ -2367,6 +2408,29 @@ internal fun shouldAnalyzeCameraFrame(
 
 internal fun shouldReturnToOperationOnLifecyclePause(adminPromptInFlight: Boolean): Boolean =
     !adminPromptInFlight
+
+internal fun shouldUseDoorTerminalImmersive(
+    isOperationScreen: Boolean,
+    adminPromptInFlight: Boolean,
+    touchExplorationEnabled: Boolean
+): Boolean = isOperationScreen && !adminPromptInFlight && !touchExplorationEnabled
+
+private fun applyDoorTerminalSystemUi(window: Window, immersive: Boolean) {
+    WindowCompat.setDecorFitsSystemWindows(window, !immersive)
+    val controller = WindowInsetsControllerCompat(window, window.decorView)
+    if (immersive) {
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        Log.i("FFacio", "Door terminal immersive enabled")
+    } else {
+        controller.show(WindowInsetsCompat.Type.systemBars())
+        Log.i("FFacio", "Door terminal immersive disabled")
+    }
+}
+
+private fun isTouchExplorationEnabled(context: Context): Boolean =
+    (context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager)
+        ?.isTouchExplorationEnabled == true
 
 internal fun shouldAutoLockAdminScreen(
     nowMillis: Long,

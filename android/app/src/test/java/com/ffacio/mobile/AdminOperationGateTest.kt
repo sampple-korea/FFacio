@@ -91,6 +91,14 @@ class AdminOperationGateTest {
     }
 
     @Test
+    fun doorTerminalImmersiveModeOnlyRunsOnOperationScreenWithoutAdminPrompt() {
+        assertTrue(shouldUseDoorTerminalImmersive(isOperationScreen = true, adminPromptInFlight = false, touchExplorationEnabled = false))
+        assertFalse(shouldUseDoorTerminalImmersive(isOperationScreen = true, adminPromptInFlight = true, touchExplorationEnabled = false))
+        assertFalse(shouldUseDoorTerminalImmersive(isOperationScreen = false, adminPromptInFlight = false, touchExplorationEnabled = false))
+        assertFalse(shouldUseDoorTerminalImmersive(isOperationScreen = true, adminPromptInFlight = false, touchExplorationEnabled = true))
+    }
+
+    @Test
     fun adminScreenAutoLocksOnlyAfterIdleAdminSessionExpires() {
         assertTrue(
             shouldAutoLockAdminScreen(

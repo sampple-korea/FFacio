@@ -1,5 +1,11 @@
 # FFacio Release Notes
 
+## Android 0.3.12
+
+- Adds operation-view immersive terminal mode with Android system bars hidden by default and transient swipe reveal.
+- Restores normal system UI before Android screen-lock admin prompts, when entering the admin view, and when touch exploration accessibility is active.
+- Extends Android emulator release smoke verification to confirm the operation immersive request is emitted during launch.
+
 ## Android 0.3.11
 
 - Keeps the Android app display awake while active so a mounted door terminal does not sleep during operation.
