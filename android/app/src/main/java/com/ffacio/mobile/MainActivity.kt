@@ -127,7 +127,6 @@ private const val DOOR_URL_KEY = "door_url"
 private const val DOOR_TOKEN_KEY = "door_token"
 private const val DOOR_ARMED_KEY = "door_armed"
 private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key_v2"
-private const val LEGACY_KEYSTORE_ALIAS = "ffacio_mobile_store_key"
 private const val SECURE_SUFFIX = "_enc_v2"
 private const val LEGACY_SECURE_SUFFIX = "_enc"
 private const val MATCH_THRESHOLD = 0.42
@@ -176,12 +175,11 @@ class MainActivity : ComponentActivity() {
                     copyAsset("models/opencv/face_detection_yunet_2023mar.onnx"),
                     copyAsset("models/opencv/face_recognition_sface_2021dec.onnx")
                 )
-                if (!active.get()) return@execute
-                engine = createdEngine
             }.exceptionOrNull()
             if (!active.get()) return@execute
             ContextCompat.getMainExecutor(this).execute {
                 if (!active.get()) return@execute
+                if (error == null) engine = createdEngine
                 if (error == null) {
                     Log.i("FFacio", "Offline models ready")
                 } else {
@@ -403,6 +401,15 @@ private fun FFacioApp(
                     if (granted) {
                         cameraAvailable = true
                         cameraRetryNonce += 1
+                        status = if (users.isEmpty()) "첫 사용자를 등록하세요" else "인증 준비 완료"
+                        detail = if (users.isEmpty()) "카메라 권한이 허용되었습니다. 얼굴 등록을 시작하세요" else "카메라를 바라봐 주세요"
+                    } else {
+                        liveCandidate = -1
+                        stableUser = -1
+                        stableCount = 0
+                        liveness.reset()
+                        status = "카메라 권한이 필요합니다"
+                        detail = "앱 설정에서 카메라 권한을 허용해 주세요"
                     }
                 }
             }
