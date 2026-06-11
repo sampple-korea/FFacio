@@ -131,6 +131,7 @@ private const val DOOR_URL_KEY = "door_url"
 private const val DOOR_TOKEN_KEY = "door_token"
 private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key_v3"
 private const val LEGACY_KEYSTORE_ALIAS = "ffacio_mobile_store_key_v2"
+private const val OLDER_KEYSTORE_ALIAS = "ffacio_mobile_store_key"
 private const val SECURE_SUFFIX = "_enc_v3"
 private const val LEGACY_SECURE_SUFFIX = "_enc_v2"
 private const val OLDER_SECURE_SUFFIX = "_enc"
@@ -446,6 +447,7 @@ private fun FFacioApp(
                                 if (!removed) error("Local template reset could not be saved")
                                 deleteKeystoreAlias(KEYSTORE_ALIAS)
                                 deleteKeystoreAlias(LEGACY_KEYSTORE_ALIAS)
+                                deleteKeystoreAlias(OLDER_KEYSTORE_ALIAS)
                             }
                         }
                         if (!active.get()) return@launch
@@ -1602,9 +1604,10 @@ private fun secureGetString(context: Context, prefs: SharedPreferences, key: Str
     }
     for (suffix in listOf(LEGACY_SECURE_SUFFIX, OLDER_SECURE_SUFFIX)) {
         val legacy = prefs.getString("$key$suffix", null) ?: continue
+        val legacyAlias = if (suffix == OLDER_SECURE_SUFFIX) OLDER_KEYSTORE_ALIAS else LEGACY_KEYSTORE_ALIAS
         val migrated = runCatching {
             val payload = Base64.decode(legacy, Base64.NO_WRAP)
-            decryptPayload(context, payload, LEGACY_KEYSTORE_ALIAS, authRequired = true)
+            decryptPayload(context, payload, legacyAlias, authRequired = true)
         }
         if (migrated.isSuccess) {
             val value = migrated.getOrThrow()
@@ -1724,7 +1727,7 @@ private fun poseLabel(pose: Int): String = when {
 
 private fun postDoor(url: String, token: String, user: String): Boolean = runCatching {
     val endpoint = URL(url)
-    if (token.isNotBlank() && endpoint.protocol.lowercase() != "https") return@runCatching false
+    if (endpoint.protocol.lowercase() != "https") return@runCatching false
     val conn = (endpoint.openConnection() as HttpURLConnection).apply {
         requestMethod = "POST"
         instanceFollowRedirects = false
