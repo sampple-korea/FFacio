@@ -304,6 +304,18 @@ private fun FFacioApp(
                         detail = "You can start a new user enrollment"
                     }
                 }
+                AdminAction.UnlockStore -> {
+                    val loaded = loadUsers(context, prefs)
+                    storeError = loaded.error
+                    if (loaded.error == null) {
+                        users.replaceWith(loaded.users)
+                        status = if (users.isEmpty()) "첫 사용자를 등록하세요" else "로컬 템플릿 잠금 해제 완료"
+                        detail = if (users.isEmpty()) "기기에 저장된 얼굴 템플릿이 없습니다" else "등록 사용자 ${users.size}명"
+                    } else {
+                        status = "로컬 템플릿을 열 수 없습니다"
+                        detail = "기기 인증 후에도 템플릿을 확인하지 못했습니다. 필요하면 초기화하세요"
+                    }
+                }
                 AdminAction.ResetStore -> {
                     val reset = prefs.edit()
                         .remove(USERS_KEY)
@@ -353,6 +365,21 @@ private fun FFacioApp(
                         stableUser = -1
                         stableCount = 0
                         liveness.reset()
+                    }
+                }
+                AdminAction.UnlockDoor -> {
+                    val loaded = runCatching { secureGetString(context, prefs, DOOR_TOKEN_KEY, "", failClosed = true) }
+                    loaded.onSuccess {
+                        doorToken = it
+                        doorConfigError = null
+                        status = "릴레이 토큰 잠금 해제 완료"
+                        detail = if (doorArmed) "인증 성공 시 저장된 HTTPS 릴레이로 요청합니다" else "필요하면 문 열림 스위치를 다시 활성화하세요"
+                    }.onFailure {
+                        doorArmed = false
+                        prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit()
+                        doorConfigError = it
+                        status = "릴레이 토큰을 열 수 없습니다"
+                        detail = "토큰을 다시 입력하고 기기 인증 후 활성화하세요"
                     }
                 }
             }
@@ -481,7 +508,7 @@ private fun FFacioApp(
         modelLoading -> "Offline models are still loading"
         modelError != null -> "모델을 사용할 수 없습니다"
         storeError != null -> "Local biometric store is locked"
-        doorConfigError != null && doorArmed -> "Door relay settings are locked"
+        doorConfigError != null -> "Door relay settings are locked"
         !hasCameraPermission -> "카메라 권한이 필요합니다"
         !cameraAvailable -> "카메라를 사용할 수 없습니다"
         else -> null
@@ -646,6 +673,7 @@ private fun FFacioApp(
                 userCount = users.size,
                 enrollCount = enrollSamples.size,
                 canResetStore = storeError != null,
+                canUnlockDoor = doorConfigError != null,
                 onName = { if (mode != AppMode.Enroll) name = it },
                 onDoorUrl = { doorUrl = it },
                 onDoorToken = { doorToken = it },
@@ -703,15 +731,27 @@ private fun FFacioApp(
                 onDelete = {
                     confirmDelete = true
                 },
+                onUnlockStore = {
+                    requestAdmin(AdminAction.UnlockStore)
+                },
                 onResetStore = {
                     requestAdmin(AdminAction.ResetStore)
+                },
+                onUnlockDoor = {
+                    requestAdmin(AdminAction.UnlockDoor)
                 },
                 onRetry = {
                     cameraAvailable = true
                     cameraRetryNonce += 1
                     if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
-                    status = "카메라를 다시 확인하는 중입니다"
-                    detail = "잠시만 기다려 주세요"
+                    if (storeError != null) {
+                        requestAdmin(AdminAction.UnlockStore)
+                    } else if (doorConfigError != null) {
+                        requestAdmin(AdminAction.UnlockDoor)
+                    } else {
+                        status = "카메라를 다시 확인하는 중입니다"
+                        detail = "잠시만 기다려 주세요"
+                    }
                 },
                 onOpenSettings = {
                     context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
@@ -868,6 +908,7 @@ private fun ControlPanel(
     userCount: Int,
     enrollCount: Int,
     canResetStore: Boolean,
+    canUnlockDoor: Boolean,
     onName: (String) -> Unit,
     onDoorUrl: (String) -> Unit,
     onDoorToken: (String) -> Unit,
@@ -875,7 +916,9 @@ private fun ControlPanel(
     onEnroll: () -> Unit,
     onAuth: () -> Unit,
     onDelete: () -> Unit,
+    onUnlockStore: () -> Unit,
     onResetStore: () -> Unit,
+    onUnlockDoor: () -> Unit,
     onRetry: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
@@ -926,10 +969,22 @@ private fun ControlPanel(
                         }
                         if (canResetStore) {
                             Button(
+                                onClick = onUnlockStore,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF0071E3))
+                            ) { Text("로컬 템플릿 다시 열기") }
+                            Button(
                                 onClick = onResetStore,
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFFFF3B30))
                             ) { Text("로컬 템플릿 초기화") }
+                        }
+                        if (canUnlockDoor) {
+                            Button(
+                                onClick = onUnlockDoor,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF0071E3))
+                            ) { Text("릴레이 토큰 다시 열기") }
                         }
                     }
                 }
@@ -1181,7 +1236,7 @@ private class LivenessChallenge {
 }
 
 private enum class AppMode { Auth, Enroll }
-private enum class AdminAction { StartEnroll, DeleteUsers, ResetStore, ArmDoor }
+private enum class AdminAction { StartEnroll, DeleteUsers, UnlockStore, ResetStore, ArmDoor, UnlockDoor }
 private sealed class ModelLoadState {
     data object Loading : ModelLoadState()
     data object Ready : ModelLoadState()
