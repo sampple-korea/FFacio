@@ -68,6 +68,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify_android_emu
 
 결과물은 `release\FFacio-Android-release.apk`와 `release\FFacio-Android-debug.apk`입니다. release APK는 로컬 sideload 테스트용 키로 서명되며, Play/production 배포에는 사용자 소유 keystore를 지정해야 합니다.
 
+## Linux x64/ARM64
+
+Linux artifacts are built on Linux runners:
+
+```bash
+bash scripts/build_linux.sh
+```
+
+GitHub Actions workflow `.github/workflows/linux-release.yml` builds x64 and ARM64 tarballs. See `docs/linux.md`.
+
 ## 주요 기능
 
 - 실시간 얼굴 인증
