@@ -47,6 +47,7 @@ $storePassword = $env:FFACIO_ANDROID_KEYSTORE_PASSWORD
 $keyAlias = $env:FFACIO_ANDROID_KEY_ALIAS
 $keyPassword = $env:FFACIO_ANDROID_KEY_PASSWORD
 $signingSource = "external environment keystore"
+$usingGeneratedSigningKey = $false
 if (-not $keyStore) {
     if (-not $AllowGeneratedSigningKey) {
         throw "FFACIO_ANDROID_KEYSTORE, FFACIO_ANDROID_KEYSTORE_PASSWORD, FFACIO_ANDROID_KEY_ALIAS, and FFACIO_ANDROID_KEY_PASSWORD are required for reproducible release signing. Use -AllowGeneratedSigningKey only for disposable local sideload builds."
@@ -56,16 +57,21 @@ if (-not $keyStore) {
     if (-not $keyAlias) { $keyAlias = "ffacio-local-release" }
     if (-not $keyPassword) { $keyPassword = $storePassword }
     $signingSource = "generated disposable local sideload keystore"
+    $usingGeneratedSigningKey = $true
 }
 if (-not $storePassword -or -not $keyAlias -or -not $keyPassword) {
     throw "Android release signing requires FFACIO_ANDROID_KEYSTORE_PASSWORD, FFACIO_ANDROID_KEY_ALIAS, and FFACIO_ANDROID_KEY_PASSWORD."
 }
 
 if (-not (Test-Path $keyStore)) {
+    if (-not $usingGeneratedSigningKey) {
+        throw "External Android keystore does not exist: $keyStore. Refusing to generate a new key for external signing provenance."
+    }
     $keytool = Join-Path $env:JAVA_HOME "bin\keytool.exe"
     & $keytool -genkeypair -v -keystore $keyStore -storepass $storePassword -alias $keyAlias -keypass $keyPassword -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=FFacio Local Release,O=sampple-korea,C=KR"
     if ($LASTEXITCODE -ne 0) { throw "keytool failed with exit code $LASTEXITCODE." }
 }
+$keyStore = (Resolve-Path $keyStore).Path
 
 Push-Location $AndroidDir
 try {
@@ -138,7 +144,7 @@ $manifest = [ordered]@{
     emulator_launch_method = $null
     verified_apk_sha256 = $null
     verified_at = $null
-    notes = "Release APK is locally signed for sideload testing, not Play production signing. OpenCV YuNet/SFace and the shared model bundle are included; no cloud subscription is used."
+    notes = "Release APK is signed with the configured Android keystore for this build. OpenCV YuNet/SFace and the shared model bundle are included; no cloud subscription is used."
 }
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $ReleaseDir "android-release-manifest.json")
 & (Join-Path $PSScriptRoot "verify_android_static.ps1") -Apk $releaseOut -Manifest (Join-Path $ReleaseDir "android-release-manifest.json") -ModelManifest $modelManifest
@@ -164,5 +170,11 @@ if (-not $SkipEmulatorVerification) {
     $verified.verified_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 }
 $verified | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $manifestPath
+if ((-not $SkipEmulatorVerification) -and (Test-Path $emulatorReport)) {
+    $finalManifestHash = (Get-FileHash $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $finalReport = Get-Content -Raw $emulatorReport -Encoding UTF8 | ConvertFrom-Json
+    $finalReport.manifest_sha256 = $finalManifestHash
+    $finalReport | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $emulatorReport
+}
 Write-Host "Android release APK ready: $releaseOut"
 Write-Host "Android debug APK ready: $debugOut"

@@ -94,7 +94,9 @@ import org.opencv.android.OpenCVLoader
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
+import org.opencv.core.Scalar
 import org.opencv.core.Size
+import org.opencv.dnn.Dnn
 import org.opencv.imgproc.Imgproc
 import org.opencv.objdetect.FaceDetectorYN
 import org.opencv.objdetect.FaceRecognizerSF
@@ -116,6 +118,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -132,6 +135,7 @@ private const val MATCH_THRESHOLD = 0.42
 private const val MATCH_MARGIN = 0.04
 private const val ENROLL_SAMPLES = 5
 private const val ANALYSIS_INTERVAL_MS = 180L
+private const val ANTISPOOF_THRESHOLD = 0.70f
 
 class MainActivity : ComponentActivity() {
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
@@ -173,7 +177,8 @@ class MainActivity : ComponentActivity() {
                 if (!OpenCVLoader.initDebug()) error("OpenCV init failed")
                 createdEngine = MobileFaceEngine(
                     copyAsset("models/opencv/face_detection_yunet_2023mar.onnx"),
-                    copyAsset("models/opencv/face_recognition_sface_2021dec.onnx")
+                    copyAsset("models/opencv/face_recognition_sface_2021dec.onnx"),
+                    copyAsset("models/antispoof/minifasnet_v2.onnx")
                 )
             }.exceptionOrNull()
             if (!active.get()) return@execute
@@ -613,13 +618,17 @@ private fun FFacioApp(
         if (!obs.ok) {
             resetTransient()
             status = obs.message
-            detail = "얼굴을 화면 중앙에 맞춰 주세요"
+            detail = if (obs.liveScore > 0.0f) {
+                "PAD ${"%.2f".format(obs.liveScore)} · 실제 얼굴만 인증할 수 있습니다"
+            } else {
+                "얼굴을 화면 중앙에 맞춰 주세요"
+            }
             return
         }
         if (mode == AppMode.Enroll) {
             enrollSamples.add(obs.embedding)
             status = "샘플 수집 중"
-            detail = "${enrollSamples.size}/$ENROLL_SAMPLES · ${poseLabel(obs.pose)}"
+            detail = "${enrollSamples.size}/$ENROLL_SAMPLES · PAD ${"%.2f".format(obs.liveScore)} · ${poseLabel(obs.pose)}"
             if (enrollSamples.size >= ENROLL_SAMPLES) {
                 val cleanName = enrollmentName.ifBlank { name.trim() }
                 if (cleanName.isNotEmpty()) {
@@ -1241,9 +1250,10 @@ private fun imageProxyToRgbaMat(proxy: ImageProxy, mirrorHorizontal: Boolean): M
     }
 }
 
-private class MobileFaceEngine(detectorModel: File, recognizerModel: File) {
+private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiSpoofModel: File) {
     private val detector = FaceDetectorYN.create(detectorModel.absolutePath, "", Size(320.0, 320.0), 0.82f, 0.3f, 5000)
     private val recognizer = FaceRecognizerSF.create(recognizerModel.absolutePath, "")
+    private val antiSpoof = Dnn.readNetFromONNX(antiSpoofModel.absolutePath)
     private var currentSize = Size(0.0, 0.0)
 
     fun observe(rgba: Mat): Observation {
@@ -1271,6 +1281,10 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File) {
             val row = FloatArray(face.total().toInt())
             face.get(0, 0, row)
             if ((row.getOrNull(2) ?: 0.0f) < bgr.cols().toFloat() * 0.16f) return Observation.fail("조금 더 가까이 와 주세요")
+            val passiveLiveness = predictPassiveLiveness(bgr, row)
+            if (!passiveLiveness.isLive) {
+                return Observation.fail("사진이나 화면으로 보이는 얼굴입니다. 실제 얼굴을 보여주세요", passiveLiveness.liveScore)
+            }
             aligned = Mat()
             runCatching {
                 recognizer.alignCrop(bgr, face, aligned)
@@ -1281,7 +1295,7 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File) {
                 Log.e("FFacio", "SFace alignment or feature extraction failed", it)
                 return Observation.fail("얼굴 특징을 추출할 수 없습니다. 정면을 유지하고 다시 시도해 주세요")
             }
-            return Observation(true, "확인 중", matToFloatArray(feature), estimatePose(row))
+            return Observation(true, "확인 중", matToFloatArray(feature), estimatePose(row), passiveLiveness.liveScore)
         } finally {
             aligned?.release()
             face?.release()
@@ -1289,6 +1303,74 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File) {
             faces.release()
             bgr.release()
         }
+    }
+
+    private fun predictPassiveLiveness(bgr: Mat, face: FloatArray): PassiveLiveness {
+        val crop = expandedFaceCrop(bgr, face)
+        val resized = Mat()
+        var blob: Mat? = null
+        var logits: Mat? = null
+        try {
+            if (crop.empty()) return PassiveLiveness(0.0f, "invalid_crop")
+            Imgproc.resize(crop, resized, Size(80.0, 80.0))
+            blob = Dnn.blobFromImage(
+                resized,
+                1.0 / 128.0,
+                Size(80.0, 80.0),
+                Scalar(127.5, 127.5, 127.5),
+                false,
+                false
+            )
+            antiSpoof.setInput(blob)
+            logits = antiSpoof.forward()
+            val values = FloatArray(logits.total().toInt())
+            logits.get(0, 0, values)
+            return classifyPassiveLiveness(values)
+        } catch (error: Exception) {
+            Log.e("FFacio", "Passive liveness check failed", error)
+            return PassiveLiveness(0.0f, "model_error")
+        } finally {
+            logits?.release()
+            blob?.release()
+            resized.release()
+            crop.release()
+        }
+    }
+
+    private fun expandedFaceCrop(bgr: Mat, face: FloatArray): Mat {
+        if (face.size < 4) return Mat()
+        val x = face[0].toInt()
+        val y = face[1].toInt()
+        val w = max(1, face[2].toInt())
+        val h = max(1, face[3].toInt())
+        val expandedW = (w * 1.25f).toInt()
+        val expandedH = (h * 1.25f).toInt()
+        val cx = x + w / 2
+        val cy = y + h / 2
+        val left = max(0, cx - expandedW / 2)
+        val top = max(0, cy - expandedH / 2)
+        val right = min(bgr.cols(), cx + expandedW / 2)
+        val bottom = min(bgr.rows(), cy + expandedH / 2)
+        if (right <= left || bottom <= top) return Mat()
+        return bgr.submat(top, bottom, left, right)
+    }
+
+    private fun classifyPassiveLiveness(values: FloatArray): PassiveLiveness {
+        if (values.size < 3) return PassiveLiveness(0.0f, "invalid_output")
+        val maxLogit = max(values[0], max(values[1], values[2]))
+        val liveExp = exp((values[0] - maxLogit).toDouble())
+        val printExp = exp((values[1] - maxLogit).toDouble())
+        val replayExp = exp((values[2] - maxLogit).toDouble())
+        val sum = max(1e-8, liveExp + printExp + replayExp)
+        val live = (liveExp / sum).toFloat()
+        val printed = (printExp / sum).toFloat()
+        val replay = (replayExp / sum).toFloat()
+        val state = when {
+            live >= ANTISPOOF_THRESHOLD && live >= printed && live >= replay -> "live"
+            replay >= printed -> "replay_attack"
+            else -> "print_attack"
+        }
+        return PassiveLiveness(live, state)
     }
 
     private fun estimatePose(face: FloatArray): Int {
@@ -1362,9 +1444,20 @@ private sealed class ModelLoadState {
     data object Ready : ModelLoadState()
     data class Failed(val error: Throwable) : ModelLoadState()
 }
-private data class Observation(val ok: Boolean, val message: String, val embedding: FloatArray, val pose: Int) {
+
+private data class PassiveLiveness(val liveScore: Float, val state: String) {
+    val isLive: Boolean
+        get() = state == "live"
+}
+private data class Observation(
+    val ok: Boolean,
+    val message: String,
+    val embedding: FloatArray,
+    val pose: Int,
+    val liveScore: Float = 0.0f
+) {
     companion object {
-        fun fail(message: String) = Observation(false, message, FloatArray(0), 0)
+        fun fail(message: String, liveScore: Float = 0.0f) = Observation(false, message, FloatArray(0), 0, liveScore)
     }
 }
 private data class UserTemplate(val name: String, val embedding: FloatArray)

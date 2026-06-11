@@ -104,6 +104,7 @@ try {
         "assets/models/models.manifest.json",
         "assets/models/opencv/face_detection_yunet_2023mar.onnx",
         "assets/models/opencv/face_recognition_sface_2021dec.onnx",
+        "assets/models/antispoof/minifasnet_v2.onnx",
         "assets/models/insightface/models/buffalo_l/w600k_r50.onnx",
         "classes.dex",
         "AndroidManifest.xml"

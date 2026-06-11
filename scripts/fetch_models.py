@@ -41,6 +41,14 @@ MODELS = [
         38696353,
         "Apache-2.0/OpenCV Zoo model license",
     ),
+    ModelSource(
+        "antispoof.minifasnet_v2",
+        "https://huggingface.co/garciafido/minifasnet-v2-anti-spoofing-onnx/resolve/main/minifasnet_v2.onnx",
+        "antispoof/minifasnet_v2.onnx",
+        "d7b3cd9ba8a7ceb13baa8c4720902e27ca3112eff52f926c08804af6b6eecc7b",
+        1744116,
+        "Apache-2.0/MiniFASNet-V2 anti-spoofing ONNX model",
+    ),
 ]
 
 INSIGHTFACE_ZIP = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
@@ -110,7 +118,13 @@ def write_manifest() -> None:
         {
             "id": source.id,
             "path": source.path,
-            "engine": "opencv-yunet" if "yunet" in source.id else "opencv-sface",
+            "engine": (
+                "opencv-yunet"
+                if "yunet" in source.id
+                else "opencv-sface"
+                if "sface" in source.id
+                else "antispoof-minifasnet-v2"
+            ),
             "size": source.size,
             "sha256": source.sha256,
             "license": source.license,

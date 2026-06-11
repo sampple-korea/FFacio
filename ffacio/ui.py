@@ -749,7 +749,9 @@ class FFacioWindow(QMainWindow):
                         self.recent_matches.clear()
                         done, total = self.liveness.progress()
                         self.auth_status.setText(self.liveness.prompt())
-                        self.auth_detail.setText(f"Liveness {done}/{total} - quality {obs.quality:.2f}")
+                        self.auth_detail.setText(
+                            f"Liveness {done}/{total} - quality {obs.quality:.2f} - PAD {obs.antispoof_score:.2f}"
+                        )
                     else:
                         self.recent_matches.append(match)
                         decision = self.stable_decision()
@@ -761,7 +763,7 @@ class FFacioWindow(QMainWindow):
                     self.liveness_candidate_user_id = None
                 compatible = len(self.store.active_users(self.engine.engine_id))
                 self.auth_status.setText(obs.message)
-                self.auth_detail.setText(f"품질 {obs.quality:.2f} · 호환 등록자 {compatible}명")
+                self.auth_detail.setText(f"품질 {obs.quality:.2f} · PAD {obs.antispoof_score:.2f} · 호환 등록자 {compatible}명")
 
             if self.stack.currentIndex() == 2:
                 self.enroll_camera.set_frame(frame, bbox, False)

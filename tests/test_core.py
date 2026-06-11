@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
+from ffacio.antispoof import classify_antispoof_logits
 from ffacio.door import DoorDecision, HttpDoorController, MockDoorController, create_door_controller
 from ffacio.engine import FaceEngine, MatchResult, average_embeddings, normalize, score_quality, stable_match_decision
 from ffacio.liveness import LivenessChallenge
@@ -134,6 +135,22 @@ class CoreTests(unittest.TestCase):
         quality, message = score_quality(overbright, (40, 40, 150, 150), 0.99, settings)
         self.assertLess(quality, 0.58)
         self.assertEqual(message, "빛 반사가 너무 강합니다")
+
+    def test_passive_antispoof_classification(self) -> None:
+        live = classify_antispoof_logits(np.array([4.0, 0.1, -0.2], dtype=np.float32), threshold=0.70)
+        self.assertEqual(live.state, "live")
+        self.assertGreater(live.live_score, 0.70)
+
+        printed = classify_antispoof_logits(np.array([0.1, 3.0, 0.0], dtype=np.float32), threshold=0.70)
+        self.assertEqual(printed.state, "print_attack")
+        self.assertFalse(printed.is_live)
+
+        replay = classify_antispoof_logits(np.array([0.1, 0.0, 3.0], dtype=np.float32), threshold=0.70)
+        self.assertEqual(replay.state, "replay_attack")
+        self.assertFalse(replay.is_live)
+
+        low_confidence_live = classify_antispoof_logits(np.array([0.3, 0.2, 0.1], dtype=np.float32), threshold=0.70)
+        self.assertFalse(low_confidence_live.is_live)
 
     def test_model_manifest_verification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

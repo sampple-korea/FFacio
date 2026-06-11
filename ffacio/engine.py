@@ -5,7 +5,16 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from .models import SFACE_MODEL, YUNET_MODEL, ModelBundle, ModelVerificationError, ensure_models, verify_models
+from .antispoof import ANTISPOOF_MESSAGE, MiniFASNetAntiSpoof
+from .models import (
+    ANTISPOOF_MODEL,
+    SFACE_MODEL,
+    YUNET_MODEL,
+    ModelBundle,
+    ModelVerificationError,
+    ensure_models,
+    verify_models,
+)
 from .store import Settings, UserTemplate
 
 
@@ -18,6 +27,8 @@ class FaceObservation:
     quality: float
     message: str
     pose: str = "unknown"
+    antispoof_score: float = 0.0
+    antispoof_state: str = "unknown"
 
 
 @dataclass
@@ -74,6 +85,7 @@ class OpenCVSFaceEngine(FaceEngine):
             str(paths[YUNET_MODEL]), "", (320, 320), 0.85, 0.3, 5000
         )
         self.recognizer = cv2.FaceRecognizerSF.create(str(paths[SFACE_MODEL]), "")
+        self.antispoof = MiniFASNetAntiSpoof(str(paths[ANTISPOOF_MODEL]))
 
     def observe(self, frame: np.ndarray, settings: Settings) -> FaceObservation:
         height, width = frame.shape[:2]
@@ -96,11 +108,30 @@ class OpenCVSFaceEngine(FaceEngine):
             quality = min(quality, 0.3)
             message = forced_message
         embedding = None
+        antispoof_score = 0.0
+        antispoof_state = "not_checked"
         if quality >= 0.58:
-            aligned = self.recognizer.alignCrop(frame, face)
-            raw = self.recognizer.feature(aligned)
-            embedding = normalize(raw.flatten().astype(np.float32))
-        return FaceObservation(face, (x, y, w, h), conf, embedding, quality, message, estimate_pose_from_yunet(face))
+            antispoof = self.antispoof.predict(frame, (x, y, w, h), settings.antispoof_threshold)
+            antispoof_score = antispoof.live_score
+            antispoof_state = antispoof.state
+            if not antispoof.is_live:
+                quality = min(quality, 0.25)
+                message = ANTISPOOF_MESSAGE
+            else:
+                aligned = self.recognizer.alignCrop(frame, face)
+                raw = self.recognizer.feature(aligned)
+                embedding = normalize(raw.flatten().astype(np.float32))
+        return FaceObservation(
+            face,
+            (x, y, w, h),
+            conf,
+            embedding,
+            quality,
+            message,
+            estimate_pose_from_yunet(face),
+            antispoof_score,
+            antispoof_state,
+        )
 
 
 class InsightFaceEngine(FaceEngine):
@@ -128,6 +159,8 @@ class InsightFaceEngine(FaceEngine):
             providers=["CPUExecutionProvider"],
         )
         self.app.prepare(ctx_id=-1, det_size=(640, 640))
+        paths = ensure_models()
+        self.antispoof = MiniFASNetAntiSpoof(str(paths[ANTISPOOF_MODEL]))
 
     def observe(self, frame: np.ndarray, settings: Settings) -> FaceObservation:
         faces = self.app.get(frame)
@@ -138,9 +171,30 @@ class InsightFaceEngine(FaceEngine):
         x1, y1, x2, y2 = [int(v) for v in face.bbox]
         conf = float(getattr(face, "det_score", 0.99))
         quality, message = score_quality(frame, (x1, y1, x2 - x1, y2 - y1), conf, settings)
-        embedding = normalize(np.array(face.normed_embedding, dtype=np.float32)) if quality >= 0.58 else None
+        embedding = None
+        antispoof_score = 0.0
+        antispoof_state = "not_checked"
+        if quality >= 0.58:
+            antispoof = self.antispoof.predict(frame, (x1, y1, x2 - x1, y2 - y1), settings.antispoof_threshold)
+            antispoof_score = antispoof.live_score
+            antispoof_state = antispoof.state
+            if not antispoof.is_live:
+                quality = min(quality, 0.25)
+                message = ANTISPOOF_MESSAGE
+            else:
+                embedding = normalize(np.array(face.normed_embedding, dtype=np.float32))
         pose = estimate_pose_from_keypoints(getattr(face, "kps", None))
-        return FaceObservation(np.array([]), (x1, y1, x2 - x1, y2 - y1), conf, embedding, quality, message, pose)
+        return FaceObservation(
+            np.array([]),
+            (x1, y1, x2 - x1, y2 - y1),
+            conf,
+            embedding,
+            quality,
+            message,
+            pose,
+            antispoof_score,
+            antispoof_state,
+        )
 
 
 def create_engine(prefer_insightface: bool = True) -> FaceEngine:

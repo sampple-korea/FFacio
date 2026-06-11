@@ -11,11 +11,14 @@ from .paths import models_dir
 
 YUNET_MODEL = "face_detection_yunet_2023mar.onnx"
 SFACE_MODEL = "face_recognition_sface_2021dec.onnx"
+ANTISPOOF_MODEL = "minifasnet_v2.onnx"
+ANTISPOOF_MODEL_ID = "antispoof.minifasnet_v2"
 MANIFEST_NAME = "models.manifest.json"
 REQUIRED_MODEL_IDS = frozenset(
     {
         "opencv.yunet",
         "opencv.sface",
+        ANTISPOOF_MODEL_ID,
         "insightface.detector",
         "insightface.recognition",
         "insightface.landmark3d",
@@ -121,4 +124,5 @@ def ensure_models() -> dict[str, Path]:
     return {
         YUNET_MODEL: bundle.path_for("opencv.yunet"),
         SFACE_MODEL: bundle.path_for("opencv.sface"),
+        ANTISPOOF_MODEL: bundle.path_for(ANTISPOOF_MODEL_ID),
     }

@@ -72,6 +72,7 @@ class Settings:
     ambiguous_margin: float = 0.05
     enroll_samples: int = 8
     detection_confidence: float = 0.85
+    antispoof_threshold: float = 0.70
     open_duration_ms: int = 1200
     liveness_enabled: bool = True
     liveness_steps: int = 3
@@ -89,6 +90,7 @@ class Settings:
         self.ambiguous_margin = max(0.03, min(0.15, float(self.ambiguous_margin)))
         self.enroll_samples = max(5, min(20, int(self.enroll_samples)))
         self.detection_confidence = max(0.70, min(0.98, float(self.detection_confidence)))
+        self.antispoof_threshold = max(0.55, min(0.95, float(self.antispoof_threshold)))
         self.open_duration_ms = max(200, min(5000, int(self.open_duration_ms)))
         self.liveness_enabled = True
         self.liveness_steps = max(1, min(3, int(self.liveness_steps)))

@@ -9,6 +9,12 @@ from pathlib import Path
 MODEL_FILES = [
     ("opencv.yunet", "opencv/face_detection_yunet_2023mar.onnx", "opencv-yunet", "MIT/OpenCV Zoo model license"),
     ("opencv.sface", "opencv/face_recognition_sface_2021dec.onnx", "opencv-sface", "Apache-2.0/OpenCV Zoo model license"),
+    (
+        "antispoof.minifasnet_v2",
+        "antispoof/minifasnet_v2.onnx",
+        "antispoof-minifasnet-v2",
+        "Apache-2.0/MiniFASNet-V2 anti-spoofing ONNX model",
+    ),
     ("insightface.detector", "insightface/models/buffalo_l/det_10g.onnx", "insightface-buffalo-l", "InsightFace pretrained model license"),
     ("insightface.recognition", "insightface/models/buffalo_l/w600k_r50.onnx", "insightface-buffalo-l", "InsightFace pretrained model license"),
     ("insightface.landmark3d", "insightface/models/buffalo_l/1k3d68.onnx", "insightface-buffalo-l", "InsightFace pretrained model license"),
@@ -60,4 +66,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
