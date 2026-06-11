@@ -1,6 +1,7 @@
 param(
     [string]$Apk = "$PSScriptRoot\..\release\FFacio-Android-release.apk",
     [string]$AvdName = "FFacio_API36",
+    [string]$Serial = "",
     [switch]$KeepRunning
 )
 
@@ -27,7 +28,7 @@ if (-not $existing) {
 }
 
 $devices = (& $adb devices) -join "`n"
-if ($devices -notmatch "emulator-\d+\s+device") {
+if (-not $Serial -and $devices -notmatch "emulator-\d+\s+device") {
     Start-Process -FilePath $emulator -ArgumentList @("-avd", $AvdName, "-no-snapshot-load", "-no-audio", "-no-window", "-gpu", "swiftshader_indirect", "-no-boot-anim") -WindowStyle Hidden
 }
 
@@ -35,22 +36,35 @@ if ($devices -notmatch "emulator-\d+\s+device") {
 $online = $false
 for ($i = 0; $i -lt 150; $i++) {
     $devices = (& $adb devices) -join "`n"
-    $boot = (& $adb shell getprop sys.boot_completed 2>$null).Trim()
-    if ($devices -match "emulator-\d+\s+device" -and $boot -eq "1") {
-        $online = $true
-        break
+    $serials = @()
+    foreach ($line in ($devices -split "`n")) {
+        if ($line -match "^(emulator-\d+)\s+device\b") { $serials += $Matches[1] }
+    }
+    if ($Serial) {
+        if ($serials -contains $Serial) { $serials = @($Serial) } else { $serials = @() }
+    } elseif ($serials.Count -gt 1) {
+        throw "Multiple emulators are online. Pass -Serial to choose one: $($serials -join ', ')"
+    }
+    if ($serials.Count -eq 1) {
+        $Serial = $serials[0]
+        $boot = (& $adb -s $Serial shell getprop sys.boot_completed 2>$null).Trim()
+        $actualAvd = (& $adb -s $Serial emu avd name 2>$null | Select-Object -First 1).Trim()
+        if ($boot -eq "1" -and $actualAvd -eq $AvdName) {
+            $online = $true
+            break
+        }
     }
     Start-Sleep -Seconds 2
 }
 if (-not $online) { throw "Android emulator did not become online and booted." }
 
-& $adb uninstall com.ffacio.mobile | Out-Null
-& $adb install -r $Apk
+& $adb -s $Serial uninstall com.ffacio.mobile | Out-Null
+& $adb -s $Serial install -r $Apk
 if ($LASTEXITCODE -ne 0) { throw "adb install failed with exit code $LASTEXITCODE" }
-& $adb logcat -c
-& $adb shell pm grant com.ffacio.mobile android.permission.CAMERA 2>$null
-& $adb shell am force-stop com.ffacio.mobile
-$launch = (& $adb shell monkey -p com.ffacio.mobile -c android.intent.category.LAUNCHER 1) -join "`n"
+& $adb -s $Serial logcat -c
+& $adb -s $Serial shell pm grant com.ffacio.mobile android.permission.CAMERA 2>$null
+& $adb -s $Serial shell am force-stop com.ffacio.mobile
+$launch = (& $adb -s $Serial shell monkey -p com.ffacio.mobile -c android.intent.category.LAUNCHER 1) -join "`n"
 $launch | Out-Host
 if ($launch -notmatch "Events injected:\s*1") {
     throw "Launcher start failed.`n$launch"
@@ -61,10 +75,10 @@ $logs = ""
 $modelsReady = $false
 for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Seconds 1
-    $appPidOut = & $adb shell pidof com.ffacio.mobile 2>$null
+    $appPidOut = & $adb -s $Serial shell pidof com.ffacio.mobile 2>$null
     $appPid = if ($appPidOut) { ($appPidOut -join "").Trim() } else { "" }
     if (-not $appPid) { throw "FFacio Android process stopped during launch verification.`n$logs" }
-    $logs = (& $adb logcat -d --pid=$appPid -t 500 2>$null) -join "`n"
+    $logs = (& $adb -s $Serial logcat -d --pid=$appPid -t 500 2>$null) -join "`n"
     if ($logs -match "FATAL EXCEPTION|AndroidRuntime") { throw "App crash detected in FFacio logcat.`n$logs" }
     if ($logs -match "Offline models ready") {
         $modelsReady = $true
@@ -75,5 +89,5 @@ if (-not $modelsReady) { throw "FFacio Android did not report bundled offline mo
 
 Write-Host "FFacio Android emulator smoke passed with pid $appPid and bundled model readiness confirmed"
 if (-not $KeepRunning) {
-    & $adb emu kill 2>$null | Out-Null
+    & $adb -s $Serial emu kill 2>$null | Out-Null
 }

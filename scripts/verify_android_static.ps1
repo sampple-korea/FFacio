@@ -1,7 +1,8 @@
 param(
     [string]$Apk = "$PSScriptRoot\..\release\FFacio-Android-release.apk",
     [string]$Manifest = "$PSScriptRoot\..\release\android-release-manifest.json",
-    [string]$ModelManifest = "$PSScriptRoot\..\resources\models\models.manifest.json"
+    [string]$ModelManifest = "$PSScriptRoot\..\resources\models\models.manifest.json",
+    [switch]$AllowStaleSourceState
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,6 +29,20 @@ if ([string]$json.sha256 -ne $hash) {
 }
 if (-not [bool]$json.signed) {
     throw "Android manifest does not mark the release APK as signed."
+}
+if (-not $AllowStaleSourceState) {
+    $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+    $currentCommit = (& git -C $repoRoot rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $json.git_commit -and ([string]$json.git_commit).Trim() -ne ([string]$currentCommit).Trim()) {
+        throw "Manifest git_commit $($json.git_commit) does not match current HEAD $currentCommit."
+    }
+    $status = @(& git -C $repoRoot status --porcelain 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $json.PSObject.Properties.Name -contains "git_dirty") {
+        $dirty = $status.Count -gt 0
+        if ([bool]$json.git_dirty -ne $dirty) {
+            throw "Manifest git_dirty=$($json.git_dirty) does not match current dirty state $dirty."
+        }
+    }
 }
 
 $sdk = $env:ANDROID_HOME

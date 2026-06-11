@@ -165,14 +165,19 @@ class MainActivity : ComponentActivity() {
         }
 
         modelExecutor.execute {
+            var createdEngine: MobileFaceEngine? = null
             val error = runCatching {
                 if (!OpenCVLoader.initDebug()) error("OpenCV init failed")
-                engine = MobileFaceEngine(
+                createdEngine = MobileFaceEngine(
                     copyAsset("models/opencv/face_detection_yunet_2023mar.onnx"),
                     copyAsset("models/opencv/face_recognition_sface_2021dec.onnx")
                 )
+                if (!active.get()) return@execute
+                engine = createdEngine
             }.exceptionOrNull()
+            if (!active.get()) return@execute
             ContextCompat.getMainExecutor(this).execute {
+                if (!active.get()) return@execute
                 if (error == null) {
                     Log.i("FFacio", "Offline models ready")
                 } else {
@@ -185,6 +190,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         active.set(false)
+        engine = null
         analyzerExecutor.shutdownNow()
         doorExecutor.shutdownNow()
         modelExecutor.shutdownNow()
@@ -299,11 +305,17 @@ private fun FFacioApp(
                     }
                 }
                 AdminAction.ResetStore -> {
-                    prefs.edit()
+                    val reset = prefs.edit()
                         .remove(USERS_KEY)
                         .remove("$USERS_KEY$SECURE_SUFFIX")
                         .remove("$USERS_KEY$LEGACY_SECURE_SUFFIX")
-                        .apply()
+                        .commit()
+                    if (!reset) {
+                        storeError = IllegalStateException("Local template reset could not be saved")
+                        status = "로컬 템플릿 초기화 실패"
+                        detail = "기기 저장소 상태를 확인한 뒤 다시 시도하세요"
+                        return@rememberLauncherForActivityResult
+                    }
                     users.clear()
                     storeError = null
                     liveCandidate = -1
@@ -316,13 +328,14 @@ private fun FFacioApp(
                 }
                 AdminAction.ArmDoor -> {
                     val saved = runCatching {
-                        if (doorUrl.trim().isEmpty()) error("Relay URL is required")
-                        if (doorToken.trim().isEmpty()) error("Relay token is required")
-                        prefs.edit()
-                            .putString(DOOR_URL_KEY, doorUrl.trim())
-                            .apply()
-                        securePutString(context, prefs, DOOR_TOKEN_KEY, doorToken.trim())
-                        prefs.edit().putBoolean(DOOR_ARMED_KEY, true).apply()
+                        val relayUrl = doorUrl.trim()
+                        val relayToken = doorToken.trim()
+                        if (relayUrl.isEmpty()) error("Relay URL is required")
+                        if (relayToken.isEmpty()) error("Relay token is required")
+                        if (URL(relayUrl).protocol.lowercase() != "https") error("HTTPS relay URL is required")
+                        if (!prefs.edit().putString(DOOR_URL_KEY, relayUrl).commit()) error("Relay URL could not be saved")
+                        securePutString(context, prefs, DOOR_TOKEN_KEY, relayToken)
+                        if (!prefs.edit().putBoolean(DOOR_ARMED_KEY, true).commit()) error("Relay armed state could not be saved")
                     }.onSuccess {
                         doorConfigError = null
                         doorArmed = true
@@ -330,7 +343,7 @@ private fun FFacioApp(
                         detail = "Requests are sent only after recognition and liveness pass"
                     }.onFailure {
                         doorArmed = false
-                        prefs.edit().putBoolean(DOOR_ARMED_KEY, false).apply()
+                        prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit()
                         doorConfigError = it
                         status = "Door token storage unavailable"
                         detail = it.message ?: "Encrypted relay token storage failed"
@@ -376,12 +389,12 @@ private fun FFacioApp(
             doorToken = it
             if (doorArmed && it.isBlank()) {
                 doorArmed = false
-                prefs.edit().putBoolean(DOOR_ARMED_KEY, false).apply()
+                prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit()
             }
         }.onFailure {
             doorConfigError = it
             doorArmed = false
-            prefs.edit().putBoolean(DOOR_ARMED_KEY, false).apply()
+            prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit()
         }
         storeError = loaded.error
         users.replaceWith(loaded.users)
@@ -414,7 +427,7 @@ private fun FFacioApp(
 
     fun persistDoorDisabled() {
         runCatching {
-            prefs.edit().putBoolean(DOOR_ARMED_KEY, false).apply()
+            if (!prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit()) error("Relay disabled state could not be saved")
         }.onSuccess {
             doorConfigError = null
         }.onFailure {
@@ -481,7 +494,7 @@ private fun FFacioApp(
         val relayToken = doorToken.trim()
         if (relayUrl.isEmpty() || relayToken.isEmpty()) {
             doorArmed = false
-            prefs.edit().putBoolean(DOOR_ARMED_KEY, false).apply()
+            prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit()
             status = "문 제어가 설정되지 않았습니다"
             detail = "릴레이 URL과 토큰을 저장한 뒤 다시 활성화하세요"
             return
@@ -640,7 +653,11 @@ private fun FFacioApp(
                     if (it && doorUrl.trim().isEmpty()) {
                         doorArmed = false
                         status = "릴레이 URL이 필요합니다"
-                        detail = "문 열림을 활성화하려면 HTTP 릴레이 URL을 먼저 입력하세요"
+                        detail = "문 열림을 활성화하려면 HTTPS 릴레이 URL을 먼저 입력하세요"
+                    } else if (it && runCatching { URL(doorUrl.trim()).protocol.lowercase() == "https" }.getOrDefault(false).not()) {
+                        doorArmed = false
+                        status = "HTTPS 릴레이가 필요합니다"
+                        detail = "Bearer 토큰을 사용하는 Android 문 제어는 HTTPS URL만 허용합니다"
                     } else if (it && doorToken.trim().isEmpty()) {
                         doorArmed = false
                         status = "릴레이 토큰이 필요합니다"
@@ -751,10 +768,14 @@ private fun CameraStage(
     }
     DisposableEffect(enabled, cameraRetryNonce) {
         var providerFuture: ListenableFuture<ProcessCameraProvider>? = null
+        var boundProvider: ProcessCameraProvider? = null
+        var boundPreview: Preview? = null
+        var boundAnalysis: ImageAnalysis? = null
         if (enabled) {
             providerFuture = ProcessCameraProvider.getInstance(context)
             providerFuture.addListener({
                 runCatching {
+                    if (!active.get()) return@addListener
                     val provider = providerFuture.get()
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
@@ -779,6 +800,9 @@ private fun CameraStage(
                         onCameraUnavailable()
                     } else {
                         provider.bindToLifecycle(context as ComponentActivity, selector, preview, analysis)
+                        boundProvider = provider
+                        boundPreview = preview
+                        boundAnalysis = analysis
                     }
                 }.onFailure {
                     onCameraUnavailable()
@@ -786,9 +810,20 @@ private fun CameraStage(
             }, ContextCompat.getMainExecutor(context))
         }
         onDispose {
-            providerFuture?.addListener({
-                runCatching { providerFuture?.get()?.unbindAll() }
-            }, ContextCompat.getMainExecutor(context))
+            boundAnalysis?.clearAnalyzer()
+            val provider = boundProvider
+            val preview = boundPreview
+            val analysis = boundAnalysis
+            if (provider != null && preview != null && analysis != null) {
+                runCatching { provider.unbind(preview, analysis) }
+            } else {
+                providerFuture?.addListener({
+                    runCatching {
+                        boundAnalysis?.clearAnalyzer()
+                        providerFuture.get().unbindAll()
+                    }
+                }, ContextCompat.getMainExecutor(context))
+            }
         }
     }
 
@@ -912,7 +947,7 @@ private fun ControlPanel(
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Switch(checked = doorArmed, onCheckedChange = onDoorArmed)
-                Text("인증 성공 시 HTTP 릴레이 열기", color = ComposeColor(0xFF1D1D1F))
+                Text("인증 성공 시 HTTPS 릴레이 열기", color = ComposeColor(0xFF1D1D1F))
             }
             if (doorArmed && doorUrl.trim().isEmpty()) {
                 Text("릴레이 URL을 입력해야 문 열림이 활성화됩니다", color = ComposeColor(0xFFFF3B30), fontSize = 13.sp)
@@ -920,13 +955,15 @@ private fun ControlPanel(
             OutlinedTextField(
                 value = doorUrl,
                 onValueChange = onDoorUrl,
-                label = { Text("HTTP 릴레이 URL") },
+                enabled = !doorArmed,
+                label = { Text("HTTPS 릴레이 URL") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
             OutlinedTextField(
                 value = doorToken,
                 onValueChange = onDoorToken,
+                enabled = !doorArmed,
                 label = { Text("Bearer 토큰") },
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -1165,7 +1202,7 @@ private fun MutableList<UserTemplate>.replaceWith(items: List<UserTemplate>) {
 }
 
 private fun loadUsers(context: Context, prefs: SharedPreferences): StoreLoadResult = runCatching {
-    val raw = secureGetString(context, prefs, USERS_KEY, prefs.getString(USERS_KEY, "[]") ?: "[]", failClosed = true)
+    val raw = secureGetString(context, prefs, USERS_KEY, "[]", failClosed = true)
     val array = JSONArray(raw)
     StoreLoadResult(buildList {
         for (i in 0 until array.length()) {
@@ -1214,7 +1251,8 @@ private fun securePutString(context: Context, prefs: SharedPreferences, key: Str
         .putString("$key$SECURE_SUFFIX", Base64.encodeToString(payload, Base64.NO_WRAP))
         .remove("$key$LEGACY_SECURE_SUFFIX")
         .remove(key)
-        .apply()
+        .commit()
+        .also { if (!it) error("Encrypted local store could not be saved") }
 }
 
 private fun decryptPayload(context: Context, payload: ByteArray, alias: String, authRequired: Boolean): String {
