@@ -5,6 +5,7 @@
 - Keeps the Android app display awake while active so a mounted door terminal does not sleep during operation.
 - Keeps `FLAG_SECURE` and admin session timeout behavior in place while the display stays awake.
 - Reduces public operation-screen biometric context exposure: approved user names and approval timestamps are no longer shown on the operation screen, while the detailed approval log remains in the screen-lock-protected admin view.
+- Adds Android production signing setup guidance and manifest fields that distinguish a persistent production keystore from a disposable local sideload key.
 
 ## Artifact
 

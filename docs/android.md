@@ -18,6 +18,7 @@ Android build target for the same offline face access goal.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup_android_deps.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create_android_release_keystore.ps1
 $env:FFACIO_ANDROID_KEYSTORE = "C:\path\to\release.jks"
 $env:FFACIO_ANDROID_KEYSTORE_PASSWORD = "<store-password>"
 $env:FFACIO_ANDROID_KEY_ALIAS = "<key-alias>"
@@ -28,6 +29,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify_android_emu
 ```
 
 For disposable local sideload testing only, `scripts\build_android.ps1 -AllowGeneratedSigningKey` can create `release\ffacio-local-release.jks`. Do not treat that generated key as reproducible production signing provenance.
+
+For production-like door terminals, create and back up one persistent keystore outside the repo with `scripts\create_android_release_keystore.ps1`, then reuse it for every release. Replacing the keystore changes the APK signing lineage and can prevent in-place upgrades on installed devices.
 
 Output:
 
@@ -40,6 +43,7 @@ Output:
 ## Current Caveats
 
 - Release APK signing requires `FFACIO_ANDROID_KEYSTORE` and related signing environment variables. The private signing key is intentionally not stored in git.
+- `android-release-manifest.json` records whether the APK used production signing or the disposable local sideload key.
 - Android uses OpenCV YuNet/SFace plus MiniFASNet-V2. The larger desktop InsightFace `buffalo_l` bundle is not packaged into the APK.
 - `scripts\build_android.ps1` runs unit tests, release lint, debug/release assembly, static APK verification, and emulator launch/model-readiness smoke. The emulator check is still not a substitute for real-device enrollment/auth/liveness testing.
 - RGB-camera liveness defaults to the active left/right pose challenge. The optional passive MiniFASNet anti-spoofing switch can add another check against many static photo and simple screen attacks, but it is not equivalent to hardware depth/IR Face ID.
