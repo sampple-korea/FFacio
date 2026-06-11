@@ -1,5 +1,5 @@
 #define AppName "FFacio"
-#define AppVersion "0.2.2"
+#define AppVersion "0.3.5"
 #define Publisher "FFacio"
 #define SourceDir "..\dist\FFacio"
 

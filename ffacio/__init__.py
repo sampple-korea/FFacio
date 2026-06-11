@@ -1,3 +1,3 @@
 __all__ = ["__version__"]
 
-__version__ = "0.2.2"
+from .paths import APP_VERSION as __version__

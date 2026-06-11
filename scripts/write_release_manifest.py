@@ -6,6 +6,8 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ffacio.paths import APP_VERSION
+
 
 ROOT = Path(__file__).resolve().parent.parent
 RELEASE = ROOT / "release"
@@ -32,7 +34,7 @@ def main() -> None:
     ).stdout.strip()
     manifest = {
         "name": "FFacio",
-        "version": "0.2.2",
+        "version": APP_VERSION,
         "artifact": str(SETUP.name),
         "size": SETUP.stat().st_size,
         "sha256": sha256_file(SETUP),
