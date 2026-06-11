@@ -320,13 +320,22 @@ private fun FFacioApp(
                     }
                 }
                 AdminAction.ResetStore -> {
-                    val reset = prefs.edit()
-                        .remove(USERS_KEY)
-                        .remove("$USERS_KEY$SECURE_SUFFIX")
-                        .remove("$USERS_KEY$LEGACY_SECURE_SUFFIX")
-                        .commit()
-                    if (!reset) {
-                        storeError = IllegalStateException("Local template reset could not be saved")
+                    val reset = runCatching {
+                        val removed = prefs.edit()
+                            .remove(USERS_KEY)
+                            .remove("$USERS_KEY$SECURE_SUFFIX")
+                            .remove("$USERS_KEY$LEGACY_SECURE_SUFFIX")
+                            .remove(DOOR_URL_KEY)
+                            .remove(DOOR_TOKEN_KEY)
+                            .remove("$DOOR_TOKEN_KEY$SECURE_SUFFIX")
+                            .remove("$DOOR_TOKEN_KEY$LEGACY_SECURE_SUFFIX")
+                            .remove(DOOR_ARMED_KEY)
+                            .commit()
+                        if (!removed) error("Local template reset could not be saved")
+                        deleteKeystoreAlias(KEYSTORE_ALIAS)
+                    }
+                    if (reset.isFailure) {
+                        storeError = IllegalStateException("Local template reset could not be saved", reset.exceptionOrNull())
                         status = "로컬 템플릿 초기화 실패"
                         detail = "기기 저장소 상태를 확인한 뒤 다시 시도하세요"
                         return@rememberLauncherForActivityResult
@@ -338,6 +347,10 @@ private fun FFacioApp(
                     stableCount = 0
                     liveness.reset()
                     confirmDelete = false
+                    doorUrl = ""
+                    doorToken = ""
+                    doorConfigError = null
+                    doorArmed = false
                     status = "로컬 템플릿 저장소 초기화 완료"
                     detail = "기기 안의 얼굴 템플릿을 지웠습니다. 새 사용자를 등록하세요"
                 }
@@ -1350,6 +1363,13 @@ private fun keystoreKey(context: Context, alias: String, authRequired: Boolean):
     return generator.generateKey()
 }
 
+private fun deleteKeystoreAlias(alias: String) {
+    val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+    if (keyStore.containsAlias(alias)) {
+        keyStore.deleteEntry(alias)
+    }
+}
+
 private fun match(embedding: FloatArray, users: List<UserTemplate>): Match {
     var best = -1.0
     var second = -1.0
@@ -1398,6 +1418,7 @@ private fun postDoor(url: String, token: String, user: String): Boolean = runCat
     if (token.isNotBlank() && endpoint.protocol.lowercase() != "https") return@runCatching false
     val conn = (endpoint.openConnection() as HttpURLConnection).apply {
         requestMethod = "POST"
+        instanceFollowRedirects = false
         connectTimeout = 1800
         readTimeout = 1800
         doOutput = true

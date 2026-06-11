@@ -2,6 +2,7 @@ param(
     [string]$Apk = "$PSScriptRoot\..\release\FFacio-Android-release.apk",
     [string]$AvdName = "FFacio_API36",
     [string]$Serial = "",
+    [string]$Report = "",
     [switch]$KeepRunning
 )
 
@@ -28,6 +29,7 @@ if (-not $existing) {
 }
 
 $devices = (& $adb devices) -join "`n"
+$actualAvd = ""
 if (-not $Serial -and $devices -notmatch "emulator-\d+\s+device") {
     Start-Process -FilePath $emulator -ArgumentList @("-avd", $AvdName, "-no-snapshot-load", "-no-audio", "-no-window", "-gpu", "swiftshader_indirect", "-no-boot-anim") -WindowStyle Hidden
 }
@@ -88,6 +90,24 @@ for ($i = 0; $i -lt 60; $i++) {
 if (-not $modelsReady) { throw "FFacio Android did not report bundled offline model readiness within 60 seconds.`n$logs" }
 
 Write-Host "FFacio Android emulator smoke passed with pid $appPid and bundled model readiness confirmed"
+if ($Report) {
+    $reportPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Report)
+    $reportDir = Split-Path -Parent $reportPath
+    if ($reportDir) { New-Item -ItemType Directory -Force $reportDir | Out-Null }
+    [ordered]@{
+        status = "passed"
+        apk = (Split-Path -Leaf $Apk)
+        apk_sha256 = (Get-FileHash $Apk -Algorithm SHA256).Hash.ToLowerInvariant()
+        requested_avd = $AvdName
+        avd_name = $actualAvd
+        serial = $Serial
+        app_pid = $appPid
+        launch_method = "adb monkey launcher"
+        model_ready_verified = $true
+        verified_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        keep_running = [bool]$KeepRunning
+    } | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 $reportPath
+}
 if (-not $KeepRunning) {
     & $adb -s $Serial emu kill 2>$null | Out-Null
 }

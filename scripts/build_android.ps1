@@ -111,6 +111,11 @@ $manifest = [ordered]@{
     emulator_verified = $false
     launch_verified = $false
     model_ready_verified = $false
+    emulator_report = $null
+    emulator_serial = $null
+    emulator_avd = $null
+    emulator_app_pid = $null
+    emulator_launch_method = $null
     verified_apk_sha256 = $null
     verified_at = $null
     notes = "Release APK is locally signed for sideload testing, not Play production signing. OpenCV YuNet/SFace and the shared model bundle are included; no cloud subscription is used."
@@ -122,11 +127,18 @@ $manifestPath = Join-Path $ReleaseDir "android-release-manifest.json"
 $verified = Get-Content -Raw $manifestPath -Encoding UTF8 | ConvertFrom-Json
 $verified.static_verified = $true
 if (-not $SkipEmulatorVerification) {
-    & (Join-Path $PSScriptRoot "verify_android_emulator.ps1") -Apk $releaseOut
+    $emulatorReport = Join-Path $ReleaseDir "android-emulator-verification.json"
+    & (Join-Path $PSScriptRoot "verify_android_emulator.ps1") -Apk $releaseOut -Report $emulatorReport
     if ($LASTEXITCODE -ne 0) { throw "Android emulator verification failed with exit code $LASTEXITCODE." }
+    $emulatorEvidence = Get-Content -Raw $emulatorReport -Encoding UTF8 | ConvertFrom-Json
     $verified.emulator_verified = $true
     $verified.launch_verified = $true
     $verified.model_ready_verified = $true
+    $verified.emulator_report = Split-Path -Leaf $emulatorReport
+    $verified.emulator_serial = $emulatorEvidence.serial
+    $verified.emulator_avd = $emulatorEvidence.avd_name
+    $verified.emulator_app_pid = $emulatorEvidence.app_pid
+    $verified.emulator_launch_method = $emulatorEvidence.launch_method
     $verified.verified_apk_sha256 = $releaseHash
     $verified.verified_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 }

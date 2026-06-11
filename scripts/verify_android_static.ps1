@@ -38,9 +38,32 @@ if (-not $AllowStaleSourceState) {
     }
     $status = @(& git -C $repoRoot status --porcelain 2>$null)
     if ($LASTEXITCODE -eq 0 -and $json.PSObject.Properties.Name -contains "git_dirty") {
-        $dirty = $status.Count -gt 0
+        $manifestRelative = (Resolve-Path $manifestPath).Path.Substring((Resolve-Path $repoRoot).Path.Length).TrimStart("\", "/").Replace("\", "/")
+        $statusComparable = @(
+            $status |
+                ForEach-Object { [string]$_ } |
+                Where-Object { (-not $_.Replace("\", "/").EndsWith(" $manifestRelative")) -and ($_.Replace("\", "/") -ne "?? $manifestRelative") }
+        )
+        $dirty = $statusComparable.Count -gt 0
         if ([bool]$json.git_dirty -ne $dirty) {
             throw "Manifest git_dirty=$($json.git_dirty) does not match current dirty state $dirty."
+        }
+        if ($json.PSObject.Properties.Name -contains "git_dirty_paths") {
+            $manifestDirtyPaths = @(
+                $json.git_dirty_paths |
+                    ForEach-Object { [string]$_ } |
+                    Where-Object { (-not $_.Replace("\", "/").EndsWith(" $manifestRelative")) -and ($_.Replace("\", "/") -ne "?? $manifestRelative") }
+            )
+            $expected = @($manifestDirtyPaths | Sort-Object)
+            $actual = @($statusComparable | Sort-Object)
+            if ($expected.Count -ne $actual.Count) {
+                throw "Manifest git_dirty_paths count $($expected.Count) does not match current dirty path count $($actual.Count). Manifest=[$($expected -join '; ')] Current=[$($actual -join '; ')]"
+            }
+            for ($i = 0; $i -lt $expected.Count; $i++) {
+                if ($expected[$i] -ne $actual[$i]) {
+                    throw "Manifest git_dirty_paths do not match current dirty paths. Manifest=[$($expected -join '; ')] Current=[$($actual -join '; ')]"
+                }
+            }
         }
     }
 }
