@@ -32,7 +32,7 @@ def main() -> None:
     ).stdout.strip()
     manifest = {
         "name": "FFacio",
-        "version": "0.2.1",
+        "version": "0.2.2",
         "artifact": str(SETUP.name),
         "size": SETUP.stat().st_size,
         "sha256": sha256_file(SETUP),

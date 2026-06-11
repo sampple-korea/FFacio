@@ -17,11 +17,11 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'FFacio'),
           StringStruct('FileDescription', 'FFacio local face access authenticator'),
-          StringStruct('FileVersion', '0.2.1'),
+          StringStruct('FileVersion', '0.2.2'),
           StringStruct('InternalName', 'FFacio'),
           StringStruct('OriginalFilename', 'FFacio.exe'),
           StringStruct('ProductName', 'FFacio'),
-          StringStruct('ProductVersion', '0.2.1')
+          StringStruct('ProductVersion', '0.2.2')
         ]
       )
     ]),
