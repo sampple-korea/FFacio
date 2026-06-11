@@ -171,7 +171,7 @@ $manifest = [ordered]@{
     emulator_launch_method = $null
     verified_apk_sha256 = $null
     verified_at = $null
-    notes = "Release APK is signed with the configured Android keystore for this build. OpenCV YuNet/SFace and MiniFASNet-V2 are bundled for Android; desktop-only InsightFace assets are not packaged. No cloud subscription is used."
+    notes = "Release APK signing source: $signingSource. OpenCV YuNet/SFace and MiniFASNet-V2 are bundled for Android; desktop-only InsightFace assets are not packaged. No cloud subscription is used."
 }
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $ReleaseDir "android-release-manifest.json")
 & (Join-Path $PSScriptRoot "verify_android_static.ps1") -Apk $releaseOut -Manifest (Join-Path $ReleaseDir "android-release-manifest.json") -ModelManifest $androidModelManifest
