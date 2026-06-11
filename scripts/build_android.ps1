@@ -26,20 +26,35 @@ $env:PATH = (Join-Path $env:JAVA_HOME "bin") + ";" + $env:PATH
 
 New-Item -ItemType Directory -Force $ReleaseDir | Out-Null
 
-$modelManifest = Join-Path $PSScriptRoot "..\resources\models\models.manifest.json"
-if (-not (Test-Path $modelManifest)) {
-    $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$modelRoot = Join-Path $repoRoot "resources\models"
+$modelManifest = Join-Path $modelRoot "models.manifest.json"
+$androidModelFiles = @(
+    Join-Path $modelRoot "opencv\face_detection_yunet_2023mar.onnx",
+    Join-Path $modelRoot "opencv\face_recognition_sface_2021dec.onnx",
+    Join-Path $modelRoot "antispoof\minifasnet_v2.onnx"
+)
+$missingAndroidModelFiles = @($androidModelFiles | Where-Object { -not (Test-Path $_) })
+if ((-not (Test-Path $modelManifest)) -or $missingAndroidModelFiles.Count -gt 0) {
     $python = Join-Path $repoRoot ".venv\Scripts\python.exe"
     if (-not (Test-Path $python)) {
         $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
         if (-not $pythonCmd) { throw "Python is required to fetch pinned Android model assets." }
         $python = $pythonCmd.Source
     }
+    if ($missingAndroidModelFiles.Count -gt 0) {
+        Write-Host "Missing Android model assets; fetching pinned model set:"
+        $missingAndroidModelFiles | ForEach-Object { Write-Host "  - $_" }
+    }
     & $python (Join-Path $PSScriptRoot "fetch_models.py")
     if ($LASTEXITCODE -ne 0) { throw "Pinned model fetch failed with exit code $LASTEXITCODE." }
 }
 if (-not (Test-Path $modelManifest)) {
     throw "Offline model manifest is missing after preparation: $modelManifest"
+}
+$missingAndroidModelFiles = @($androidModelFiles | Where-Object { -not (Test-Path $_) })
+if ($missingAndroidModelFiles.Count -gt 0) {
+    throw "Android model assets are missing after preparation: $($missingAndroidModelFiles -join ', ')"
 }
 
 $keyStore = $env:FFACIO_ANDROID_KEYSTORE

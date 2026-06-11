@@ -144,6 +144,7 @@ private const val PREFS = "ffacio_store"
 private const val USERS_KEY = "users"
 private const val DOOR_URL_KEY = "door_url"
 private const val DOOR_TOKEN_KEY = "door_token"
+private const val DOOR_ENABLED_KEY = "door_enabled"
 private const val PASSIVE_LIVENESS_ENABLED_KEY = "passive_liveness_enabled"
 private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key_v3"
 private const val LEGACY_KEYSTORE_ALIAS = "ffacio_mobile_store_key_v2"
@@ -201,10 +202,15 @@ class MainActivity : ComponentActivity() {
             var createdEngine: MobileFaceEngine? = null
             val error = runCatching {
                 if (!OpenCVLoader.initDebug()) error("OpenCV init failed")
+                val antiSpoofModel = runCatching {
+                    copyAsset("models/antispoof/minifasnet_v2.onnx")
+                }.onFailure {
+                    Log.w("FFacio", "Optional passive PAD model is unavailable; active liveness remains available", it)
+                }.getOrNull()
                 createdEngine = MobileFaceEngine(
                     copyAsset("models/opencv/face_detection_yunet_2023mar.onnx"),
                     copyAsset("models/opencv/face_recognition_sface_2021dec.onnx"),
-                    copyAsset("models/antispoof/minifasnet_v2.onnx")
+                    antiSpoofModel
                 )
             }.exceptionOrNull()
             if (!active.get()) {
@@ -325,21 +331,25 @@ private fun FFacioApp(
     var status by remember { mutableStateOf("시스템 준비 중") }
     var detail by remember { mutableStateOf("모델과 카메라를 확인하고 있습니다") }
     var mode by remember { mutableStateOf(AppMode.Auth) }
+    var appScreen by remember { mutableStateOf(AppScreen.Operation) }
+    var adminPromptInFlight by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var enrollmentName by remember { mutableStateOf("") }
     var doorUrl by remember { mutableStateOf(prefs.getString(DOOR_URL_KEY, "") ?: "") }
     var doorToken by remember { mutableStateOf("") }
     var doorConfigError by remember { mutableStateOf<Throwable?>(null) }
-    var doorArmed by remember { mutableStateOf(false) }
+    var doorArmed by remember { mutableStateOf(prefs.getBoolean(DOOR_ENABLED_KEY, false)) }
     var passiveLivenessEnabled by remember { mutableStateOf(false) }
     var cameraAvailable by remember { mutableStateOf(true) }
     var noCameraHardware by remember { mutableStateOf(false) }
     var cameraRetryNonce by remember { mutableIntStateOf(0) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var pendingDeleteUserIndex by remember { mutableIntStateOf(-1) }
     var pendingAdminAction by remember { mutableStateOf<AdminAction?>(null) }
     val enrollSamples = remember { mutableStateListOf<FloatArray>() }
     val enrollPoses = remember { mutableStateListOf<Int>() }
     val approvalLogs = remember { mutableStateListOf<ApprovalLogEntry>() }
+    var accessFeedback by remember { mutableStateOf<AccessFeedback?>(null) }
     val liveness = remember { LivenessChallenge() }
     var guideState by remember { mutableStateOf(FaceGuideState.Searching) }
     var liveCandidate by remember { mutableIntStateOf(-1) }
@@ -350,6 +360,7 @@ private fun FFacioApp(
     var hasCameraPermission by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
+    val currentAdminPromptInFlight by rememberUpdatedState(adminPromptInFlight)
     LaunchedEffect(Unit) {
         prefs.edit().remove(PASSIVE_LIVENESS_ENABLED_KEY).apply()
     }
@@ -359,6 +370,7 @@ private fun FFacioApp(
             delay(remaining)
             if (System.currentTimeMillis() >= authResultHoldUntil) {
                 authResultHoldUntil = 0L
+                accessFeedback = null
                 if (mode == AppMode.Auth) {
                     guideState = FaceGuideState.Searching
                 }
@@ -376,8 +388,15 @@ private fun FFacioApp(
     val adminLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         val action = pendingAdminAction
         pendingAdminAction = null
+        adminPromptInFlight = false
         if (it.resultCode == Activity.RESULT_OK && action != null) {
             when (action) {
+                AdminAction.OpenAdmin -> {
+                    appScreen = AppScreen.Admin
+                    authResultHoldUntil = 0L
+                    status = "관리자 설정"
+                    detail = "등록 사용자, 문 열림 릴레이, 보안 옵션을 관리할 수 있습니다"
+                }
                 AdminAction.StartEnroll -> {
                     storageBusy = true
                     status = "로컬 저장소를 확인하는 중입니다"
@@ -390,6 +409,7 @@ private fun FFacioApp(
                         storageBusy = false
                         checked.onSuccess {
                             storeError = null
+                            appScreen = AppScreen.Admin
                             mode = AppMode.Enroll
                             enrollmentName = name.trim()
                             enrollSamples.clear()
@@ -413,6 +433,47 @@ private fun FFacioApp(
                         }
                     }
                 }
+                AdminAction.DeleteUser -> {
+                    val deleteIndex = pendingDeleteUserIndex
+                    pendingDeleteUserIndex = -1
+                    if (deleteIndex !in users.indices) {
+                        status = "삭제할 사용자를 찾을 수 없습니다"
+                        detail = "등록 사용자 목록을 다시 확인해 주세요"
+                        return@rememberLauncherForActivityResult
+                    }
+                    val deleteName = users[deleteIndex].name
+                    val nextUsers = removeRegisteredUserAt(users.toList(), deleteIndex)
+                        ?: run {
+                            status = "삭제할 사용자를 찾을 수 없습니다"
+                            detail = "등록 사용자 목록을 다시 확인해 주세요"
+                            return@rememberLauncherForActivityResult
+                        }
+                    storageBusy = true
+                    status = "등록 사용자 삭제 중"
+                    detail = "$deleteName 템플릿을 로컬 저장소에서 제거하고 있습니다"
+                    appScope.launch {
+                        val deleted = withContext(Dispatchers.IO) {
+                            runCatching { saveUsers(context, prefs, nextUsers) }
+                        }
+                        if (!active.get()) return@launch
+                        storageBusy = false
+                        deleted.onFailure {
+                            storeError = it
+                            status = "등록 사용자를 삭제할 수 없습니다"
+                            detail = "암호화된 얼굴 템플릿 저장소 업데이트에 실패했습니다"
+                        }.onSuccess {
+                            storeError = null
+                            appScreen = AppScreen.Admin
+                            users.replaceWith(nextUsers)
+                            liveCandidate = -1
+                            stableUser = -1
+                            stableCount = 0
+                            liveness.reset()
+                            status = "등록 사용자 삭제 완료"
+                            detail = "$deleteName 사용자를 삭제했습니다"
+                        }
+                    }
+                }
                 AdminAction.DeleteUsers -> {
                     storageBusy = true
                     confirmDelete = false
@@ -430,6 +491,7 @@ private fun FFacioApp(
                             detail = "암호화된 얼굴 템플릿 저장에 실패해 인증을 차단했습니다"
                         }.onSuccess {
                             storeError = null
+                            appScreen = AppScreen.Admin
                             users.clear()
                             liveCandidate = -1
                             stableUser = -1
@@ -451,6 +513,7 @@ private fun FFacioApp(
                         storageBusy = false
                         storeError = loaded.error
                         if (loaded.error == null) {
+                            appScreen = AppScreen.Admin
                             users.replaceWith(loaded.users)
                             mode = AppMode.Auth
                             enrollmentName = ""
@@ -482,6 +545,7 @@ private fun FFacioApp(
                                     .remove("$USERS_KEY$OLDER_SECURE_SUFFIX")
                                     .remove(DOOR_URL_KEY)
                                     .remove(DOOR_TOKEN_KEY)
+                                    .remove(DOOR_ENABLED_KEY)
                                     .remove("$DOOR_TOKEN_KEY$SECURE_SUFFIX")
                                     .remove("$DOOR_TOKEN_KEY$LEGACY_SECURE_SUFFIX")
                                     .remove("$DOOR_TOKEN_KEY$OLDER_SECURE_SUFFIX")
@@ -514,6 +578,7 @@ private fun FFacioApp(
                             return@launch
                         }
                         storeError = null
+                        appScreen = AppScreen.Admin
                         status = "로컬 템플릿 저장소 초기화 완료"
                         detail = "기기 안의 얼굴 템플릿을 지웠습니다. 새 사용자를 등록하세요"
                     }
@@ -532,17 +597,20 @@ private fun FFacioApp(
                                 if (URL(relayUrl).protocol.lowercase() != "https") error("HTTPS 릴레이 URL만 사용할 수 있습니다")
                                 if (!prefs.edit().putString(DOOR_URL_KEY, relayUrl).commit()) error("릴레이 URL을 저장하지 못했습니다")
                                 securePutString(context, prefs, DOOR_TOKEN_KEY, relayToken)
+                                if (!prefs.edit().putBoolean(DOOR_ENABLED_KEY, true).commit()) error("릴레이 활성화 상태를 저장하지 못했습니다")
                             }
                         }
                         if (!active.get()) return@launch
                         storageBusy = false
                         if (saved.isSuccess) {
+                            appScreen = AppScreen.Admin
                             doorConfigError = null
                             doorArmed = true
                             status = "문 열림 릴레이 활성화 완료"
                             detail = "얼굴 인증과 라이브니스 확인을 모두 통과한 뒤에만 요청합니다"
                         } else {
                             doorArmed = false
+                            prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).apply()
                             doorConfigError = saved.exceptionOrNull()
                             status = "릴레이 설정을 저장할 수 없습니다"
                             detail = saved.exceptionOrNull()?.message ?: "암호화된 릴레이 토큰 저장에 실패했습니다"
@@ -564,12 +632,15 @@ private fun FFacioApp(
                         if (!active.get()) return@launch
                         storageBusy = false
                         if (loaded.isSuccess) {
+                            appScreen = AppScreen.Admin
                             doorToken = loaded.getOrDefault("")
+                            doorArmed = prefs.getBoolean(DOOR_ENABLED_KEY, false) && doorToken.isNotBlank()
                             doorConfigError = null
                             status = "릴레이 토큰 잠금 해제 완료"
                             detail = if (doorArmed) "인증 성공 시 저장된 HTTPS 릴레이로 요청합니다" else "필요하면 문 열림 스위치를 다시 활성화하세요"
                         } else {
                             doorArmed = false
+                            prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).apply()
                             doorConfigError = loaded.exceptionOrNull()
                             status = "릴레이 토큰을 열 수 없습니다"
                             detail = "토큰을 다시 입력하고 기기 인증 후 활성화하세요"
@@ -578,6 +649,15 @@ private fun FFacioApp(
                 }
             }
         } else {
+            adminPromptInFlight = false
+            appScreen = AppScreen.Operation
+            mode = AppMode.Auth
+            authResultHoldUntil = 0L
+            liveCandidate = -1
+            stableUser = -1
+            stableCount = 0
+            pendingDeleteUserIndex = -1
+            liveness.reset()
             status = "기기 인증이 취소되었습니다"
             detail = "등록, 삭제, 문 열림 활성화에는 기기 잠금 해제가 필요합니다"
         }
@@ -604,7 +684,14 @@ private fun FFacioApp(
                     }
                 }
             } else if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
-                doorArmed = false
+                if (shouldReturnToOperationOnLifecyclePause(currentAdminPromptInFlight)) {
+                    appScreen = AppScreen.Operation
+                    mode = AppMode.Auth
+                    enrollmentName = ""
+                    enrollSamples.clear()
+                    enrollPoses.clear()
+                    authResultHoldUntil = 0L
+                }
                 liveCandidate = -1
                 stableUser = -1
                 stableCount = 0
@@ -623,10 +710,11 @@ private fun FFacioApp(
         tokenLoad.onSuccess {
             doorConfigError = null
             doorToken = it
-            doorArmed = false
+            doorArmed = prefs.getBoolean(DOOR_ENABLED_KEY, false) && it.isNotBlank()
         }.onFailure {
             doorConfigError = it
             doorArmed = false
+            prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).apply()
         }
         storeError = loaded.error
         users.replaceWith(loaded.users)
@@ -657,8 +745,9 @@ private fun FFacioApp(
         if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    fun disableDoorForSession() {
+    fun disableDoorControl() {
         doorArmed = false
+        prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).apply()
         doorConfigError = null
     }
 
@@ -671,6 +760,7 @@ private fun FFacioApp(
 
     fun clearAuthResultHold() {
         authResultHoldUntil = 0L
+        accessFeedback = null
     }
 
     fun recordApproval(userName: String, result: String) {
@@ -720,6 +810,12 @@ private fun FFacioApp(
             return
         }
         pendingAdminAction = action
+        adminPromptInFlight = true
+        authResultHoldUntil = 0L
+        liveCandidate = -1
+        stableUser = -1
+        stableCount = 0
+        liveness.reset()
         adminLauncher.launch(prompt)
     }
 
@@ -746,21 +842,38 @@ private fun FFacioApp(
         cameraAvailable &&
         !noCameraHardware
 
-    fun cameraCanAnalyze(): Boolean = cameraCanPreview() && idleReason() == null
+    fun cameraCanUseForCurrentScreen(): Boolean = shouldUseCameraForScreen(
+        baseReady = cameraCanPreview(),
+        adminPromptInFlight = adminPromptInFlight,
+        isOperationScreen = appScreen == AppScreen.Operation,
+        isAdminScreen = appScreen == AppScreen.Admin,
+        isEnrollmentMode = mode == AppMode.Enroll
+    )
+
+    fun cameraCanAnalyze(): Boolean = shouldAnalyzeCameraFrame(
+        baseReady = cameraCanPreview(),
+        adminPromptInFlight = adminPromptInFlight,
+        isOperationScreen = appScreen == AppScreen.Operation,
+        isAdminScreen = appScreen == AppScreen.Admin,
+        isEnrollmentMode = mode == AppMode.Enroll,
+        hasIdleReason = idleReason() != null
+    )
 
     fun openDoor(user: UserTemplate) {
         val now = System.currentTimeMillis()
+        if (adminPromptInFlight || appScreen != AppScreen.Operation) return
         if (!doorArmed || now - lastOpenAt < 3500L) return
         val relayUrl = doorUrl.trim()
         val relayToken = doorToken.trim()
         if (relayUrl.isEmpty() || relayToken.isEmpty()) {
             doorArmed = false
+            prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).apply()
             status = "문 제어가 설정되지 않았습니다"
             detail = "릴레이 URL과 토큰을 저장한 뒤 다시 활성화하세요"
             return
         }
-        doorArmed = false
         lastOpenAt = now
+        accessFeedback = AccessFeedback(AccessFeedbackKind.DoorPending, user.name)
         status = "인증 완료 · 문 열림 요청"
         detail = "${user.name}님 승인 · 릴레이 응답을 기다리고 있습니다"
         if (doorExecutor.isShutdown) return
@@ -769,7 +882,8 @@ private fun FFacioApp(
             ContextCompat.getMainExecutor(context).execute {
                 if (!active.get()) return@execute
                 authResultHoldUntil = System.currentTimeMillis() + AUTH_RESULT_HOLD_MS
-                guideState = FaceGuideState.Approved
+                guideState = if (ok) FaceGuideState.Approved else FaceGuideState.Searching
+                accessFeedback = AccessFeedback(if (ok) AccessFeedbackKind.DoorSucceeded else AccessFeedbackKind.DoorFailed, user.name)
                 recordApproval(user.name, if (ok) "문 열림 요청 완료" else "문 제어 실패")
                 status = if (ok) "문 열림 요청 완료" else "문 제어 실패"
                 detail = if (ok) "릴레이가 요청을 수락했습니다" else "URL, 토큰, 네트워크를 확인해 주세요"
@@ -779,6 +893,9 @@ private fun FFacioApp(
 
     fun onObservation(obs: Observation) {
         if (modelLoading || modelError != null || storeError != null || storageBusy) return
+        if (adminPromptInFlight) return
+        if (mode == AppMode.Enroll && appScreen != AppScreen.Admin) return
+        if (mode == AppMode.Auth && appScreen != AppScreen.Operation) return
         if (mode == AppMode.Auth && System.currentTimeMillis() < authResultHoldUntil) return
         if (!obs.ok) {
             resetTransient()
@@ -899,7 +1016,12 @@ private fun FFacioApp(
         val user = users[match.index]
         val shouldOpenDoor = doorArmed
         authResultHoldUntil = System.currentTimeMillis() + AUTH_RESULT_HOLD_MS
-        guideState = FaceGuideState.Approved
+        guideState = if (shouldOpenDoor) FaceGuideState.Center else FaceGuideState.Approved
+        accessFeedback = if (shouldOpenDoor) {
+            AccessFeedback(AccessFeedbackKind.DoorPending, user.name)
+        } else {
+            AccessFeedback(AccessFeedbackKind.AuthOnly, user.name)
+        }
         if (!shouldOpenDoor) recordApproval(user.name, "승인")
         status = "인증 완료"
         detail = if (shouldOpenDoor) "${user.name}님 승인 · 릴레이 결과를 기다리고 있습니다" else "${user.name}님 승인 · 최근 승인 로그에 기록했습니다"
@@ -913,7 +1035,21 @@ private fun FFacioApp(
                 title = {
                     Column {
                         Text("FFacio", fontWeight = FontWeight.Bold)
-                        Text("Offline Face Access", fontSize = 12.sp, color = ComposeColor(0xFF6E6E73))
+                        Text(if (appScreen == AppScreen.Operation) "Door Access" else "관리자 설정", fontSize = 12.sp, color = ComposeColor(0xFF6E6E73))
+                    }
+                },
+                actions = {
+                    if (appScreen == AppScreen.Operation) {
+                        TextButton(onClick = { requestAdmin(AdminAction.OpenAdmin) }) { Text("관리") }
+                    } else {
+                        TextButton(onClick = {
+                            appScreen = AppScreen.Operation
+                            mode = AppMode.Auth
+                            clearAuthResultHold()
+                            resetTransient()
+                            status = if (users.isEmpty()) "등록된 사용자가 없습니다" else "출입 인증 대기 중"
+                            detail = if (users.isEmpty()) "관리자 인증 후 첫 사용자를 등록하세요" else "카메라를 바라보고 안내에 따라 얼굴을 돌려 주세요"
+                        }) { Text("운영 화면") }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = ComposeColor(0xFFF5F5F7))
@@ -930,7 +1066,7 @@ private fun FFacioApp(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             CameraStage(
-                enabled = cameraCanPreview(),
+                enabled = cameraCanUseForCurrentScreen(),
                 analysisEnabled = cameraCanAnalyze(),
                 cameraRetryNonce = cameraRetryNonce,
                 stageMessage = blockedReason() ?: idleReason() ?: "카메라 준비 중",
@@ -961,7 +1097,29 @@ private fun FFacioApp(
                     .weight(1f)
                     .heightIn(min = 260.dp, max = 430.dp)
             )
-            ControlPanel(
+            if (appScreen == AppScreen.Operation) {
+                OperationPanel(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    status = status,
+                    detail = detail,
+                    userCount = users.size,
+                    doorArmed = doorArmed,
+                    accessFeedback = accessFeedback,
+                    approvalLogs = approvalLogs,
+                    blockedReason = blockedReason(),
+                    canRetryCamera = !cameraAvailable && hasCameraPermission && !noCameraHardware,
+                    onRetryCamera = {
+                        cameraAvailable = true
+                        cameraRetryNonce += 1
+                        resetTransient()
+                        status = "카메라를 다시 연결하는 중입니다"
+                        detail = "잠시만 기다려 주세요"
+                    }
+                )
+            } else {
+                ControlPanel(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
@@ -974,8 +1132,9 @@ private fun FFacioApp(
                 doorToken = doorToken,
                 doorArmed = doorArmed,
                 passiveLivenessEnabled = passiveLivenessEnabled,
-                showApproval = System.currentTimeMillis() < authResultHoldUntil,
+                accessFeedback = accessFeedback,
                 approvalLogs = approvalLogs,
+                users = users,
                 userCount = users.size,
                 enrollCount = enrollSamples.size,
                 canResetStore = storeError != null,
@@ -1001,15 +1160,20 @@ private fun FFacioApp(
                     } else if (it) {
                         requestAdmin(AdminAction.ArmDoor)
                     } else {
-                        doorArmed = false
-                        disableDoorForSession()
+                        disableDoorControl()
                     }
                 },
-                onPassiveLivenessEnabled = {
+                onPassiveLivenessEnabled = passiveToggle@{
+                    if (it && engineProvider()?.hasPassiveLiveness() != true) {
+                        passiveLivenessEnabled = false
+                        prefs.edit().remove(PASSIVE_LIVENESS_ENABLED_KEY).apply()
+                        resetTransient()
+                        status = "좌우 얼굴 돌리기 모드"
+                        detail = "선택형 사진/화면 차단 모델을 사용할 수 없어 기본 챌린지로 계속합니다"
+                        return@passiveToggle
+                    }
                     passiveLivenessEnabled = it
                     prefs.edit().remove(PASSIVE_LIVENESS_ENABLED_KEY).apply()
-                    doorArmed = false
-                    if (!it) disableDoorForSession()
                     resetTransient()
                     status = if (it) "사진/화면 차단 모델 켜짐" else "좌우 얼굴 돌리기 모드"
                     detail = if (it) "선택 강화 모델을 함께 사용합니다" else "기본 실제 얼굴 확인은 좌우 얼굴 돌리기 챌린지로 진행합니다"
@@ -1048,6 +1212,9 @@ private fun FFacioApp(
                 onDelete = {
                     confirmDelete = true
                 },
+                onDeleteUser = { index ->
+                    pendingDeleteUserIndex = index
+                },
                 onUnlockStore = {
                     requestAdmin(AdminAction.UnlockStore)
                 },
@@ -1081,7 +1248,8 @@ private fun FFacioApp(
                         data = Uri.fromParts("package", context.packageName, null)
                     })
                 }
-            )
+                )
+            }
         }
     }
     if (confirmDelete) {
@@ -1097,6 +1265,22 @@ private fun FFacioApp(
             },
             dismissButton = {
                 TextButton(enabled = !storageBusy, onClick = { confirmDelete = false }) { Text("취소") }
+            }
+        )
+    }
+    users.getOrNull(pendingDeleteUserIndex)?.let { deleteUser ->
+        AlertDialog(
+            onDismissRequest = { if (!storageBusy) pendingDeleteUserIndex = -1 },
+            title = { Text("${deleteUser.name} 사용자를 삭제할까요?") },
+            text = { Text("이 사용자의 로컬 얼굴 템플릿을 삭제합니다. 확인 후 Android 화면잠금 인증이 필요합니다.") },
+            confirmButton = {
+                TextButton(
+                    enabled = !storageBusy,
+                    onClick = { requestAdmin(AdminAction.DeleteUser) }
+                ) { Text("삭제") }
+            },
+            dismissButton = {
+                TextButton(enabled = !storageBusy, onClick = { pendingDeleteUserIndex = -1 }) { Text("취소") }
             }
         )
     }
@@ -1122,6 +1306,7 @@ private fun CameraStage(
     onNoCameraHardware: () -> Unit
 ) {
     val context = LocalContext.current
+    val currentAnalysisEnabled by rememberUpdatedState(analysisEnabled)
     val currentPassiveLivenessEnabled by rememberUpdatedState(passiveLivenessEnabled)
     val previewView = remember {
         PreviewView(context).apply {
@@ -1130,7 +1315,7 @@ private fun CameraStage(
             setBackgroundColor(Color.BLACK)
         }
     }
-    DisposableEffect(enabled, analysisEnabled, cameraRetryNonce) {
+    DisposableEffect(enabled, cameraRetryNonce) {
         var providerFuture: ListenableFuture<ProcessCameraProvider>? = null
         var boundProvider: ProcessCameraProvider? = null
         var boundUseCases: Array<UseCase> = emptyArray()
@@ -1146,7 +1331,7 @@ private fun CameraStage(
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
-                    val analysis = if (analysisEnabled) {
+                    val analysis = if (enabled) {
                         ImageAnalysis.Builder()
                             .setTargetResolution(AndroidSize(640, 480))
                             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
@@ -1154,6 +1339,10 @@ private fun CameraStage(
                             .build()
                             .also {
                                 it.setAnalyzer(analyzerExecutor) { proxy ->
+                                    if (!currentAnalysisEnabled) {
+                                        proxy.close()
+                                        return@setAnalyzer
+                                    }
                                     analyzeProxy(proxy, engineProvider, processing, firstAnalyzedFrameLogged, lastAnalysisAt, active, context, mirrorFrames.get(), currentPassiveLivenessEnabled, onObservation)
                                 }
                             }
@@ -1293,6 +1482,106 @@ private fun FaceGuideOverlay(state: FaceGuideState, modifier: Modifier = Modifie
 }
 
 @Composable
+private fun OperationPanel(
+    modifier: Modifier = Modifier,
+    status: String,
+    detail: String,
+    userCount: Int,
+    doorArmed: Boolean,
+    accessFeedback: AccessFeedback?,
+    approvalLogs: List<ApprovalLogEntry>,
+    blockedReason: String?,
+    canRetryCamera: Boolean,
+    onRetryCamera: () -> Unit
+) {
+    Surface(
+        color = ComposeColor.White,
+        shape = RoundedCornerShape(28.dp),
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+        modifier = modifier
+    ) {
+        Column(
+            modifier = Modifier
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(12.dp).clip(CircleShape).background(if (blockedReason == null) ComposeColor(0xFF30D158) else ComposeColor(0xFFFF9F0A)))
+                Text("출입 인증 대기", color = ComposeColor(0xFF6E6E73), fontSize = 13.sp)
+                Spacer(Modifier.weight(1f))
+                Text("등록 ${userCount}명", color = ComposeColor(0xFF6E6E73), fontSize = 13.sp)
+            }
+            AnimatedContent(status, label = "operation-status") {
+                Text(it, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            }
+            Text(detail, color = ComposeColor(0xFF6E6E73), fontSize = 16.sp)
+            if (canRetryCamera) {
+                Button(onClick = onRetryCamera, modifier = Modifier.fillMaxWidth()) {
+                    Text("카메라 다시 연결")
+                }
+            }
+            Surface(
+                color = ComposeColor(0xFFF5F5F7),
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("안내", color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (userCount == 0) {
+                            "관리 버튼을 눌러 화면잠금 인증 후 첫 사용자를 등록하세요."
+                        } else {
+                            "카메라를 바라보고 화면 안내에 따라 정면, 왼쪽, 오른쪽을 천천히 보여 주세요."
+                        },
+                        color = ComposeColor(0xFF6E6E73),
+                        fontSize = 14.sp
+                    )
+                    Text(
+                        if (doorArmed) "문 열림 릴레이 활성화됨" else "문 열림 릴레이 비활성화",
+                        color = if (doorArmed) ComposeColor(0xFF248A3D) else ComposeColor(0xFF6E6E73),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+            accessFeedback?.let { feedback ->
+                Surface(
+                    color = accessFeedbackBackground(feedback.kind),
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            Modifier.size(46.dp).clip(CircleShape).background(accessFeedbackAccent(feedback.kind)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(accessFeedbackSymbol(feedback.kind), color = ComposeColor.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(accessFeedbackTitle(feedback.kind), color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.Bold)
+                            Text(
+                                accessFeedbackMessage(feedback),
+                                color = accessFeedbackText(feedback.kind),
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                }
+            }
+            if (approvalLogs.isNotEmpty()) {
+                Text("최근 승인 ${approvalLogs.first().time} · ${approvalLogs.first().userName} · ${approvalLogs.first().result}", color = ComposeColor(0xFF6E6E73), fontSize = 13.sp)
+            }
+        }
+    }
+}
+
+@Composable
 private fun ControlPanel(
     modifier: Modifier = Modifier,
     status: String,
@@ -1304,8 +1593,9 @@ private fun ControlPanel(
     doorToken: String,
     doorArmed: Boolean,
     passiveLivenessEnabled: Boolean,
-    showApproval: Boolean,
+    accessFeedback: AccessFeedback?,
     approvalLogs: List<ApprovalLogEntry>,
+    users: List<UserTemplate>,
     userCount: Int,
     enrollCount: Int,
     canResetStore: Boolean,
@@ -1320,6 +1610,7 @@ private fun ControlPanel(
     onEnroll: () -> Unit,
     onAuth: () -> Unit,
     onDelete: () -> Unit,
+    onDeleteUser: (Int) -> Unit,
     onUnlockStore: () -> Unit,
     onResetStore: () -> Unit,
     onUnlockDoor: () -> Unit,
@@ -1354,9 +1645,9 @@ private fun ControlPanel(
                 Text(it, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             }
             Text(detail, color = ComposeColor(0xFF6E6E73), fontSize = 15.sp)
-            if (showApproval) {
+            accessFeedback?.let { feedback ->
                 var approvalTarget by remember { mutableStateOf(0.92f) }
-                LaunchedEffect(showApproval) {
+                LaunchedEffect(feedback) {
                     approvalTarget = 1.0f
                 }
                 val approvalScale by animateFloatAsState(
@@ -1370,8 +1661,8 @@ private fun ControlPanel(
                         .graphicsLayer {
                             scaleX = approvalScale
                             scaleY = approvalScale
-                        },
-                    color = ComposeColor(0xFFE9FBEF),
+                    },
+                    color = accessFeedbackBackground(feedback.kind),
                     shape = RoundedCornerShape(18.dp)
                 ) {
                     Row(
@@ -1383,14 +1674,18 @@ private fun ControlPanel(
                             modifier = Modifier
                                 .size(42.dp)
                                 .clip(CircleShape)
-                                .background(ComposeColor(0xFF30D158)),
+                                .background(accessFeedbackAccent(feedback.kind)),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("✓", color = ComposeColor.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                            Text(accessFeedbackSymbol(feedback.kind), color = ComposeColor.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text("승인 완료", color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.Bold)
-                            Text("최근 승인 로그에 기록되었습니다", color = ComposeColor(0xFF248A3D), fontSize = 13.sp)
+                            Text(accessFeedbackTitle(feedback.kind), color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.Bold)
+                            Text(
+                                accessFeedbackMessage(feedback),
+                                color = accessFeedbackText(feedback.kind),
+                                fontSize = 13.sp
+                            )
                         }
                     }
                 }
@@ -1403,7 +1698,7 @@ private fun ControlPanel(
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                 Text(entry.time, color = ComposeColor(0xFF6E6E73), fontSize = 12.sp)
                                 Text(entry.userName, color = ComposeColor(0xFF1D1D1F), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                                Text(entry.result, color = ComposeColor(0xFF248A3D), fontSize = 12.sp)
+                                Text(entry.result, color = if (approvalResultSucceeded(entry.result)) ComposeColor(0xFF248A3D) else ComposeColor(0xFFD70015), fontSize = 12.sp)
                             }
                         }
                     }
@@ -1477,8 +1772,28 @@ private fun ControlPanel(
                     Text("인증")
                 }
             }
+            Surface(color = ComposeColor(0xFFF5F5F7), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("등록 사용자 관리", color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
+                    if (users.isEmpty()) {
+                        Text("등록된 사용자가 없습니다", color = ComposeColor(0xFF6E6E73), fontSize = 13.sp)
+                    } else {
+                        users.forEachIndexed { index, user ->
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(user.name, color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
+                                    Text("로컬 얼굴 템플릿", color = ComposeColor(0xFF6E6E73), fontSize = 12.sp)
+                                }
+                                TextButton(enabled = canMutate, onClick = { onDeleteUser(index) }) {
+                                    Text("삭제", color = ComposeColor(0xFFFF3B30))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Button(onClick = onDelete, enabled = canMutate && userCount > 0, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFFFF3B30))) {
-                Text("등록 사용자 삭제")
+                Text("모든 등록 사용자 삭제")
             }
             TextButton(onClick = { advancedExpanded = !advancedExpanded }, modifier = Modifier.fillMaxWidth()) {
                 Text(if (advancedExpanded || doorArmed) "고급 설정 접기" else "고급 설정")
@@ -1651,10 +1966,14 @@ private fun imageProxyToRgbaMat(proxy: ImageProxy, mirrorHorizontal: Boolean): M
     }
 }
 
-private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiSpoofModel: File) {
+private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiSpoofModel: File?) {
     private val detector = FaceDetectorYN.create(detectorModel.absolutePath, "", Size(320.0, 320.0), 0.82f, 0.3f, 5000)
     private val recognizer = FaceRecognizerSF.create(recognizerModel.absolutePath, "")
-    private val antiSpoof = Dnn.readNetFromONNX(antiSpoofModel.absolutePath)
+    private val antiSpoof = antiSpoofModel?.let { model ->
+        runCatching { Dnn.readNetFromONNX(model.absolutePath) }
+            .onFailure { Log.w("FFacio", "Optional passive PAD model failed to load", it) }
+            .getOrNull()
+    }
     private var currentSize = Size(0.0, 0.0)
     private val bgr = Mat()
     private val faces = Mat()
@@ -1662,6 +1981,8 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
     private val face = Mat()
     private val aligned = Mat()
     private val resizedAntiSpoof = Mat()
+
+    fun hasPassiveLiveness(): Boolean = antiSpoof != null
 
     fun observe(rgba: Mat, passiveLivenessEnabled: Boolean): Observation {
         try {
@@ -1707,6 +2028,7 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
     }
 
     private fun predictPassiveLiveness(bgr: Mat, face: FloatArray): PassiveLiveness {
+        val net = antiSpoof ?: return PassiveLiveness(0.0f, "model_unavailable")
         val crop = expandedFaceCrop(bgr, face)
         var blob: Mat? = null
         var logits: Mat? = null
@@ -1721,8 +2043,8 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
                 false,
                 false
             )
-            antiSpoof.setInput(blob)
-            logits = antiSpoof.forward()
+            net.setInput(blob)
+            logits = net.forward()
             val values = FloatArray(logits.total().toInt())
             logits.get(0, 0, values)
             return classifyPassiveLiveness(values)
@@ -1825,20 +2147,24 @@ private class LivenessChallenge {
 }
 
 private enum class AppMode { Auth, Enroll }
-private enum class AdminAction { StartEnroll, DeleteUsers, UnlockStore, ResetStore, ArmDoor, UnlockDoor }
+private enum class AppScreen { Operation, Admin }
+private enum class AdminAction { OpenAdmin, StartEnroll, DeleteUser, DeleteUsers, UnlockStore, ResetStore, ArmDoor, UnlockDoor }
 private enum class FaceGuideState { Searching, Center, TurnLeft, TurnRight, Approved }
+internal enum class AccessFeedbackKind { AuthOnly, DoorPending, DoorSucceeded, DoorFailed }
 private sealed class ModelLoadState {
     data object Loading : ModelLoadState()
     data object Ready : ModelLoadState()
     data class Failed(val error: Throwable) : ModelLoadState()
 }
 
+private data class AccessFeedback(val kind: AccessFeedbackKind, val userName: String)
+
 internal data class PassiveLiveness(val liveScore: Float, val state: String) {
     val isLive: Boolean
         get() = state == "live" || state == "disabled"
 
     fun message(): String = when (state) {
-        "model_error", "invalid_output" -> "실제 얼굴 확인 모델을 사용할 수 없습니다. 앱을 다시 시작해 주세요"
+        "model_error", "invalid_output", "model_unavailable" -> "사진/화면 차단 모델을 사용할 수 없습니다. 관리자 화면에서 해당 옵션을 끄고 기본 좌우 얼굴 돌리기 모드로 전환해 주세요"
         "invalid_crop" -> "얼굴을 화면 안에 맞춰 주세요"
         "disabled" -> "실제 얼굴 체크가 꺼져 있습니다"
         else -> "사진이나 화면으로 보이는 얼굴입니다. 실제 얼굴을 보여주세요"
@@ -1906,6 +2232,37 @@ private fun MutableList<UserTemplate>.replaceWith(items: List<UserTemplate>) {
     clear()
     addAll(items)
 }
+
+internal fun shouldUseCameraForScreen(
+    baseReady: Boolean,
+    adminPromptInFlight: Boolean,
+    isOperationScreen: Boolean,
+    isAdminScreen: Boolean,
+    isEnrollmentMode: Boolean
+): Boolean = baseReady &&
+    !adminPromptInFlight &&
+    ((isOperationScreen && !isEnrollmentMode) || (isAdminScreen && isEnrollmentMode))
+
+internal fun shouldAnalyzeCameraFrame(
+    baseReady: Boolean,
+    adminPromptInFlight: Boolean,
+    isOperationScreen: Boolean,
+    isAdminScreen: Boolean,
+    isEnrollmentMode: Boolean,
+    hasIdleReason: Boolean
+): Boolean = shouldUseCameraForScreen(
+    baseReady = baseReady,
+    adminPromptInFlight = adminPromptInFlight,
+    isOperationScreen = isOperationScreen,
+    isAdminScreen = isAdminScreen,
+    isEnrollmentMode = isEnrollmentMode
+) && !hasIdleReason
+
+internal fun shouldReturnToOperationOnLifecyclePause(adminPromptInFlight: Boolean): Boolean =
+    !adminPromptInFlight
+
+internal fun <T> removeRegisteredUserAt(users: List<T>, index: Int): List<T>? =
+    if (index in users.indices) users.filterIndexed { itemIndex, _ -> itemIndex != index } else null
 
 private fun loadUsers(context: Context, prefs: SharedPreferences): StoreLoadResult = runCatching {
     val raw = secureGetString(context, prefs, USERS_KEY, "[]", failClosed = true)
@@ -2101,6 +2458,47 @@ internal fun addApprovalLog(
     while (logs.size > limit) {
         logs.removeAt(logs.lastIndex)
     }
+}
+
+internal fun approvalResultSucceeded(result: String): Boolean =
+    !result.contains("실패")
+
+private fun accessFeedbackBackground(kind: AccessFeedbackKind): ComposeColor = when (kind) {
+    AccessFeedbackKind.AuthOnly, AccessFeedbackKind.DoorSucceeded -> ComposeColor(0xFFE9FBEF)
+    AccessFeedbackKind.DoorPending -> ComposeColor(0xFFEAF2FF)
+    AccessFeedbackKind.DoorFailed -> ComposeColor(0xFFFFE8E6)
+}
+
+private fun accessFeedbackAccent(kind: AccessFeedbackKind): ComposeColor = when (kind) {
+    AccessFeedbackKind.AuthOnly, AccessFeedbackKind.DoorSucceeded -> ComposeColor(0xFF30D158)
+    AccessFeedbackKind.DoorPending -> ComposeColor(0xFF0071E3)
+    AccessFeedbackKind.DoorFailed -> ComposeColor(0xFFFF3B30)
+}
+
+private fun accessFeedbackText(kind: AccessFeedbackKind): ComposeColor = when (kind) {
+    AccessFeedbackKind.AuthOnly, AccessFeedbackKind.DoorSucceeded -> ComposeColor(0xFF248A3D)
+    AccessFeedbackKind.DoorPending -> ComposeColor(0xFF0057D9)
+    AccessFeedbackKind.DoorFailed -> ComposeColor(0xFFD70015)
+}
+
+internal fun accessFeedbackSymbol(kind: AccessFeedbackKind): String = when (kind) {
+    AccessFeedbackKind.AuthOnly, AccessFeedbackKind.DoorSucceeded -> "✓"
+    AccessFeedbackKind.DoorPending -> "…"
+    AccessFeedbackKind.DoorFailed -> "!"
+}
+
+internal fun accessFeedbackTitle(kind: AccessFeedbackKind): String = when (kind) {
+    AccessFeedbackKind.AuthOnly -> "인증 승인"
+    AccessFeedbackKind.DoorPending -> "문 열림 요청 중"
+    AccessFeedbackKind.DoorSucceeded -> "문 열림 완료"
+    AccessFeedbackKind.DoorFailed -> "문 제어 실패"
+}
+
+private fun accessFeedbackMessage(feedback: AccessFeedback): String = when (feedback.kind) {
+    AccessFeedbackKind.AuthOnly -> "${feedback.userName}님 얼굴 인증이 완료되었습니다"
+    AccessFeedbackKind.DoorPending -> "${feedback.userName}님 승인 · 릴레이 응답을 기다리고 있습니다"
+    AccessFeedbackKind.DoorSucceeded -> "릴레이가 문 열림 요청을 수락했습니다"
+    AccessFeedbackKind.DoorFailed -> "얼굴 인증은 통과했지만 릴레이 요청이 실패했습니다"
 }
 
 private fun formatClock(timeMillis: Long): String =

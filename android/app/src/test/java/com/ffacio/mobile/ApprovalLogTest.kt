@@ -20,4 +20,19 @@ class ApprovalLogTest {
         assertEquals("user10", logs.first().userName)
         assertEquals("user3", logs.last().userName)
     }
+
+    @Test
+    fun relayFailureIsNotRenderedAsSuccessfulApproval() {
+        assertEquals(true, approvalResultSucceeded("승인"))
+        assertEquals(true, approvalResultSucceeded("문 열림 요청 완료"))
+        assertEquals(false, approvalResultSucceeded("문 제어 실패"))
+    }
+
+    @Test
+    fun relayPendingIsNotRenderedAsFinalSuccess() {
+        assertEquals("…", accessFeedbackSymbol(AccessFeedbackKind.DoorPending))
+        assertEquals("문 열림 요청 중", accessFeedbackTitle(AccessFeedbackKind.DoorPending))
+        assertEquals("✓", accessFeedbackSymbol(AccessFeedbackKind.DoorSucceeded))
+        assertEquals("문 열림 완료", accessFeedbackTitle(AccessFeedbackKind.DoorSucceeded))
+    }
 }

@@ -55,4 +55,11 @@ class PassiveLivenessTest {
         assertEquals("print_attack", result.state)
         assertFalse(result.isLive)
     }
+
+    @Test
+    fun unavailableOptionalModelIsNotLive() {
+        val result = PassiveLiveness(0.0f, "model_unavailable")
+
+        assertFalse(result.isLive)
+    }
 }

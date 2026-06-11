@@ -8,8 +8,9 @@ Android build target for the same offline face access goal.
 - CameraX for preview and frame analysis.
 - OpenCV Android AAR for YuNet face detection and SFace embeddings.
 - Android Keystore AES-GCM for stored face templates and HTTP relay token.
-- The APK bundles an Android-only offline model set generated from `resources/models/`: OpenCV YuNet, OpenCV SFace, and MiniFASNet-V2. It does not need a model download on first launch, and it intentionally omits desktop-only InsightFace assets.
+- The APK bundles an Android-only offline model set generated from `resources/models/`: OpenCV YuNet, OpenCV SFace, and MiniFASNet-V2. It does not need a model download on first launch, and it intentionally omits desktop-only InsightFace assets. YuNet/SFace are required for the default active face-turn flow; release APKs include MiniFASNet-V2 for the optional passive PAD switch, but runtime load failure degrades to active face-turn mode instead of blocking the whole app.
 - Sensitive screens run with Android `FLAG_SECURE`, so camera preview, recognized names, and relay settings are blocked from screenshots, screen recording, and recent-app thumbnails on compliant devices.
+- The default screen is an operation view for door use: camera guidance, current status, recent approvals, relay failures, and camera retry only. Registration, user management, relay settings, and destructive actions live behind Android screen-lock verification in the admin view.
 
 ## Build
 
@@ -39,7 +40,9 @@ Output:
 - Release APK signing requires `FFACIO_ANDROID_KEYSTORE` and related signing environment variables. The private signing key is intentionally not stored in git.
 - Android uses OpenCV YuNet/SFace plus MiniFASNet-V2. The larger desktop InsightFace `buffalo_l` bundle is not packaged into the APK.
 - `scripts\build_android.ps1` runs unit tests, release lint, debug/release assembly, static APK verification, and emulator launch/model-readiness smoke. The emulator check is still not a substitute for real-device enrollment/auth/liveness testing.
-- RGB-camera liveness now combines passive MiniFASNet anti-spoofing with the active pose challenge. It helps against many static photo and simple screen attacks, but it is not equivalent to hardware depth/IR Face ID.
-- Basic real-face verification uses the active left/right face-turn challenge. Advanced settings include an optional session-only `사진/화면 차단 모델` switch for passive PAD on top of that challenge.
+- RGB-camera liveness defaults to the active left/right pose challenge. The optional passive MiniFASNet anti-spoofing switch can add another check against many static photo and simple screen attacks, but it is not equivalent to hardware depth/IR Face ID.
+- Basic real-face verification uses the active left/right face-turn challenge. Advanced settings include an optional session-only `사진/화면 차단 모델` switch for passive PAD on top of that challenge; release builds package that model, and if it cannot be loaded at runtime the app continues in active-challenge mode.
 - Enrollment rejects near-duplicate samples, requires pose diversity before the final template is saved, and blocks faces that already match an enrolled user.
+- The admin view supports selecting and deleting individual registered users, plus a separate all-users reset path for destructive maintenance.
+- Individual user deletion requires a name-specific confirmation dialog and then Android screen-lock verification. Relay activation is stored as an admin setting and remains enabled across normal app lifecycle changes until an admin disables it or the encrypted relay token cannot be opened.
 - Real device camera/liveness testing is still required on actual phones.
