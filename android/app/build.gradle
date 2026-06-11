@@ -1,3 +1,6 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+
 plugins {
     id "com.android.application"
     id "org.jetbrains.kotlin.android"
@@ -12,8 +15,8 @@ android {
         applicationId "com.ffacio.mobile"
         minSdk 26
         targetSdk 36
-        versionCode 8
-        versionName "0.3.5"
+        versionCode 9
+        versionName "0.3.6"
     }
 
     signingConfigs {
@@ -60,9 +63,65 @@ android {
 
     sourceSets {
         main {
-            assets.srcDirs += ["../../resources"]
+            assets.srcDirs += [layout.buildDirectory.dir("generated/ffacioAssets")]
         }
     }
+}
+
+def ffacioAndroidModelIds = [
+    "opencv.yunet",
+    "opencv.sface",
+    "antispoof.minifasnet_v2"
+] as Set
+
+tasks.register("syncFfacioAndroidModelAssets") {
+    def sourceRoot = file("../../resources/models")
+    def outputRoot = layout.buildDirectory.dir("generated/ffacioAssets").get().asFile
+    inputs.file(file("${sourceRoot}/models.manifest.json"))
+    inputs.files(
+        file("${sourceRoot}/opencv/face_detection_yunet_2023mar.onnx"),
+        file("${sourceRoot}/opencv/face_recognition_sface_2021dec.onnx"),
+        file("${sourceRoot}/antispoof/minifasnet_v2.onnx")
+    )
+    outputs.dir(outputRoot)
+
+    doLast {
+        def manifestFile = file("${sourceRoot}/models.manifest.json")
+        if (!manifestFile.exists()) {
+            throw new GradleException("FFacio model manifest is missing: ${manifestFile}")
+        }
+        def sourceManifest = new JsonSlurper().parse(manifestFile)
+        def selectedFiles = sourceManifest.files.findAll { ffacioAndroidModelIds.contains(it.id as String) }
+        if (selectedFiles.size() != ffacioAndroidModelIds.size()) {
+            throw new GradleException("Android model asset set is incomplete. Expected ${ffacioAndroidModelIds}, found ${selectedFiles.collect { it.id }}")
+        }
+
+        delete(outputRoot)
+        selectedFiles.each { model ->
+            def source = file("${sourceRoot}/${model.path}")
+            if (!source.exists()) {
+                throw new GradleException("Android model asset is missing: ${source}")
+            }
+            copy {
+                from(source)
+                into(file("${outputRoot}/models/${model.path}").parentFile)
+            }
+        }
+
+        def androidManifest = [
+            version: sourceManifest.version,
+            generated_by: "android/app/build.gradle syncFfacioAndroidModelAssets",
+            offline_first: true,
+            files: selectedFiles
+        ]
+        def outManifest = file("${outputRoot}/models/models.manifest.json")
+        outManifest.parentFile.mkdirs()
+        outManifest.text = JsonOutput.prettyPrint(JsonOutput.toJson(androidManifest))
+    }
+}
+
+tasks.matching { it.name in ["preBuild", "mergeDebugAssets", "mergeReleaseAssets"] }.configureEach {
+    dependsOn("syncFfacioAndroidModelAssets")
 }
 
 dependencies {

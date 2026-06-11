@@ -1,7 +1,7 @@
 param(
     [string]$Apk = "$PSScriptRoot\..\release\FFacio-Android-release.apk",
     [string]$Manifest = "$PSScriptRoot\..\release\android-release-manifest.json",
-    [string]$ModelManifest = "$PSScriptRoot\..\resources\models\models.manifest.json",
+    [string]$ModelManifest = "$PSScriptRoot\..\android\app\build\generated\ffacioAssets\models\models.manifest.json",
     [switch]$AllowStaleSourceState
 )
 
@@ -105,7 +105,6 @@ try {
         "assets/models/opencv/face_detection_yunet_2023mar.onnx",
         "assets/models/opencv/face_recognition_sface_2021dec.onnx",
         "assets/models/antispoof/minifasnet_v2.onnx",
-        "assets/models/insightface/models/buffalo_l/w600k_r50.onnx",
         "classes.dex",
         "AndroidManifest.xml"
     )
@@ -146,6 +145,25 @@ try {
         finally {
             $stream.Dispose()
         }
+    }
+
+    $androidOnlyModelIds = @(
+        "opencv.yunet",
+        "opencv.sface",
+        "antispoof.minifasnet_v2"
+    )
+    $unexpectedModels = @(
+        $modelManifestJson.files |
+            Where-Object { $androidOnlyModelIds -notcontains [string]$_.id } |
+            ForEach-Object { [string]$_.id }
+    )
+    if ($unexpectedModels.Count -gt 0) {
+        throw "Android APK model manifest contains non-runtime model(s): $($unexpectedModels -join ', ')"
+    }
+    $insightFaceEntries = @($entries.Keys | Where-Object { $_ -like "assets/models/insightface/*" })
+    if ($insightFaceEntries.Count -gt 0) {
+        $sampleInsightFaceEntries = (@($insightFaceEntries | Select-Object -First 5) -join ', ')
+        throw "Android APK contains unused InsightFace model asset(s): $sampleInsightFaceEntries"
     }
 }
 finally {

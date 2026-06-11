@@ -26,6 +26,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCase
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedContent
@@ -40,6 +41,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -51,6 +53,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -78,8 +81,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -558,6 +564,12 @@ private fun FFacioApp(
                         detail = "앱 설정에서 카메라 권한을 허용해 주세요"
                     }
                 }
+            } else if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                doorArmed = false
+                liveCandidate = -1
+                stableUser = -1
+                stableCount = 0
+                liveness.reset()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -679,6 +691,15 @@ private fun FFacioApp(
         else -> null
     }
 
+    fun cameraCanPreview(): Boolean = !modelLoading &&
+        modelError == null &&
+        storeError == null &&
+        hasCameraPermission &&
+        cameraAvailable &&
+        !noCameraHardware
+
+    fun cameraCanAnalyze(): Boolean = cameraCanPreview() && idleReason() == null
+
     fun openDoor(user: UserTemplate) {
         val now = System.currentTimeMillis()
         if (!doorArmed || now - lastOpenAt < 3500L) return
@@ -690,6 +711,7 @@ private fun FFacioApp(
             detail = "릴레이 URL과 토큰을 저장한 뒤 다시 활성화하세요"
             return
         }
+        doorArmed = false
         lastOpenAt = now
         status = "문 제어를 요청하는 중입니다"
         detail = "릴레이 응답을 기다리고 있습니다"
@@ -805,17 +827,13 @@ private fun FFacioApp(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .imePadding()
                 .padding(horizontal = 18.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             CameraStage(
-                enabled = !modelLoading &&
-                    modelError == null &&
-                    storeError == null &&
-                    hasCameraPermission &&
-                    cameraAvailable &&
-                    !noCameraHardware &&
-                    idleReason() == null,
+                enabled = cameraCanPreview(),
+                analysisEnabled = cameraCanAnalyze(),
                 cameraRetryNonce = cameraRetryNonce,
                 stageMessage = blockedReason() ?: idleReason() ?: "카메라 준비 중",
                 engineProvider = engineProvider,
@@ -971,6 +989,7 @@ private fun FFacioApp(
 private fun CameraStage(
     modifier: Modifier = Modifier,
     enabled: Boolean,
+    analysisEnabled: Boolean,
     cameraRetryNonce: Int,
     stageMessage: String,
     engineProvider: () -> MobileFaceEngine?,
@@ -991,11 +1010,10 @@ private fun CameraStage(
             setBackgroundColor(Color.BLACK)
         }
     }
-    DisposableEffect(enabled, cameraRetryNonce) {
+    DisposableEffect(enabled, analysisEnabled, cameraRetryNonce) {
         var providerFuture: ListenableFuture<ProcessCameraProvider>? = null
         var boundProvider: ProcessCameraProvider? = null
-        var boundPreview: Preview? = null
-        var boundAnalysis: ImageAnalysis? = null
+        var boundUseCases: Array<UseCase> = emptyArray()
         var disposed = false
         val mirrorFrames = AtomicBoolean(true)
         if (enabled) {
@@ -1008,16 +1026,20 @@ private fun CameraStage(
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
-                    val analysis = ImageAnalysis.Builder()
-                        .setTargetResolution(AndroidSize(640, 480))
-                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
-                        .also {
-                            it.setAnalyzer(analyzerExecutor) { proxy ->
-                                analyzeProxy(proxy, engineProvider, processing, firstAnalyzedFrameLogged, lastAnalysisAt, active, context, mirrorFrames.get(), onObservation)
+                    val analysis = if (analysisEnabled) {
+                        ImageAnalysis.Builder()
+                            .setTargetResolution(AndroidSize(640, 480))
+                            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .build()
+                            .also {
+                                it.setAnalyzer(analyzerExecutor) { proxy ->
+                                    analyzeProxy(proxy, engineProvider, processing, firstAnalyzedFrameLogged, lastAnalysisAt, active, context, mirrorFrames.get(), onObservation)
+                                }
                             }
-                        }
+                    } else {
+                        null
+                    }
                     val selector = when {
                         provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) -> CameraSelector.DEFAULT_FRONT_CAMERA
                         provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) -> CameraSelector.DEFAULT_BACK_CAMERA
@@ -1028,10 +1050,10 @@ private fun CameraStage(
                     } else {
                         mirrorFrames.set(selector == CameraSelector.DEFAULT_FRONT_CAMERA)
                         if (disposed) return@addListener
-                        provider.bindToLifecycle(context as ComponentActivity, selector, preview, analysis)
+                        val useCases = if (analysis != null) arrayOf<UseCase>(preview, analysis) else arrayOf<UseCase>(preview)
+                        provider.bindToLifecycle(context as ComponentActivity, selector, *useCases)
                         boundProvider = provider
-                        boundPreview = preview
-                        boundAnalysis = analysis
+                        boundUseCases = useCases
                     }
                 }.onFailure {
                     onCameraUnavailable()
@@ -1040,16 +1062,15 @@ private fun CameraStage(
         }
         onDispose {
             disposed = true
-            boundAnalysis?.clearAnalyzer()
+            boundUseCases.filterIsInstance<ImageAnalysis>().forEach { it.clearAnalyzer() }
             val provider = boundProvider
-            val preview = boundPreview
-            val analysis = boundAnalysis
-            if (provider != null && preview != null && analysis != null) {
-                runCatching { provider.unbind(preview, analysis) }
+            val useCases = boundUseCases
+            if (provider != null && useCases.isNotEmpty()) {
+                runCatching { provider.unbind(*useCases) }
             } else {
                 providerFuture?.addListener({
                     runCatching {
-                        boundAnalysis?.clearAnalyzer()
+                        boundUseCases.filterIsInstance<ImageAnalysis>().forEach { it.clearAnalyzer() }
                     }
                 }, ContextCompat.getMainExecutor(context))
             }
@@ -1077,7 +1098,10 @@ private fun CameraStage(
             Text(
                 stageMessage,
                 color = ComposeColor.White,
-                modifier = Modifier.align(Alignment.Center)
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(24.dp)
             )
         }
     }
@@ -1117,6 +1141,7 @@ private fun ControlPanel(
         if (mode == AppMode.Enroll) ComposeColor(0xFF30D158) else ComposeColor(0xFF0071E3),
         label = "accent"
     )
+    var advancedExpanded by remember { mutableStateOf(false) }
     Surface(
         color = ComposeColor.White,
         shape = RoundedCornerShape(28.dp),
@@ -1143,11 +1168,23 @@ private fun ControlPanel(
             if (mode == AppMode.Enroll) {
                 Text("등록 진행 $enrollCount/$ENROLL_SAMPLES", color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
             }
+            if (mode == AppMode.Enroll) {
+                LinearProgressIndicator(
+                    progress = { (enrollCount.toFloat() / ENROLL_SAMPLES.toFloat()).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = ComposeColor(0xFF30D158),
+                    trackColor = ComposeColor(0xFFE5E5EA)
+                )
+            }
             OutlinedTextField(
                 value = name,
                 onValueChange = onName,
                 label = { Text("등록 이름") },
                 enabled = canMutate && mode != AppMode.Enroll,
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Words,
+                    imeAction = ImeAction.Done
+                ),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -1189,16 +1226,20 @@ private fun ControlPanel(
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = onEnroll, enabled = canMutate && blockedReason == null, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF0071E3))) {
+                Button(onClick = onEnroll, enabled = canMutate && blockedReason == null && mode != AppMode.Enroll, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF0071E3))) {
                     Text("등록")
                 }
-                Button(onClick = onAuth, enabled = canMutate && blockedReason == null, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF1D1D1F))) {
+                Button(onClick = onAuth, enabled = canMutate && blockedReason == null && mode != AppMode.Auth, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF1D1D1F))) {
                     Text("인증")
                 }
             }
             Button(onClick = onDelete, enabled = canMutate && userCount > 0, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFFFF3B30))) {
                 Text("등록 사용자 삭제")
             }
+            TextButton(onClick = { advancedExpanded = !advancedExpanded }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (advancedExpanded || doorArmed) "릴레이 설정 접기" else "릴레이 설정")
+            }
+            if (advancedExpanded || doorArmed) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Switch(checked = doorArmed, onCheckedChange = onDoorArmed, enabled = canMutate)
                 Text("인증 성공 시 HTTPS 릴레이 열기", color = ComposeColor(0xFF1D1D1F))
@@ -1210,6 +1251,10 @@ private fun ControlPanel(
                 value = doorUrl,
                 onValueChange = onDoorUrl,
                 enabled = canMutate && !doorArmed,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Uri,
+                    imeAction = ImeAction.Next
+                ),
                 label = { Text("HTTPS 릴레이 URL") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
@@ -1220,10 +1265,14 @@ private fun ControlPanel(
                 enabled = canMutate && !doorArmed,
                 label = { Text("Bearer 토큰") },
                 visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Password,
+                    imeAction = ImeAction.Done
+                ),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+            }
         }
     }
 }

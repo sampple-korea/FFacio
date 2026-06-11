@@ -75,7 +75,10 @@ $keyStore = (Resolve-Path $keyStore).Path
 
 Push-Location $AndroidDir
 try {
-    & $gradle --no-daemon clean assembleDebug assembleRelease "-PffacioStoreFile=$keyStore" "-PffacioStorePassword=$storePassword" "-PffacioKeyAlias=$keyAlias" "-PffacioKeyPassword=$keyPassword"
+    $gradleLog = Join-Path $ReleaseDir "android-gradle-verification.log"
+    $gradleTasks = @("clean", "testDebugUnitTest", "testReleaseUnitTest", "lintVitalRelease", "assembleDebug", "assembleRelease")
+    & $gradle --no-daemon @gradleTasks "-PffacioStoreFile=$keyStore" "-PffacioStorePassword=$storePassword" "-PffacioKeyAlias=$keyAlias" "-PffacioKeyPassword=$keyPassword" *>&1 |
+        Tee-Object -FilePath $gradleLog
     if ($LASTEXITCODE -ne 0) { throw "Gradle build failed with exit code $LASTEXITCODE." }
 }
 finally {
@@ -84,8 +87,10 @@ finally {
 
 $debugApk = Join-Path $AndroidDir "app\build\outputs\apk\debug\app-debug.apk"
 $releaseApk = Join-Path $AndroidDir "app\build\outputs\apk\release\app-release.apk"
+$androidModelManifest = Join-Path $AndroidDir "app\build\generated\ffacioAssets\models\models.manifest.json"
 if (-not (Test-Path $debugApk)) { throw "Debug APK was not produced: $debugApk" }
 if (-not (Test-Path $releaseApk)) { throw "Release APK was not produced: $releaseApk" }
+if (-not (Test-Path $androidModelManifest)) { throw "Android model manifest was not produced: $androidModelManifest" }
 $debugOut = Join-Path $ReleaseDir "FFacio-Android-debug.apk"
 $releaseOut = Join-Path $ReleaseDir "FFacio-Android-release.apk"
 Copy-Item -Force $debugApk $debugOut
@@ -93,6 +98,8 @@ Copy-Item -Force $releaseApk $releaseOut
 
 $debugFile = Get-Item $debugOut
 $releaseFile = Get-Item $releaseOut
+$gradleLogFile = Get-Item (Join-Path $ReleaseDir "android-gradle-verification.log")
+$gradleLogHash = (Get-FileHash $gradleLogFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 $debugHash = (Get-FileHash $debugOut -Algorithm SHA256).Hash.ToLowerInvariant()
 $releaseHash = (Get-FileHash $releaseOut -Algorithm SHA256).Hash.ToLowerInvariant()
 $gitCommit = (& git -C (Join-Path $PSScriptRoot "..") rev-parse HEAD 2>$null)
@@ -132,6 +139,11 @@ $manifest = [ordered]@{
     signing = $signingSource
     signing_reproducibility = "APK SHA-256 is reproducible only when the same private keystore and pinned model bundle are supplied; the private key is intentionally not stored in git."
     debug_signed = $true
+    gradle_tasks = $gradleTasks
+    gradle_verification_log = $gradleLogFile.Name
+    gradle_verification_log_sha256 = $gradleLogHash
+    unit_tests_verified = $true
+    lint_verified = $true
     static_verified = $false
     emulator_verified = $false
     launch_verified = $false
@@ -147,7 +159,7 @@ $manifest = [ordered]@{
     notes = "Release APK is signed with the configured Android keystore for this build. OpenCV YuNet/SFace and the shared model bundle are included; no cloud subscription is used."
 }
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $ReleaseDir "android-release-manifest.json")
-& (Join-Path $PSScriptRoot "verify_android_static.ps1") -Apk $releaseOut -Manifest (Join-Path $ReleaseDir "android-release-manifest.json") -ModelManifest $modelManifest
+& (Join-Path $PSScriptRoot "verify_android_static.ps1") -Apk $releaseOut -Manifest (Join-Path $ReleaseDir "android-release-manifest.json") -ModelManifest $androidModelManifest
 if ($LASTEXITCODE -ne 0) { throw "Android static verification failed with exit code $LASTEXITCODE." }
 $manifestPath = Join-Path $ReleaseDir "android-release-manifest.json"
 $verified = Get-Content -Raw $manifestPath -Encoding UTF8 | ConvertFrom-Json
