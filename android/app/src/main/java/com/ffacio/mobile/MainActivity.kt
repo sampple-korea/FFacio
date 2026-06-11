@@ -31,6 +31,9 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -80,6 +83,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color as ComposeColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -113,6 +117,9 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -123,6 +130,7 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
@@ -152,6 +160,8 @@ private const val ENROLL_DUPLICATE_THRESHOLD = MATCH_THRESHOLD
 private const val ENROLL_MIN_DISTINCT_POSES = 2
 private const val ANALYSIS_INTERVAL_MS = 180L
 private const val ANTISPOOF_THRESHOLD = 0.55f
+private const val AUTH_RESULT_HOLD_MS = 3500L
+private const val APPROVAL_LOG_LIMIT = 8
 
 class MainActivity : ComponentActivity() {
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
@@ -321,7 +331,7 @@ private fun FFacioApp(
     var doorToken by remember { mutableStateOf("") }
     var doorConfigError by remember { mutableStateOf<Throwable?>(null) }
     var doorArmed by remember { mutableStateOf(false) }
-    var passiveLivenessEnabled by remember { mutableStateOf(true) }
+    var passiveLivenessEnabled by remember { mutableStateOf(false) }
     var cameraAvailable by remember { mutableStateOf(true) }
     var noCameraHardware by remember { mutableStateOf(false) }
     var cameraRetryNonce by remember { mutableIntStateOf(0) }
@@ -329,16 +339,31 @@ private fun FFacioApp(
     var pendingAdminAction by remember { mutableStateOf<AdminAction?>(null) }
     val enrollSamples = remember { mutableStateListOf<FloatArray>() }
     val enrollPoses = remember { mutableStateListOf<Int>() }
+    val approvalLogs = remember { mutableStateListOf<ApprovalLogEntry>() }
     val liveness = remember { LivenessChallenge() }
+    var guideState by remember { mutableStateOf(FaceGuideState.Searching) }
     var liveCandidate by remember { mutableIntStateOf(-1) }
     var stableUser by remember { mutableIntStateOf(-1) }
     var stableCount by remember { mutableIntStateOf(0) }
     var lastOpenAt by remember { mutableLongStateOf(0L) }
+    var authResultHoldUntil by remember { mutableLongStateOf(0L) }
     var hasCameraPermission by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
     LaunchedEffect(Unit) {
         prefs.edit().remove(PASSIVE_LIVENESS_ENABLED_KEY).apply()
+    }
+    LaunchedEffect(authResultHoldUntil) {
+        val remaining = authResultHoldUntil - System.currentTimeMillis()
+        if (remaining > 0L) {
+            delay(remaining)
+            if (System.currentTimeMillis() >= authResultHoldUntil) {
+                authResultHoldUntil = 0L
+                if (mode == AppMode.Auth) {
+                    guideState = FaceGuideState.Searching
+                }
+            }
+        }
     }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         hasCameraPermission = it
@@ -369,6 +394,8 @@ private fun FFacioApp(
                             enrollmentName = name.trim()
                             enrollSamples.clear()
                             enrollPoses.clear()
+                            authResultHoldUntil = 0L
+                            guideState = FaceGuideState.Center
                             liveCandidate = -1
                             stableUser = -1
                             stableCount = 0
@@ -642,6 +669,14 @@ private fun FFacioApp(
         liveness.reset()
     }
 
+    fun clearAuthResultHold() {
+        authResultHoldUntil = 0L
+    }
+
+    fun recordApproval(userName: String, result: String) {
+        addApprovalLog(approvalLogs, ApprovalLogEntry(formatClock(System.currentTimeMillis()), userName, result))
+    }
+
     fun persistUsersAsync(nextUsers: List<UserTemplate>, onSaved: () -> Unit) {
         storageBusy = true
         status = "얼굴 템플릿 저장 중"
@@ -726,13 +761,16 @@ private fun FFacioApp(
         }
         doorArmed = false
         lastOpenAt = now
-        status = "문 제어를 요청하는 중입니다"
-        detail = "릴레이 응답을 기다리고 있습니다"
+        status = "인증 완료 · 문 열림 요청"
+        detail = "${user.name}님 승인 · 릴레이 응답을 기다리고 있습니다"
         if (doorExecutor.isShutdown) return
         doorExecutor.execute {
             val ok = postDoor(relayUrl, relayToken, user.name)
             ContextCompat.getMainExecutor(context).execute {
                 if (!active.get()) return@execute
+                authResultHoldUntil = System.currentTimeMillis() + AUTH_RESULT_HOLD_MS
+                guideState = FaceGuideState.Approved
+                recordApproval(user.name, if (ok) "문 열림 요청 완료" else "문 제어 실패")
                 status = if (ok) "문 열림 요청 완료" else "문 제어 실패"
                 detail = if (ok) "릴레이가 요청을 수락했습니다" else "URL, 토큰, 네트워크를 확인해 주세요"
             }
@@ -741,8 +779,10 @@ private fun FFacioApp(
 
     fun onObservation(obs: Observation) {
         if (modelLoading || modelError != null || storeError != null || storageBusy) return
+        if (mode == AppMode.Auth && System.currentTimeMillis() < authResultHoldUntil) return
         if (!obs.ok) {
             resetTransient()
+            guideState = FaceGuideState.Searching
             status = obs.message
             detail = if (obs.liveScore > 0.0f) {
                 "실제 얼굴 여부를 확인하고 있습니다"
@@ -754,6 +794,7 @@ private fun FFacioApp(
             return
         }
         if (mode == AppMode.Enroll) {
+            guideState = FaceGuideState.Center
             val duplicateSample = duplicateUserForEnrollment(obs.embedding, users)
             if (duplicateSample != null) {
                 mode = AppMode.Auth
@@ -807,6 +848,7 @@ private fun FFacioApp(
         }
         if (users.isEmpty()) {
             resetTransient()
+            guideState = FaceGuideState.Searching
             status = "등록된 사용자가 없습니다"
             detail = "아래에서 첫 사용자를 등록해 주세요"
             return
@@ -814,12 +856,14 @@ private fun FFacioApp(
         val match = match(obs.embedding, users)
         if (match.index < 0 || match.score < MATCH_THRESHOLD) {
             resetTransient()
+            guideState = FaceGuideState.Searching
             status = "인식하지 못했습니다"
             detail = "조명과 거리를 맞춘 뒤 다시 시도해 주세요"
             return
         }
         if (match.secondScore > 0.0 && match.score - match.secondScore < MATCH_MARGIN) {
             resetTransient()
+            guideState = FaceGuideState.Center
             status = "인증 보류"
             detail = "두 등록 사용자와 너무 비슷합니다. 다시 정면을 유지해 주세요"
             return
@@ -833,6 +877,11 @@ private fun FFacioApp(
         if (!liveness.update(obs.pose)) {
             stableUser = -1
             stableCount = 0
+            guideState = when (liveness.currentTarget()) {
+                -1 -> FaceGuideState.TurnLeft
+                1 -> FaceGuideState.TurnRight
+                else -> FaceGuideState.Center
+            }
             status = liveness.prompt()
             detail = "${users[match.index].name} 후보의 실제 얼굴 여부를 확인합니다"
             return
@@ -842,20 +891,18 @@ private fun FFacioApp(
             stableCount = 1
         }
         if (stableCount < 3) {
+            guideState = FaceGuideState.Center
             status = "안정적으로 확인 중입니다"
             detail = "잠시 그대로 유지해 주세요"
             return
         }
-        if (!passiveLivenessEnabled) {
-            doorArmed = false
-            resetTransient()
-            status = "디버그 인증 확인"
-            detail = "사진/화면 차단 모델이 꺼져 있어 문 열림은 차단됩니다"
-            return
-        }
         val user = users[match.index]
-        status = "환영합니다, ${user.name}님"
-        detail = "인증이 안정적으로 확인되었습니다"
+        val shouldOpenDoor = doorArmed
+        authResultHoldUntil = System.currentTimeMillis() + AUTH_RESULT_HOLD_MS
+        guideState = FaceGuideState.Approved
+        if (!shouldOpenDoor) recordApproval(user.name, "승인")
+        status = "인증 완료"
+        detail = if (shouldOpenDoor) "${user.name}님 승인 · 릴레이 결과를 기다리고 있습니다" else "${user.name}님 승인 · 최근 승인 로그에 기록했습니다"
         resetTransient()
         openDoor(user)
     }
@@ -887,6 +934,7 @@ private fun FFacioApp(
                 analysisEnabled = cameraCanAnalyze(),
                 cameraRetryNonce = cameraRetryNonce,
                 stageMessage = blockedReason() ?: idleReason() ?: "카메라 준비 중",
+                guideState = guideState,
                 engineProvider = engineProvider,
                 analyzerExecutor = analyzerExecutor,
                 processing = processing,
@@ -913,21 +961,6 @@ private fun FFacioApp(
                     .weight(1f)
                     .heightIn(min = 260.dp, max = 430.dp)
             )
-            if (!passiveLivenessEnabled) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    color = ComposeColor(0xFFFFE8E6)
-                ) {
-                    Text(
-                        "디버그: 사진/화면 차단 모델 꺼짐 · 문 열림 차단",
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                        color = ComposeColor(0xFFB42318),
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
             ControlPanel(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -941,6 +974,8 @@ private fun FFacioApp(
                 doorToken = doorToken,
                 doorArmed = doorArmed,
                 passiveLivenessEnabled = passiveLivenessEnabled,
+                showApproval = System.currentTimeMillis() < authResultHoldUntil,
+                approvalLogs = approvalLogs,
                 userCount = users.size,
                 enrollCount = enrollSamples.size,
                 canResetStore = storeError != null,
@@ -951,11 +986,7 @@ private fun FFacioApp(
                 onDoorUrl = { doorUrl = it },
                 onDoorToken = { doorToken = it },
                 onDoorArmed = {
-                    if (it && !passiveLivenessEnabled) {
-                        doorArmed = false
-                        status = "문 열림 차단됨"
-                        detail = "사진/화면 차단 모델을 켠 뒤에만 릴레이 문 열림을 활성화할 수 있습니다"
-                    } else if (it && doorUrl.trim().isEmpty()) {
+                    if (it && doorUrl.trim().isEmpty()) {
                         doorArmed = false
                         status = "릴레이 URL이 필요합니다"
                         detail = "문 열림을 활성화하려면 HTTPS 릴레이 URL을 먼저 입력하세요"
@@ -980,8 +1011,8 @@ private fun FFacioApp(
                     doorArmed = false
                     if (!it) disableDoorForSession()
                     resetTransient()
-                    status = if (it) "사진/화면 차단 모델 켜짐" else "사진/화면 차단 모델 꺼짐"
-                    detail = if (it) "릴레이 문 열림을 다시 활성화할 수 있습니다" else "디버그 진단 모드입니다. 문 열림은 자동으로 차단됩니다"
+                    status = if (it) "사진/화면 차단 모델 켜짐" else "좌우 얼굴 돌리기 모드"
+                    detail = if (it) "선택 강화 모델을 함께 사용합니다" else "기본 실제 얼굴 확인은 좌우 얼굴 돌리기 챌린지로 진행합니다"
                 },
                 onEnroll = enroll@{
                     blockedReason()?.let {
@@ -989,6 +1020,8 @@ private fun FFacioApp(
                         detail = "상태를 해결한 뒤 다시 시도해 주세요"
                         return@enroll
                     }
+                    clearAuthResultHold()
+                    guideState = FaceGuideState.Center
                     if (name.trim().isEmpty()) {
                         status = "이름을 입력하세요"
                         detail = "등록할 사용자의 이름이 필요합니다"
@@ -1006,6 +1039,8 @@ private fun FFacioApp(
                     enrollmentName = ""
                     enrollSamples.clear()
                     enrollPoses.clear()
+                    clearAuthResultHold()
+                    guideState = FaceGuideState.Searching
                     resetTransient()
                     status = if (users.isEmpty()) "먼저 얼굴을 등록하세요" else "인증 모드"
                     detail = if (users.isEmpty()) "등록 사용자 0명" else "카메라를 바라봐 주세요"
@@ -1074,6 +1109,7 @@ private fun CameraStage(
     analysisEnabled: Boolean,
     cameraRetryNonce: Int,
     stageMessage: String,
+    guideState: FaceGuideState,
     engineProvider: () -> MobileFaceEngine?,
     analyzerExecutor: ExecutorService,
     processing: AtomicBoolean,
@@ -1178,6 +1214,10 @@ private fun CameraStage(
                     )
                 )
         )
+        FaceGuideOverlay(
+            state = guideState,
+            modifier = Modifier.align(Alignment.Center)
+        )
         if (!enabled) {
             Text(
                 stageMessage,
@@ -1187,6 +1227,67 @@ private fun CameraStage(
                     .align(Alignment.Center)
                     .padding(24.dp)
             )
+        }
+    }
+}
+
+@Composable
+private fun FaceGuideOverlay(state: FaceGuideState, modifier: Modifier = Modifier) {
+    val ringColor = when (state) {
+        FaceGuideState.Approved -> ComposeColor(0xFF30D158)
+        FaceGuideState.TurnLeft, FaceGuideState.TurnRight -> ComposeColor(0xFF0071E3)
+        FaceGuideState.Center -> ComposeColor(0xFFFFFFFF)
+        FaceGuideState.Searching -> ComposeColor(0x99FFFFFF)
+    }
+    val scale by animateFloatAsState(
+        targetValue = if (state == FaceGuideState.Approved) 1.08f else 1.0f,
+        animationSpec = tween(durationMillis = 240),
+        label = "face-guide-scale"
+    )
+    val alpha by animateFloatAsState(
+        targetValue = if (state == FaceGuideState.Searching) 0.62f else 0.94f,
+        animationSpec = tween(durationMillis = 260),
+        label = "face-guide-alpha"
+    )
+    val symbolOffset by animateFloatAsState(
+        targetValue = when (state) {
+            FaceGuideState.TurnLeft -> -26.0f
+            FaceGuideState.TurnRight -> 26.0f
+            else -> 0.0f
+        },
+        animationSpec = tween(durationMillis = 280),
+        label = "face-guide-symbol-offset"
+    )
+    Box(
+        modifier = modifier
+            .size(260.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                this.alpha = alpha
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(CircleShape)
+                .border(4.dp, ringColor.copy(alpha = 0.72f), CircleShape)
+                .background(ringColor.copy(alpha = 0.10f))
+        )
+        Box(
+            modifier = Modifier
+                .size(232.dp)
+                .clip(CircleShape)
+                .border(1.dp, ComposeColor.White.copy(alpha = 0.28f), CircleShape)
+                .background(ComposeColor.Transparent)
+        )
+        when (state) {
+            FaceGuideState.Approved -> Text("✓", color = ComposeColor.White, fontSize = 76.sp, fontWeight = FontWeight.Bold)
+            FaceGuideState.TurnLeft -> Text("‹", color = ComposeColor.White, fontSize = 78.sp, fontWeight = FontWeight.Bold, modifier = Modifier.graphicsLayer { translationX = symbolOffset })
+            FaceGuideState.TurnRight -> Text("›", color = ComposeColor.White, fontSize = 78.sp, fontWeight = FontWeight.Bold, modifier = Modifier.graphicsLayer { translationX = symbolOffset })
+            FaceGuideState.Center -> Text("•", color = ComposeColor.White, fontSize = 54.sp, fontWeight = FontWeight.Bold)
+            FaceGuideState.Searching -> Text("", color = ComposeColor.White)
         }
     }
 }
@@ -1203,6 +1304,8 @@ private fun ControlPanel(
     doorToken: String,
     doorArmed: Boolean,
     passiveLivenessEnabled: Boolean,
+    showApproval: Boolean,
+    approvalLogs: List<ApprovalLogEntry>,
     userCount: Int,
     enrollCount: Int,
     canResetStore: Boolean,
@@ -1251,6 +1354,61 @@ private fun ControlPanel(
                 Text(it, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             }
             Text(detail, color = ComposeColor(0xFF6E6E73), fontSize = 15.sp)
+            if (showApproval) {
+                var approvalTarget by remember { mutableStateOf(0.92f) }
+                LaunchedEffect(showApproval) {
+                    approvalTarget = 1.0f
+                }
+                val approvalScale by animateFloatAsState(
+                    targetValue = approvalTarget,
+                    animationSpec = tween(durationMillis = 260),
+                    label = "approval-card-scale"
+                )
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer {
+                            scaleX = approvalScale
+                            scaleY = approvalScale
+                        },
+                    color = ComposeColor(0xFFE9FBEF),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .background(ComposeColor(0xFF30D158)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("✓", color = ComposeColor.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("승인 완료", color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.Bold)
+                            Text("최근 승인 로그에 기록되었습니다", color = ComposeColor(0xFF248A3D), fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+            if (approvalLogs.isNotEmpty()) {
+                Surface(color = ComposeColor(0xFFF5F5F7), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("최근 승인 로그", color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
+                        approvalLogs.take(3).forEach { entry ->
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                Text(entry.time, color = ComposeColor(0xFF6E6E73), fontSize = 12.sp)
+                                Text(entry.userName, color = ComposeColor(0xFF1D1D1F), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                Text(entry.result, color = ComposeColor(0xFF248A3D), fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
             if (mode == AppMode.Enroll) {
                 Text("등록 진행 $enrollCount/$ENROLL_SAMPLES", color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
             }
@@ -1338,7 +1496,7 @@ private fun ControlPanel(
                     Text("사진/화면 차단 모델", color = ComposeColor(0xFF1D1D1F))
                 }
                 if (!passiveLivenessEnabled) {
-                    Text("디버그 모드: 패시브 PAD만 우회합니다. 포즈 체크는 유지되지만 문 열림은 차단됩니다", color = ComposeColor(0xFFFF3B30), fontSize = 13.sp)
+                    Text("기본 모드: 좌우 얼굴 돌리기 챌린지로 실제 얼굴을 확인합니다", color = ComposeColor(0xFF6E6E73), fontSize = 13.sp)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Switch(checked = doorArmed, onCheckedChange = onDoorArmed, enabled = canMutate)
@@ -1661,11 +1819,14 @@ private class LivenessChallenge {
         return index >= targets.size
     }
 
+    fun currentTarget(): Int = if (index >= targets.size) 0 else targets[index]
+
     fun prompt(): String = if (index >= targets.size) "라이브니스 확인 완료" else "${poseLabel(targets[index])}을 보고 잠시 유지해 주세요"
 }
 
 private enum class AppMode { Auth, Enroll }
 private enum class AdminAction { StartEnroll, DeleteUsers, UnlockStore, ResetStore, ArmDoor, UnlockDoor }
+private enum class FaceGuideState { Searching, Center, TurnLeft, TurnRight, Approved }
 private sealed class ModelLoadState {
     data object Loading : ModelLoadState()
     data object Ready : ModelLoadState()
@@ -1738,6 +1899,7 @@ private data class Observation(
 private data class UserTemplate(val name: String, val embedding: FloatArray)
 private data class Match(val index: Int, val score: Double, val secondScore: Double)
 internal data class EnrollmentSampleDecision(val accepted: Boolean, val status: String, val detail: String)
+internal data class ApprovalLogEntry(val time: String, val userName: String, val result: String)
 private data class StoreLoadResult(val users: List<UserTemplate>, val error: Throwable?)
 
 private fun MutableList<UserTemplate>.replaceWith(items: List<UserTemplate>) {
@@ -1929,6 +2091,20 @@ private fun poseLabel(pose: Int): String = when {
     pose > 0 -> "오른쪽"
     else -> "정면"
 }
+
+internal fun addApprovalLog(
+    logs: MutableList<ApprovalLogEntry>,
+    entry: ApprovalLogEntry,
+    limit: Int = APPROVAL_LOG_LIMIT
+) {
+    logs.add(0, entry)
+    while (logs.size > limit) {
+        logs.removeAt(logs.lastIndex)
+    }
+}
+
+private fun formatClock(timeMillis: Long): String =
+    SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timeMillis))
 
 private fun postDoor(url: String, token: String, user: String): Boolean = runCatching {
     val endpoint = URL(url)
