@@ -108,6 +108,7 @@ import java.security.SecureRandom
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -132,6 +133,7 @@ private const val LEGACY_SECURE_SUFFIX = "_enc"
 private const val MATCH_THRESHOLD = 0.42
 private const val MATCH_MARGIN = 0.04
 private const val ENROLL_SAMPLES = 5
+private const val ANALYSIS_INTERVAL_MS = 180L
 
 class MainActivity : ComponentActivity() {
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
@@ -139,6 +141,7 @@ class MainActivity : ComponentActivity() {
     private val modelExecutor = Executors.newSingleThreadExecutor()
     private val processing = AtomicBoolean(false)
     private val firstAnalyzedFrameLogged = AtomicBoolean(false)
+    private val lastAnalysisAt = AtomicLong(0L)
     private val active = AtomicBoolean(true)
     private lateinit var prefs: SharedPreferences
     @Volatile
@@ -159,6 +162,7 @@ class MainActivity : ComponentActivity() {
                     doorExecutor = doorExecutor,
                     processing = processing,
                     firstAnalyzedFrameLogged = firstAnalyzedFrameLogged,
+                    lastAnalysisAt = lastAnalysisAt,
                     active = active
                 )
             }
@@ -230,6 +234,7 @@ private fun FFacioApp(
     doorExecutor: ExecutorService,
     processing: AtomicBoolean,
     firstAnalyzedFrameLogged: AtomicBoolean,
+    lastAnalysisAt: AtomicLong,
     active: AtomicBoolean
 ) {
     val context = LocalContext.current
@@ -281,15 +286,15 @@ private fun FFacioApp(
                     stableUser = -1
                     stableCount = 0
                     liveness.reset()
-                    status = "Center your face"
-                    detail = "FFacio is collecting samples from several angles"
+                    status = "얼굴을 중앙에 맞춰주세요"
+                    detail = "FFacio가 안정적인 얼굴 템플릿을 수집하고 있습니다"
                 }
                 AdminAction.DeleteUsers -> {
                     val deleted = runCatching { saveUsers(context, prefs, emptyList()) }
                         .onFailure {
                             storeError = it
-                            status = "Local biometric store unavailable"
-                            detail = it.message ?: "Encrypted template storage failed closed"
+                            status = "로컬 생체 저장소를 사용할 수 없습니다"
+                            detail = "암호화된 얼굴 템플릿 저장에 실패해 인증을 차단했습니다"
                         }
                         .isSuccess
                     if (deleted) {
@@ -300,8 +305,8 @@ private fun FFacioApp(
                         stableCount = 0
                         liveness.reset()
                         confirmDelete = false
-                        status = "Registered users deleted"
-                        detail = "You can start a new user enrollment"
+                        status = "등록 사용자를 삭제했습니다"
+                        detail = "새 사용자 등록을 시작할 수 있습니다"
                     }
                 }
                 AdminAction.UnlockStore -> {
@@ -342,23 +347,23 @@ private fun FFacioApp(
                     val saved = runCatching {
                         val relayUrl = doorUrl.trim()
                         val relayToken = doorToken.trim()
-                        if (relayUrl.isEmpty()) error("Relay URL is required")
-                        if (relayToken.isEmpty()) error("Relay token is required")
-                        if (URL(relayUrl).protocol.lowercase() != "https") error("HTTPS relay URL is required")
-                        if (!prefs.edit().putString(DOOR_URL_KEY, relayUrl).commit()) error("Relay URL could not be saved")
+                        if (relayUrl.isEmpty()) error("릴레이 URL이 필요합니다")
+                        if (relayToken.isEmpty()) error("릴레이 토큰이 필요합니다")
+                        if (URL(relayUrl).protocol.lowercase() != "https") error("HTTPS 릴레이 URL만 사용할 수 있습니다")
+                        if (!prefs.edit().putString(DOOR_URL_KEY, relayUrl).commit()) error("릴레이 URL을 저장하지 못했습니다")
                         securePutString(context, prefs, DOOR_TOKEN_KEY, relayToken)
-                        if (!prefs.edit().putBoolean(DOOR_ARMED_KEY, true).commit()) error("Relay armed state could not be saved")
+                        if (!prefs.edit().putBoolean(DOOR_ARMED_KEY, true).commit()) error("릴레이 활성화 상태를 저장하지 못했습니다")
                     }.onSuccess {
                         doorConfigError = null
                         doorArmed = true
-                        status = "Relay opening enabled"
-                        detail = "Requests are sent only after recognition and liveness pass"
+                        status = "문 열림 릴레이 활성화 완료"
+                        detail = "얼굴 인증과 라이브니스 확인을 모두 통과한 뒤에만 요청합니다"
                     }.onFailure {
                         doorArmed = false
                         prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit()
                         doorConfigError = it
-                        status = "Door token storage unavailable"
-                        detail = it.message ?: "Encrypted relay token storage failed"
+                        status = "릴레이 설정을 저장할 수 없습니다"
+                        detail = it.message ?: "암호화된 릴레이 토큰 저장에 실패했습니다"
                     }.isSuccess
                     if (!saved) {
                         liveCandidate = -1
@@ -384,8 +389,8 @@ private fun FFacioApp(
                 }
             }
         } else {
-            status = "Admin confirmation cancelled"
-            detail = "Enrollment, deletion, and door control changes require device unlock"
+            status = "기기 인증이 취소되었습니다"
+            detail = "등록, 삭제, 문 열림 활성화에는 기기 잠금 해제가 필요합니다"
         }
     }
 
@@ -426,13 +431,13 @@ private fun FFacioApp(
         storeError = loaded.error
         users.replaceWith(loaded.users)
         if (storeError != null) {
-            status = "Local biometric store locked"
-            detail = "Stored templates could not be verified. Delete app data or re-enroll after confirming device security."
+            status = "로컬 생체 저장소가 잠겨 있습니다"
+            detail = "기기 인증으로 다시 열어 보거나, 필요할 때만 템플릿을 초기화하세요"
             return@LaunchedEffect
         }
         if (modelLoading) {
-            status = "Loading offline models"
-            detail = "Preparing bundled face detection and recognition models on this device"
+            status = "오프라인 모델을 준비하고 있습니다"
+            detail = "기기에 포함된 얼굴 검출/인식 모델을 불러오는 중입니다"
             return@LaunchedEffect
         }
         when {
@@ -454,13 +459,13 @@ private fun FFacioApp(
 
     fun persistDoorDisabled() {
         runCatching {
-            if (!prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit()) error("Relay disabled state could not be saved")
+            if (!prefs.edit().putBoolean(DOOR_ARMED_KEY, false).commit()) error("릴레이 비활성화 상태를 저장하지 못했습니다")
         }.onSuccess {
             doorConfigError = null
         }.onFailure {
             doorArmed = false
-            status = "Door token storage unavailable"
-            detail = it.message ?: "Encrypted relay token storage failed"
+            status = "릴레이 설정을 저장할 수 없습니다"
+            detail = it.message ?: "암호화된 릴레이 토큰 저장에 실패했습니다"
         }
     }
 
@@ -479,25 +484,25 @@ private fun FFacioApp(
         }.onFailure {
             storeError = it
             resetTransient()
-            status = "Local biometric store unavailable"
-            detail = it.message ?: "Encrypted template storage failed closed"
+            status = "로컬 생체 저장소를 사용할 수 없습니다"
+            detail = "암호화된 얼굴 템플릿 저장에 실패해 인증을 차단했습니다"
         }.isSuccess
     }
 
     fun requestAdmin(action: AdminAction) {
         val keyguard = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         if (!keyguard.isDeviceSecure) {
-            status = "Device lock is required"
-            detail = "Set an Android screen lock before enrollment, deletion, or relay arming"
+            status = "기기 잠금 설정이 필요합니다"
+            detail = "등록, 삭제, 문 열림 활성화 전에 Android 화면 잠금을 설정하세요"
             return
         }
         val prompt = keyguard.createConfirmDeviceCredentialIntent(
-            "FFacio admin confirmation",
-            "Protect local biometric templates and door-control settings"
+            "FFacio 관리자 확인",
+            "로컬 생체 템플릿과 문 제어 설정을 보호합니다"
         )
         if (prompt == null) {
-            status = "Admin confirmation unavailable"
-            detail = "Check Android security settings and try again"
+            status = "기기 인증을 사용할 수 없습니다"
+            detail = "Android 보안 설정을 확인한 뒤 다시 시도하세요"
             return
         }
         pendingAdminAction = action
@@ -505,10 +510,9 @@ private fun FFacioApp(
     }
 
     fun blockedReason(): String? = when {
-        modelLoading -> "Offline models are still loading"
+        modelLoading -> "오프라인 모델을 불러오는 중입니다"
         modelError != null -> "모델을 사용할 수 없습니다"
-        storeError != null -> "Local biometric store is locked"
-        doorConfigError != null -> "Door relay settings are locked"
+        storeError != null -> "로컬 생체 저장소가 잠겨 있습니다"
         !hasCameraPermission -> "카메라 권한이 필요합니다"
         !cameraAvailable -> "카메라를 사용할 수 없습니다"
         else -> null
@@ -645,6 +649,7 @@ private fun FFacioApp(
                 analyzerExecutor = analyzerExecutor,
                 processing = processing,
                 firstAnalyzedFrameLogged = firstAnalyzedFrameLogged,
+                lastAnalysisAt = lastAnalysisAt,
                 active = active,
                 onObservation = ::onObservation,
                 onCameraUnavailable = {
@@ -708,11 +713,6 @@ private fun FFacioApp(
                         detail = "등록할 사용자의 이름이 필요합니다"
                     } else {
                         requestAdmin(AdminAction.StartEnroll)
-                        return@enroll
-                        enrollSamples.clear()
-                        resetTransient()
-                        status = "얼굴을 중앙에 맞춰주세요"
-                        detail = "여러 각도의 샘플을 자동으로 수집합니다"
                     }
                 },
                 onAuth = auth@{
@@ -769,12 +769,6 @@ private fun FFacioApp(
             confirmButton = {
                 TextButton(onClick = {
                     requestAdmin(AdminAction.DeleteUsers)
-                    return@TextButton
-                    saveUsers(context, prefs, users)
-                    resetTransient()
-                    confirmDelete = false
-                    status = "등록 사용자를 삭제했습니다"
-                    detail = "새 사용자 등록을 시작할 수 있습니다"
                 }) { Text("삭제") }
             },
             dismissButton = {
@@ -794,6 +788,7 @@ private fun CameraStage(
     analyzerExecutor: ExecutorService,
     processing: AtomicBoolean,
     firstAnalyzedFrameLogged: AtomicBoolean,
+    lastAnalysisAt: AtomicLong,
     active: AtomicBoolean,
     onObservation: (Observation) -> Unit,
     onCameraUnavailable: () -> Unit
@@ -811,12 +806,14 @@ private fun CameraStage(
         var boundProvider: ProcessCameraProvider? = null
         var boundPreview: Preview? = null
         var boundAnalysis: ImageAnalysis? = null
+        var disposed = false
         if (enabled) {
             providerFuture = ProcessCameraProvider.getInstance(context)
             providerFuture.addListener({
                 runCatching {
-                    if (!active.get()) return@addListener
+                    if (!active.get() || disposed) return@addListener
                     val provider = providerFuture.get()
+                    if (disposed) return@addListener
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
@@ -827,10 +824,9 @@ private fun CameraStage(
                         .build()
                         .also {
                             it.setAnalyzer(analyzerExecutor) { proxy ->
-                                analyzeProxy(proxy, engineProvider, processing, firstAnalyzedFrameLogged, active, context, onObservation)
+                                analyzeProxy(proxy, engineProvider, processing, firstAnalyzedFrameLogged, lastAnalysisAt, active, context, onObservation)
                             }
                         }
-                    provider.unbindAll()
                     val selector = when {
                         provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) -> CameraSelector.DEFAULT_FRONT_CAMERA
                         provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) -> CameraSelector.DEFAULT_BACK_CAMERA
@@ -839,6 +835,7 @@ private fun CameraStage(
                     if (selector == null) {
                         onCameraUnavailable()
                     } else {
+                        if (disposed) return@addListener
                         provider.bindToLifecycle(context as ComponentActivity, selector, preview, analysis)
                         boundProvider = provider
                         boundPreview = preview
@@ -850,6 +847,7 @@ private fun CameraStage(
             }, ContextCompat.getMainExecutor(context))
         }
         onDispose {
+            disposed = true
             boundAnalysis?.clearAnalyzer()
             val provider = boundProvider
             val preview = boundPreview
@@ -860,7 +858,6 @@ private fun CameraStage(
                 providerFuture?.addListener({
                     runCatching {
                         boundAnalysis?.clearAnalyzer()
-                        providerFuture.get().unbindAll()
                     }
                 }, ContextCompat.getMainExecutor(context))
             }
@@ -959,13 +956,15 @@ private fun ControlPanel(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
-            if (blockedReason != null) {
+            if (blockedReason != null || canUnlockDoor) {
                 Surface(color = ComposeColor(0xFFFFF4E5), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(blockedReason, color = ComposeColor(0xFF8A4B00), fontWeight = FontWeight.Bold)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            Button(onClick = onRetry, modifier = Modifier.weight(1f)) { Text("다시 확인") }
-                            Button(onClick = onOpenSettings, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF1D1D1F))) { Text("앱 설정") }
+                        Text(blockedReason ?: "릴레이 토큰을 다시 확인하세요", color = ComposeColor(0xFF8A4B00), fontWeight = FontWeight.Bold)
+                        if (blockedReason != null) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                Button(onClick = onRetry, modifier = Modifier.weight(1f)) { Text("다시 확인") }
+                                Button(onClick = onOpenSettings, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF1D1D1F))) { Text("앱 설정") }
+                            }
                         }
                         if (canResetStore) {
                             Button(
@@ -1047,10 +1046,17 @@ private fun analyzeProxy(
     engineProvider: () -> MobileFaceEngine?,
     processing: AtomicBoolean,
     firstAnalyzedFrameLogged: AtomicBoolean,
+    lastAnalysisAt: AtomicLong,
     active: AtomicBoolean,
     context: Context,
     onObservation: (Observation) -> Unit
 ) {
+    val now = System.currentTimeMillis()
+    val previous = lastAnalysisAt.get()
+    if (now - previous < ANALYSIS_INTERVAL_MS || !lastAnalysisAt.compareAndSet(previous, now)) {
+        proxy.close()
+        return
+    }
     if (!processing.compareAndSet(false, true)) {
         proxy.close()
         return
@@ -1100,10 +1106,10 @@ private fun imageProxyToBitmap(proxy: ImageProxy): Bitmap {
         for (x in 0 until proxy.width) {
             val offset = rowStart + x * pixelStride
             if (offset + 3 >= buffer.limit()) error("RGBA buffer too small for ${proxy.width}x${proxy.height}")
-            val a = buffer.get(offset).toInt() and 0xFF
-            val r = buffer.get(offset + 1).toInt() and 0xFF
-            val g = buffer.get(offset + 2).toInt() and 0xFF
-            val b = buffer.get(offset + 3).toInt() and 0xFF
+            val r = buffer.get(offset).toInt() and 0xFF
+            val g = buffer.get(offset + 1).toInt() and 0xFF
+            val b = buffer.get(offset + 2).toInt() and 0xFF
+            val a = buffer.get(offset + 3).toInt() and 0xFF
             pixels[y * proxy.width + x] = Color.argb(a, r, g, b)
         }
     }
