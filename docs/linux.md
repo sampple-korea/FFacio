@@ -32,6 +32,8 @@ The workflow `.github/workflows/linux-release.yml` builds:
 
 Run it manually from GitHub Actions or by pushing a version tag. Download the workflow artifacts, then attach the tarballs and manifests to the GitHub Release.
 
+Note: committing or updating `.github/workflows/linux-release.yml` requires a GitHub token with `workflow` scope. If the local token lacks that scope, keep using `scripts/build_linux.sh` on Linux runners and upload the generated tarballs/manifests manually.
+
 ## Verification
 
 After a Linux build, run:
