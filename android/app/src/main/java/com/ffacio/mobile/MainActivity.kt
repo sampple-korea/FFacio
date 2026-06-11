@@ -105,6 +105,7 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.KeyStore
+import java.security.MessageDigest
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -208,15 +209,19 @@ class MainActivity : ComponentActivity() {
 
     private fun copyAsset(assetPath: String): File {
         val out = File(filesDir, assetPath.replace("/", "_"))
-        val expectedLength = assets.openFd(assetPath).use { it.length }
-        if (out.exists() && out.length() == expectedLength) return out
+        val modelEntry = modelManifestEntry(assetPath)
+        val expectedLength = modelEntry?.getLong("size") ?: assets.openFd(assetPath).use { it.length }
+        val expectedSha = modelEntry?.optString("sha256")?.lowercase()?.takeIf { it.isNotBlank() }
+        if (out.exists() && out.length() == expectedLength && (expectedSha == null || sha256(out) == expectedSha)) {
+            return out
+        }
         val tmp = File(out.parentFile, "${out.name}.tmp")
         assets.open(assetPath).use { input ->
             FileOutputStream(tmp).use { output ->
                 input.copyTo(output, 1024 * 1024)
             }
         }
-        if (tmp.length() != expectedLength) {
+        if (tmp.length() != expectedLength || (expectedSha != null && sha256(tmp) != expectedSha)) {
             tmp.delete()
             error("Bundled model copy failed: $assetPath")
         }
@@ -226,6 +231,30 @@ class MainActivity : ComponentActivity() {
             error("Bundled model install failed: $assetPath")
         }
         return out
+    }
+
+    private fun modelManifestEntry(assetPath: String): JSONObject? {
+        val modelPath = assetPath.removePrefix("models/")
+        val raw = assets.open("models/models.manifest.json").bufferedReader(Charsets.UTF_8).use { it.readText() }
+        val files = JSONObject(raw).getJSONArray("files")
+        for (i in 0 until files.length()) {
+            val item = files.getJSONObject(i)
+            if (item.optString("path") == modelPath) return item
+        }
+        return null
+    }
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(1024 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 }
 

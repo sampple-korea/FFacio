@@ -37,5 +37,5 @@ Output:
 
 - Release APK signing requires `FFACIO_ANDROID_KEYSTORE` and related signing environment variables. The private signing key is intentionally not stored in git.
 - It includes the shared InsightFace `buffalo_l` bundle for parity, but the first mobile implementation runs OpenCV YuNet/SFace because the Python InsightFace package is not directly portable to Android.
-- RGB-camera liveness remains an active pose challenge. It helps against static photos and simple screens, but it is not equivalent to hardware depth/IR Face ID.
+- RGB-camera liveness now combines passive MiniFASNet anti-spoofing with the active pose challenge. It helps against many static photo and simple screen attacks, but it is not equivalent to hardware depth/IR Face ID.
 - Real device camera/liveness testing is still required on actual phones.

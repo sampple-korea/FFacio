@@ -61,10 +61,16 @@ Android 버전은 Kotlin + Jetpack Compose + CameraX + OpenCV Android AAR로 구
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup_android_deps.ps1
+$env:FFACIO_ANDROID_KEYSTORE = "C:\path\to\release.jks"
+$env:FFACIO_ANDROID_KEYSTORE_PASSWORD = "<store-password>"
+$env:FFACIO_ANDROID_KEY_ALIAS = "<key-alias>"
+$env:FFACIO_ANDROID_KEY_PASSWORD = "<key-password>"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_android.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify_android_static.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify_android_emulator.ps1
 ```
+
+For disposable sideload builds only, `scripts\build_android.ps1 -AllowGeneratedSigningKey` can generate `release\ffacio-local-release.jks`. Normal release builds require the `FFACIO_ANDROID_KEYSTORE*` environment variables so signing provenance stays explicit.
 
 결과물은 `release\FFacio-Android-release.apk`와 `release\FFacio-Android-debug.apk`입니다. release APK는 로컬 sideload 테스트용 키로 서명되며, Play/production 배포에는 사용자 소유 keystore를 지정해야 합니다.
 
