@@ -10,8 +10,9 @@ Android build target for the same offline face access goal.
 - Android Keystore AES-GCM for stored face templates and HTTP relay token.
 - The APK bundles an Android-only offline model set generated from `resources/models/`: OpenCV YuNet, OpenCV SFace, and MiniFASNet-V2. It does not need a model download on first launch, and it intentionally omits desktop-only InsightFace assets. YuNet/SFace are required for the default active face-turn flow; release APKs include MiniFASNet-V2 for the optional passive PAD switch, but runtime load failure degrades to active face-turn mode instead of blocking the whole app.
 - Sensitive screens run with Android `FLAG_SECURE`, so camera preview, recognized names, and relay settings are blocked from screenshots, screen recording, and recent-app thumbnails on compliant devices.
+- While the app is active it keeps the display awake for door-terminal operation; the admin view still auto-locks back to the operation view after the admin session timeout.
 - The default screen is an operation view for door use: camera guidance, current status, recent approvals, relay failures, and camera retry only. Registration, user management, relay settings, and destructive actions live behind Android screen-lock verification in the admin view.
-- The admin view automatically returns to the operation view after an idle admin session timeout, with a separate idle timeout that cancels stalled enrollment. Secure prompts and storage operations are not interrupted.
+- The admin view automatically returns to the operation view after the admin session timeout, with a separate idle timeout that cancels stalled enrollment. Secure prompts and storage operations are not interrupted.
 
 ## Build
 

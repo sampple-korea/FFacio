@@ -35,4 +35,16 @@ class ApprovalLogTest {
         assertEquals("✓", accessFeedbackSymbol(AccessFeedbackKind.DoorSucceeded))
         assertEquals("문 열림 완료", accessFeedbackTitle(AccessFeedbackKind.DoorSucceeded))
     }
+
+    @Test
+    fun publicOperationFeedbackDoesNotExposeUserNameOrTime() {
+        val feedback = AccessFeedback(AccessFeedbackKind.AuthOnly, "민수")
+        val summary = approvalPublicSummary(ApprovalLogEntry("09:31:15", "민수", "승인"))
+
+        assertEquals("얼굴 인증이 완료되었습니다", accessFeedbackPublicMessage(feedback))
+        assertEquals("최근 출입 이벤트 · 승인", summary)
+        assertEquals(false, accessFeedbackPublicMessage(feedback).contains("민수"))
+        assertEquals(false, summary.contains("민수"))
+        assertEquals(false, summary.contains("09:31:15"))
+    }
 }

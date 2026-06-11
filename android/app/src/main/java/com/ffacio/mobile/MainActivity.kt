@@ -182,6 +182,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         var modelLoadState by mutableStateOf<ModelLoadState>(ModelLoadState.Loading)
 
@@ -1103,7 +1104,7 @@ private fun FFacioApp(
                 else -> FaceGuideState.Center
             }
             status = liveness.prompt()
-            detail = "${users[match.index].name} 후보의 실제 얼굴 여부를 확인합니다"
+            detail = "등록된 얼굴 후보의 실제 얼굴 여부를 확인합니다"
             return
         }
         if (stableUser == match.index) stableCount += 1 else {
@@ -1127,7 +1128,7 @@ private fun FFacioApp(
         }
         if (!shouldOpenDoor) recordApproval(user.name, "승인")
         status = "인증 완료"
-        detail = if (shouldOpenDoor) "${user.name}님 승인 · 릴레이 결과를 기다리고 있습니다" else "${user.name}님 승인 · 최근 승인 로그에 기록했습니다"
+        detail = if (shouldOpenDoor) "인증 승인 · 릴레이 결과를 기다리고 있습니다" else "인증 승인 · 최근 승인 로그에 기록했습니다"
         resetTransient()
         openDoor(user)
     }
@@ -1672,7 +1673,7 @@ private fun OperationPanel(
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(accessFeedbackTitle(feedback.kind), color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.Bold)
                             Text(
-                                accessFeedbackMessage(feedback),
+                                accessFeedbackPublicMessage(feedback),
                                 color = accessFeedbackText(feedback.kind),
                                 fontSize = 13.sp
                             )
@@ -1681,7 +1682,7 @@ private fun OperationPanel(
                 }
             }
             if (approvalLogs.isNotEmpty()) {
-                Text("최근 승인 ${approvalLogs.first().time} · ${approvalLogs.first().userName} · ${approvalLogs.first().result}", color = ComposeColor(0xFF6E6E73), fontSize = 13.sp)
+                Text(approvalPublicSummary(approvalLogs.first()), color = ComposeColor(0xFF6E6E73), fontSize = 13.sp)
             }
         }
     }
@@ -2263,7 +2264,7 @@ private sealed class ModelLoadState {
     data class Failed(val error: Throwable) : ModelLoadState()
 }
 
-private data class AccessFeedback(val kind: AccessFeedbackKind, val userName: String)
+internal data class AccessFeedback(val kind: AccessFeedbackKind, val userName: String)
 
 internal data class PassiveLiveness(val liveScore: Float, val state: String) {
     val isLive: Boolean
@@ -2685,6 +2686,16 @@ private fun accessFeedbackMessage(feedback: AccessFeedback): String = when (feed
     AccessFeedbackKind.DoorSucceeded -> "릴레이가 문 열림 요청을 수락했습니다"
     AccessFeedbackKind.DoorFailed -> "얼굴 인증은 통과했지만 릴레이 요청이 실패했습니다"
 }
+
+internal fun accessFeedbackPublicMessage(feedback: AccessFeedback): String = when (feedback.kind) {
+    AccessFeedbackKind.AuthOnly -> "얼굴 인증이 완료되었습니다"
+    AccessFeedbackKind.DoorPending -> "인증 승인 · 릴레이 응답을 기다리고 있습니다"
+    AccessFeedbackKind.DoorSucceeded -> "릴레이가 문 열림 요청을 수락했습니다"
+    AccessFeedbackKind.DoorFailed -> "얼굴 인증은 통과했지만 릴레이 요청이 실패했습니다"
+}
+
+internal fun approvalPublicSummary(entry: ApprovalLogEntry): String =
+    "최근 출입 이벤트 · ${entry.result}"
 
 private fun formatClock(timeMillis: Long): String =
     SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timeMillis))
