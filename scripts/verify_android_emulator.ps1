@@ -2,7 +2,7 @@ param(
     [string]$Apk = "$PSScriptRoot\..\release\FFacio-Android-release.apk",
     [string]$AvdName = "FFacio_API36",
     [string]$Serial = "",
-    [string]$Report = "",
+    [string]$Report = "$PSScriptRoot\..\release\android-emulator-verification.json",
     [switch]$KeepRunning
 )
 
@@ -101,6 +101,7 @@ if ($Report) {
         requested_avd = $AvdName
         avd_name = $actualAvd
         serial = $Serial
+        boot_completed = $boot
         app_pid = $appPid
         launch_method = "adb monkey launcher"
         model_ready_verified = $true

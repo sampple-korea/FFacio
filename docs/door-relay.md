@@ -28,6 +28,8 @@ Configure FFacio settings with:
 
 The simulator only records state in memory; it does not control a real lock.
 
+These localhost URLs are for the Windows desktop app and local simulator. Android door arming requires an `https://` relay URL whenever a Bearer token is stored or sent; the Android app rejects token-backed plain HTTP relays.
+
 ## ESP32 Example
 
 An ESP32 HTTP relay sketch is included at `hardware/esp32_http_relay/esp32_http_relay.ino`. Replace Wi-Fi credentials, set a long random Bearer token, verify the relay polarity, and bench-test with the test endpoint before connecting a lock.
@@ -63,7 +65,7 @@ If a Bearer token is configured, FFacio sends:
 Authorization: Bearer <token>
 ```
 
-The token is protected in the local store with Windows DPAPI.
+The token is protected in the local store with Windows DPAPI on Windows and Android Keystore AES-GCM on Android.
 For real hardware, avoid exposing the relay on a shared Wi-Fi/LAN. Plain HTTP Bearer tokens can be captured on an untrusted network; prefer a local wired bridge, isolated network, HTTPS-capable controller, or a relay that implements nonce/HMAC protection.
 
 ## Response

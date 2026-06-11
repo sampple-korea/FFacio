@@ -114,6 +114,7 @@ $manifest = [ordered]@{
     emulator_report = $null
     emulator_serial = $null
     emulator_avd = $null
+    emulator_boot_completed = $null
     emulator_app_pid = $null
     emulator_launch_method = $null
     verified_apk_sha256 = $null
@@ -137,6 +138,7 @@ if (-not $SkipEmulatorVerification) {
     $verified.emulator_report = Split-Path -Leaf $emulatorReport
     $verified.emulator_serial = $emulatorEvidence.serial
     $verified.emulator_avd = $emulatorEvidence.avd_name
+    $verified.emulator_boot_completed = $emulatorEvidence.boot_completed
     $verified.emulator_app_pid = $emulatorEvidence.app_pid
     $verified.emulator_launch_method = $emulatorEvidence.launch_method
     $verified.verified_apk_sha256 = $releaseHash

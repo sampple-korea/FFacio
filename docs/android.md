@@ -9,6 +9,7 @@ Android build target for the same offline face access goal.
 - OpenCV Android AAR for YuNet face detection and SFace embeddings.
 - Android Keystore AES-GCM for stored face templates and HTTP relay token.
 - The APK bundles `resources/models/` so it does not need a model download on first launch.
+- Sensitive screens run with Android `FLAG_SECURE`, so camera preview, recognized names, and relay settings are blocked from screenshots, screen recording, and recent-app thumbnails on compliant devices.
 
 ## Build
 
@@ -24,6 +25,7 @@ Output:
 - `release\FFacio-Android-release.apk`
 - `release\FFacio-Android-debug.apk`
 - `release\android-release-manifest.json`
+- `release\android-emulator-verification.json`
 
 ## Current Caveats
 
