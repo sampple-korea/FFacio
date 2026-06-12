@@ -21,6 +21,9 @@ import android.util.Size as AndroidSize
 import android.view.Window
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityManager
+import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -119,6 +122,7 @@ import org.opencv.objdetect.FaceDetectorYN
 import org.opencv.objdetect.FaceRecognizerSF
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.FloatBuffer
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.KeyStore
@@ -153,6 +157,8 @@ private const val DOOR_TOKEN_KEY = "door_token"
 private const val DOOR_ENABLED_KEY = "door_enabled"
 private const val DOOR_RELAY_HEALTH_PATH = "/.well-known/ffacio-door-relay"
 private const val PASSIVE_LIVENESS_ENABLED_KEY = "passive_liveness_enabled"
+internal const val FACE_ENGINE_ID = "insightface.arcface.w600k_r50"
+internal const val FACE_EMBEDDING_SIZE = 512
 private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key_v3"
 private const val LEGACY_KEYSTORE_ALIAS = "ffacio_mobile_store_key_v2"
 private const val OLDER_KEYSTORE_ALIAS = "ffacio_mobile_store_key"
@@ -160,12 +166,17 @@ private const val SECURE_SUFFIX = "_enc_v3"
 private const val LEGACY_SECURE_SUFFIX = "_enc_v2"
 private const val OLDER_SECURE_SUFFIX = "_enc"
 private const val STORE_PREFLIGHT_KEY = "__store_preflight"
-private const val MATCH_THRESHOLD = 0.42
-private const val MATCH_MARGIN = 0.04
+private const val MATCH_THRESHOLD = 0.58
+private const val MATCH_SAMPLE_THRESHOLD = 0.54
+private const val MATCH_MARGIN = 0.08
+private const val MATCH_MIN_SUPPORTING_SAMPLES = 2
 private const val ENROLL_SAMPLES = 5
 private const val ENROLL_REPEAT_THRESHOLD = 0.985
-private const val ENROLL_DUPLICATE_THRESHOLD = MATCH_THRESHOLD
+private const val ENROLL_DUPLICATE_THRESHOLD = 0.68
 private const val ENROLL_MIN_DISTINCT_POSES = 2
+private const val ENROLL_TEMPLATE_MIN_SAMPLE_SCORE = 0.62
+private const val ENROLL_TEMPLATE_AVG_SAMPLE_SCORE = 0.70
+private const val ENROLL_TEMPLATE_MIN_PAIR_SCORE = 0.58
 private const val ANALYSIS_INTERVAL_MS = 180L
 private const val CAMERA_ANALYSIS_STALL_MS = 6500L
 private const val CAMERA_WATCHDOG_RETRY_COOLDOWN_MS = 6000L
@@ -224,6 +235,7 @@ class MainActivity : ComponentActivity() {
                 createdEngine = MobileFaceEngine(
                     copyAsset("models/opencv/face_detection_yunet_2023mar.onnx"),
                     copyAsset("models/opencv/face_recognition_sface_2021dec.onnx"),
+                    copyAsset("models/insightface/models/buffalo_l/w600k_r50.onnx"),
                     antiSpoofModel
                 )
             }.exceptionOrNull()
@@ -1196,7 +1208,8 @@ private fun FFacioApp(
         }
         if (mode == AppMode.Enroll) {
             guideState = FaceGuideState.Center
-            val duplicateSample = duplicateUserForEnrollment(obs.embedding, users)
+            val enrollmentEmbedding = normalizedEmbedding(obs.embedding)
+            val duplicateSample = duplicateUserForEnrollment(enrollmentEmbedding, users)
             if (duplicateSample != null) {
                 mode = AppMode.Auth
                 enrollmentExpiresAt = 0L
@@ -1208,13 +1221,13 @@ private fun FFacioApp(
                 detail = "${duplicateSample.name} 사용자와 너무 비슷합니다. 기존 사용자로 인증하거나 다른 사람을 등록해 주세요"
                 return
             }
-            val sampleDecision = enrollmentSampleDecision(obs.embedding, obs.pose, enrollSamples, enrollPoses)
+            val sampleDecision = enrollmentSampleDecision(enrollmentEmbedding, obs.pose, enrollSamples, enrollPoses)
             if (!sampleDecision.accepted) {
                 status = sampleDecision.status
                 detail = sampleDecision.detail
                 return
             }
-            enrollSamples.add(obs.embedding)
+            enrollSamples.add(enrollmentEmbedding)
             enrollPoses.add(obs.pose)
             enrollmentExpiresAt = SystemClock.elapsedRealtime() + ENROLLMENT_IDLE_TIMEOUT_MS
             status = "샘플 수집 중"
@@ -1223,6 +1236,16 @@ private fun FFacioApp(
                 val cleanName = enrollmentName.ifBlank { name.trim() }
                 if (cleanName.isNotEmpty()) {
                     val averaged = average(enrollSamples)
+                    val templateQuality = enrollmentTemplateQuality(averaged, enrollSamples)
+                    if (!templateQuality.accepted) {
+                        enrollSamples.clear()
+                        enrollPoses.clear()
+                        enrollmentExpiresAt = SystemClock.elapsedRealtime() + ENROLLMENT_IDLE_TIMEOUT_MS
+                        resetTransient()
+                        status = templateQuality.status
+                        detail = templateQuality.detail
+                        return
+                    }
                     val duplicate = duplicateUserForEnrollment(averaged, users)
                     if (duplicate != null) {
                         mode = AppMode.Auth
@@ -1235,7 +1258,13 @@ private fun FFacioApp(
                         detail = "${duplicate.name} 사용자와 너무 비슷합니다"
                         return
                     }
-                    val nextUsers = users.toList() + UserTemplate(cleanName, averaged)
+                    val nextUsers = users.toList() + UserTemplate(
+                        name = cleanName,
+                        embedding = averaged,
+                        samples = enrollSamples.map { it.copyOf() },
+                        engineId = FACE_ENGINE_ID,
+                        embeddingSize = FACE_EMBEDDING_SIZE
+                    )
                     persistUsersAsync(nextUsers) {
                         users.replaceWith(nextUsers)
                         mode = AppMode.Auth
@@ -1258,19 +1287,34 @@ private fun FFacioApp(
             detail = "아래에서 첫 사용자를 등록해 주세요"
             return
         }
-        val match = match(obs.embedding, users)
-        if (match.index < 0 || match.score < MATCH_THRESHOLD) {
+        if (users.none { it.isCompatible() }) {
+            resetTransient()
+            guideState = FaceGuideState.Searching
+            status = "사용자 재등록이 필요합니다"
+            detail = "이전 얼굴 템플릿은 새 ArcFace 모델과 호환되지 않습니다. 관리자 화면에서 삭제 후 다시 등록해 주세요"
+            return
+        }
+        val authEmbedding = normalizedEmbedding(obs.embedding)
+        val match = match(authEmbedding, users)
+        if (match.index < 0) {
             resetTransient()
             guideState = FaceGuideState.Searching
             status = "인식하지 못했습니다"
             detail = "조명과 거리를 맞춘 뒤 다시 시도해 주세요"
             return
         }
-        if (match.secondScore > 0.0 && match.score - match.secondScore < MATCH_MARGIN) {
+        val matchedUser = users[match.index]
+        if (!acceptsAuthenticationCandidate(
+                score = match.score,
+                secondScore = match.secondScore,
+                supportCount = match.supportCount,
+                availableSamples = matchedUser.matchSampleCount()
+            )
+        ) {
             resetTransient()
             guideState = FaceGuideState.Center
             status = "인증 보류"
-            detail = "두 등록 사용자와 너무 비슷합니다. 다시 정면을 유지해 주세요"
+            detail = "등록된 얼굴과 충분히 일치하지 않습니다. 정면과 거리를 맞춰 다시 시도해 주세요"
             return
         }
         if (liveCandidate != match.index) {
@@ -2293,9 +2337,10 @@ private fun imageProxyToRgbaMat(proxy: ImageProxy, mirrorHorizontal: Boolean): M
     }
 }
 
-private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiSpoofModel: File?) {
+private class MobileFaceEngine(detectorModel: File, recognizerModel: File, arcFaceModel: File, antiSpoofModel: File?) {
     private val detector = FaceDetectorYN.create(detectorModel.absolutePath, "", Size(320.0, 320.0), 0.82f, 0.3f, 5000)
     private val recognizer = FaceRecognizerSF.create(recognizerModel.absolutePath, "")
+    private val arcFace = ArcFaceRecognizer(arcFaceModel)
     private val antiSpoof = antiSpoofModel?.let { model ->
         runCatching { Dnn.readNetFromONNX(model.absolutePath) }
             .onFailure { Log.w("FFacio", "Optional passive PAD model failed to load", it) }
@@ -2304,7 +2349,6 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
     private var currentSize = Size(0.0, 0.0)
     private val bgr = Mat()
     private val faces = Mat()
-    private val feature = Mat()
     private val face = Mat()
     private val aligned = Mat()
     private val resizedAntiSpoof = Mat()
@@ -2341,13 +2385,20 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
             runCatching {
                 recognizer.alignCrop(bgr, face, aligned)
                 if (aligned.empty()) error("SFace alignCrop returned an empty aligned face")
-                recognizer.feature(aligned, feature)
-                if (feature.empty()) error("SFace feature returned an empty embedding")
             }.getOrElse {
                 Log.e("FFacio", "SFace alignment or feature extraction failed", it)
                 return Observation.fail("얼굴 특징을 추출할 수 없습니다. 정면을 유지하고 다시 시도해 주세요")
             }
-            return Observation(true, "확인 중", matToFloatArray(feature), estimatePose(row), passiveLiveness.liveScore, passiveLiveness.state)
+            val embedding = runCatching {
+                arcFace.feature(aligned)
+            }.getOrElse {
+                Log.e("FFacio", "Face embedding extraction failed", it)
+                return Observation.fail("얼굴 특징을 추출할 수 없습니다. 정면을 유지하고 다시 시도해 주세요")
+            }
+            if (embedding.size != FACE_EMBEDDING_SIZE) {
+                return Observation.fail("얼굴 인식 모델 출력이 일치하지 않습니다. 앱을 다시 설치해 주세요")
+            }
+            return Observation(true, "확인 중", embedding, estimatePose(row), passiveLiveness.liveScore, passiveLiveness.state)
         } catch (error: Exception) {
             Log.e("FFacio", "Face observation failed", error)
             return Observation.fail("프레임을 분석할 수 없습니다. 카메라와 조명을 확인해 주세요")
@@ -2415,21 +2466,64 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, antiS
         }
     }
 
-    private fun matToFloatArray(mat: Mat): FloatArray {
-        if (mat.type() != CvType.CV_32F) mat.convertTo(mat, CvType.CV_32F)
-        Core.normalize(mat, mat)
-        val data = FloatArray(mat.total().toInt())
-        mat.get(0, 0, data)
-        return data
-    }
-
     fun close() {
+        arcFace.close()
         bgr.release()
         faces.release()
-        feature.release()
         face.release()
         aligned.release()
         resizedAntiSpoof.release()
+    }
+}
+
+private class ArcFaceRecognizer(model: File) {
+    private val environment: OrtEnvironment = OrtEnvironment.getEnvironment()
+    private val session: OrtSession = environment.createSession(model.absolutePath, OrtSession.SessionOptions())
+    private val inputName: String = session.inputNames.first()
+    private val inputShape = longArrayOf(1L, 3L, 112L, 112L)
+    private val inputBuffer = FloatArray(3 * 112 * 112)
+    private val pixelBuffer = ByteArray(112 * 112 * 3)
+    private val resized = Mat()
+
+    fun feature(alignedBgr: Mat): FloatArray {
+        val input = arcFaceInput(alignedBgr)
+        OnnxTensor.createTensor(environment, FloatBuffer.wrap(input), inputShape).use { tensor ->
+            session.run(mapOf(inputName to tensor)).use { result ->
+                val output = result[0].value
+                val embedding = when (output) {
+                    is Array<*> -> (output.firstOrNull() as? FloatArray)?.copyOf()
+                    is FloatArray -> output.copyOf()
+                    else -> null
+                } ?: error("Unexpected ArcFace output type: ${output::class.java.name}")
+                return normalizedEmbedding(embedding)
+            }
+        }
+    }
+
+    private fun arcFaceInput(alignedBgr: Mat): FloatArray {
+        val source = if (alignedBgr.cols() == 112 && alignedBgr.rows() == 112) {
+            alignedBgr
+        } else {
+            Imgproc.resize(alignedBgr, resized, Size(112.0, 112.0))
+            resized
+        }
+        if (source.channels() != 3) error("ArcFace expects a 3-channel aligned face")
+        source.get(0, 0, pixelBuffer)
+        val plane = 112 * 112
+        for (i in 0 until plane) {
+            val b = pixelBuffer[i * 3].toInt() and 0xff
+            val g = pixelBuffer[i * 3 + 1].toInt() and 0xff
+            val r = pixelBuffer[i * 3 + 2].toInt() and 0xff
+            inputBuffer[i] = (r - 127.5f) / 127.5f
+            inputBuffer[plane + i] = (g - 127.5f) / 127.5f
+            inputBuffer[plane * 2 + i] = (b - 127.5f) / 127.5f
+        }
+        return inputBuffer
+    }
+
+    fun close() {
+        resized.release()
+        session.close()
     }
 }
 
@@ -2549,9 +2643,25 @@ private data class Observation(
             Observation(false, message, FloatArray(0), 0, liveScore, liveState)
     }
 }
-private data class UserTemplate(val name: String, val embedding: FloatArray)
-private data class Match(val index: Int, val score: Double, val secondScore: Double)
+internal data class UserTemplate(
+    val name: String,
+    val embedding: FloatArray,
+    val samples: List<FloatArray> = emptyList(),
+    val engineId: String = FACE_ENGINE_ID,
+    val embeddingSize: Int = embedding.size
+) {
+    fun matchingSamples(): List<FloatArray> = samples
+    fun matchSampleCount(): Int = matchingSamples().size
+    fun isCompatible(): Boolean =
+        engineId == FACE_ENGINE_ID &&
+            embeddingSize == FACE_EMBEDDING_SIZE &&
+            embedding.size == FACE_EMBEDDING_SIZE &&
+            samples.isNotEmpty() &&
+            matchingSamples().all { it.size == FACE_EMBEDDING_SIZE }
+}
+internal data class Match(val index: Int, val score: Double, val secondScore: Double, val supportCount: Int)
 internal data class EnrollmentSampleDecision(val accepted: Boolean, val status: String, val detail: String)
+internal data class EnrollmentTemplateQualityDecision(val accepted: Boolean, val status: String, val detail: String)
 internal data class ApprovalLogEntry(val time: String, val userName: String, val result: String)
 private data class StoreLoadResult(val users: List<UserTemplate>, val error: Throwable?)
 
@@ -2820,9 +2930,15 @@ private fun loadUsers(context: Context, prefs: SharedPreferences): StoreLoadResu
     StoreLoadResult(buildList {
         for (i in 0 until array.length()) {
             val item = array.getJSONObject(i)
-            val values = item.getJSONArray("embedding")
-            val embedding = FloatArray(values.length()) { values.getDouble(it).toFloat() }
-            add(UserTemplate(item.getString("name"), embedding))
+            val embedding = normalizedEmbedding(parseEmbeddingArray(item.getJSONArray("embedding")))
+            val engineId = item.optString("engine_id", "legacy.unknown")
+            val embeddingSize = item.optInt("embedding_size", embedding.size)
+            val samples = if (item.has("samples")) {
+                parseEmbeddingSamples(item.getJSONArray("samples"), embedding.size)
+            } else {
+                emptyList()
+            }
+            add(UserTemplate(item.getString("name"), embedding, samples, engineId, embeddingSize))
         }
     }, null)
 }.getOrElse { StoreLoadResult(emptyList(), it) }
@@ -2832,12 +2948,31 @@ private fun saveUsers(context: Context, prefs: SharedPreferences, users: List<Us
     users.forEach { user ->
         val item = JSONObject()
         item.put("name", user.name)
+        item.put("engine_id", user.engineId)
+        item.put("embedding_size", user.embeddingSize)
         val values = JSONArray()
         user.embedding.forEach { values.put(it) }
         item.put("embedding", values)
+        val samples = JSONArray()
+        user.matchingSamples().forEach { sample ->
+            val sampleValues = JSONArray()
+            normalizedEmbedding(sample).forEach { sampleValues.put(it) }
+            samples.put(sampleValues)
+        }
+        item.put("samples", samples)
         array.put(item)
     }
     securePutString(context, prefs, USERS_KEY, array.toString())
+}
+
+private fun parseEmbeddingArray(values: JSONArray): FloatArray =
+    FloatArray(values.length()) { values.getDouble(it).toFloat() }
+
+private fun parseEmbeddingSamples(samples: JSONArray, embeddingSize: Int): List<FloatArray> = buildList {
+    for (i in 0 until samples.length()) {
+        val sample = normalizedEmbedding(parseEmbeddingArray(samples.getJSONArray(i)))
+        if (sample.size == embeddingSize) add(sample)
+    }
 }
 
 private fun secureGetString(context: Context, prefs: SharedPreferences, key: String, default: String, failClosed: Boolean): String {
@@ -2930,21 +3065,45 @@ private fun deleteKeystoreAlias(alias: String) {
     }
 }
 
-private fun match(embedding: FloatArray, users: List<UserTemplate>): Match {
-    var best = -1.0
+internal fun match(embedding: FloatArray, users: List<UserTemplate>): Match {
+    var bestRank = -1.0
+    var bestCentroidScore = -1.0
     var second = -1.0
+    var bestSupportCount = 0
     var bestIndex = -1
     users.forEachIndexed { index, user ->
-        val score = cosine(embedding, user.embedding)
-        if (score > best) {
-            second = best
-            best = score
+        if (!user.isCompatible()) return@forEachIndexed
+        val centroidScore = cosine(embedding, user.embedding)
+        val sampleScores = user.matchingSamples().map { cosine(embedding, it) }
+        val sampleMaxScore = sampleScores.maxOrNull() ?: -1.0
+        val rankScore = max(centroidScore, sampleMaxScore)
+        val supportCount = sampleScores.count { it >= MATCH_SAMPLE_THRESHOLD }
+        if (rankScore > bestRank) {
+            second = bestRank
+            bestRank = rankScore
+            bestCentroidScore = centroidScore
+            bestSupportCount = supportCount
             bestIndex = index
-        } else if (score > second) {
-            second = score
+        } else if (rankScore > second) {
+            second = rankScore
         }
     }
-    return Match(bestIndex, best, second)
+    return Match(bestIndex, bestCentroidScore, second, bestSupportCount)
+}
+
+internal fun acceptsAuthenticationCandidate(
+    score: Double,
+    secondScore: Double,
+    supportCount: Int,
+    availableSamples: Int,
+    threshold: Double = MATCH_THRESHOLD,
+    margin: Double = MATCH_MARGIN,
+    minSupportingSamples: Int = MATCH_MIN_SUPPORTING_SAMPLES
+): Boolean {
+    if (score < threshold) return false
+    if (secondScore > 0.0 && score - secondScore < margin) return false
+    val requiredSupport = min(minSupportingSamples, max(1, availableSamples))
+    return supportCount >= requiredSupport
 }
 
 internal fun enrollmentSampleDecision(
@@ -2968,6 +3127,39 @@ internal fun enrollmentSampleDecision(
     return EnrollmentSampleDecision(true, "", "")
 }
 
+internal fun enrollmentTemplateQuality(
+    centroid: FloatArray,
+    samples: List<FloatArray>,
+    minSampleScore: Double = ENROLL_TEMPLATE_MIN_SAMPLE_SCORE,
+    averageSampleScore: Double = ENROLL_TEMPLATE_AVG_SAMPLE_SCORE,
+    minPairScore: Double = ENROLL_TEMPLATE_MIN_PAIR_SCORE
+): EnrollmentTemplateQualityDecision {
+    if (samples.isEmpty()) {
+        return EnrollmentTemplateQualityDecision(false, "등록 품질이 낮습니다", "얼굴 샘플을 다시 수집해 주세요")
+    }
+    if (samples.any { it.size != centroid.size }) {
+        return EnrollmentTemplateQualityDecision(false, "등록 품질이 낮습니다", "얼굴 특징 형식이 일치하지 않습니다. 다시 등록해 주세요")
+    }
+    val scores = samples.map { cosine(centroid, it) }
+    val weakest = scores.minOrNull() ?: 0.0
+    val averageScore = scores.average()
+    var weakestPair = 1.0
+    for (left in samples.indices) {
+        for (right in left + 1 until samples.size) {
+            weakestPair = min(weakestPair, cosine(samples[left], samples[right]))
+        }
+    }
+    return if (weakest >= minSampleScore && averageScore >= averageSampleScore && weakestPair >= minPairScore) {
+        EnrollmentTemplateQualityDecision(true, "", "")
+    } else {
+        EnrollmentTemplateQualityDecision(
+            false,
+            "등록 품질이 낮습니다",
+            "한 사람만 카메라 앞에서 조명과 거리를 맞춘 뒤 처음부터 다시 등록해 주세요"
+        )
+    }
+}
+
 private fun duplicateUserForEnrollment(embedding: FloatArray, users: List<UserTemplate>): UserTemplate? {
     val duplicate = match(embedding, users)
     return if (duplicate.index >= 0 && duplicate.score >= ENROLL_DUPLICATE_THRESHOLD) users[duplicate.index] else null
@@ -2975,17 +3167,28 @@ private fun duplicateUserForEnrollment(embedding: FloatArray, users: List<UserTe
 
 private fun average(samples: List<FloatArray>): FloatArray {
     val out = FloatArray(samples.first().size)
-    samples.forEach { sample -> sample.indices.forEach { out[it] += sample[it] } }
+    samples.forEach { sample ->
+        val normalized = normalizedEmbedding(sample)
+        normalized.indices.forEach { out[it] += normalized[it] }
+    }
     out.indices.forEach { out[it] /= samples.size }
-    return out
+    return normalizedEmbedding(out)
 }
 
-private fun cosine(a: FloatArray, b: FloatArray): Double {
+private fun normalizedEmbedding(embedding: FloatArray): FloatArray {
+    var norm = 0.0
+    embedding.forEach { value -> norm += value * value }
+    val scale = sqrt(norm)
+    if (scale <= 1e-8) return embedding.copyOf()
+    return FloatArray(embedding.size) { index -> (embedding[index] / scale).toFloat() }
+}
+
+internal fun cosine(a: FloatArray, b: FloatArray): Double {
+    if (a.isEmpty() || b.isEmpty() || a.size != b.size) return -1.0
     var dot = 0.0
     var na = 0.0
     var nb = 0.0
-    val size = min(a.size, b.size)
-    for (i in 0 until size) {
+    for (i in a.indices) {
         dot += a[i] * b[i]
         na += a[i] * a[i]
         nb += b[i] * b[i]

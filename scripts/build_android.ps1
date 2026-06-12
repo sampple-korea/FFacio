@@ -32,6 +32,7 @@ $modelManifest = Join-Path $modelRoot "models.manifest.json"
 $androidModelFiles = @(
     (Join-Path $modelRoot "opencv\face_detection_yunet_2023mar.onnx"),
     (Join-Path $modelRoot "opencv\face_recognition_sface_2021dec.onnx"),
+    (Join-Path $modelRoot "insightface\models\buffalo_l\w600k_r50.onnx"),
     (Join-Path $modelRoot "antispoof\minifasnet_v2.onnx")
 )
 $missingAndroidModelFiles = @($androidModelFiles | Where-Object { -not (Test-Path $_) })
@@ -173,7 +174,7 @@ $manifest = [ordered]@{
     emulator_launch_method = $null
     verified_apk_sha256 = $null
     verified_at = $null
-    notes = "Release APK signing source: $signingSource. OpenCV YuNet/SFace and MiniFASNet-V2 are bundled for Android; desktop-only InsightFace assets are not packaged. No cloud subscription is used."
+    notes = "Release APK signing source: $signingSource. OpenCV YuNet/SFace, InsightFace ArcFace w600k_r50, and MiniFASNet-V2 are bundled for Android. No cloud subscription is used."
 }
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $ReleaseDir "android-release-manifest.json")
 & (Join-Path $PSScriptRoot "verify_android_static.ps1") -Apk $releaseOut -Manifest (Join-Path $ReleaseDir "android-release-manifest.json") -ModelManifest $androidModelManifest

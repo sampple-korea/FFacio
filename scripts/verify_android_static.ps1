@@ -104,6 +104,7 @@ try {
         "assets/models/models.manifest.json",
         "assets/models/opencv/face_detection_yunet_2023mar.onnx",
         "assets/models/opencv/face_recognition_sface_2021dec.onnx",
+        "assets/models/insightface/models/buffalo_l/w600k_r50.onnx",
         "assets/models/antispoof/minifasnet_v2.onnx",
         "classes.dex",
         "AndroidManifest.xml"
@@ -150,6 +151,7 @@ try {
     $androidOnlyModelIds = @(
         "opencv.yunet",
         "opencv.sface",
+        "insightface.recognition",
         "antispoof.minifasnet_v2"
     )
     $unexpectedModels = @(
@@ -160,7 +162,7 @@ try {
     if ($unexpectedModels.Count -gt 0) {
         throw "Android APK model manifest contains non-runtime model(s): $($unexpectedModels -join ', ')"
     }
-    $insightFaceEntries = @($entries.Keys | Where-Object { $_ -like "assets/models/insightface/*" })
+    $insightFaceEntries = @($entries.Keys | Where-Object { $_ -like "assets/models/insightface/*" -and $_ -ne "assets/models/insightface/models/buffalo_l/w600k_r50.onnx" })
     if ($insightFaceEntries.Count -gt 0) {
         $sampleInsightFaceEntries = (@($insightFaceEntries | Select-Object -First 5) -join ', ')
         throw "Android APK contains unused InsightFace model asset(s): $sampleInsightFaceEntries"

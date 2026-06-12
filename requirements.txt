@@ -1,8 +1,0 @@
-numpy==2.4.6
-opencv-contrib-python==4.13.0.92
-PySide6-Essentials==6.11.1
-shiboken6==6.11.1
-onnxruntime==1.26.0
-insightface==1.0.1
-comtypes==1.4.16
-pygrabber==0.2

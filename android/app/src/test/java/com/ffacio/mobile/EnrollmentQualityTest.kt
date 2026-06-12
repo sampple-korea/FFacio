@@ -68,4 +68,52 @@ class EnrollmentQualityTest {
 
         assertTrue(result.accepted)
     }
+
+    @Test
+    fun cohesiveTemplateQualityIsAccepted() {
+        val result = enrollmentTemplateQuality(
+            centroid = floatArrayOf(1.0f, 0.0f, 0.0f),
+            samples = listOf(
+                floatArrayOf(1.0f, 0.0f, 0.0f),
+                floatArrayOf(0.92f, 0.20f, 0.0f),
+                floatArrayOf(0.88f, -0.22f, 0.0f),
+                floatArrayOf(0.86f, 0.12f, 0.0f),
+                floatArrayOf(0.90f, -0.18f, 0.0f)
+            )
+        )
+
+        assertTrue(result.accepted)
+    }
+
+    @Test
+    fun contaminatedTemplateQualityIsRejected() {
+        val result = enrollmentTemplateQuality(
+            centroid = floatArrayOf(1.0f, 0.0f, 0.0f),
+            samples = listOf(
+                floatArrayOf(1.0f, 0.0f, 0.0f),
+                floatArrayOf(0.92f, 0.20f, 0.0f),
+                floatArrayOf(0.88f, -0.22f, 0.0f),
+                floatArrayOf(0.0f, 1.0f, 0.0f),
+                floatArrayOf(0.90f, -0.18f, 0.0f)
+            )
+        )
+
+        assertFalse(result.accepted)
+    }
+
+    @Test
+    fun splitIdentityTemplateQualityIsRejectedByPairwiseCohesion() {
+        val result = enrollmentTemplateQuality(
+            centroid = floatArrayOf(0.86f, 0.51f, 0.0f),
+            samples = listOf(
+                floatArrayOf(1.0f, 0.0f, 0.0f),
+                floatArrayOf(0.98f, 0.18f, 0.0f),
+                floatArrayOf(0.96f, -0.22f, 0.0f),
+                floatArrayOf(0.55f, 0.835f, 0.0f),
+                floatArrayOf(0.50f, 0.866f, 0.0f)
+            )
+        )
+
+        assertFalse(result.accepted)
+    }
 }
