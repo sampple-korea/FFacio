@@ -49,9 +49,11 @@ Output:
 - RGB-camera liveness defaults to the active left/right pose challenge. The optional passive MiniFASNet anti-spoofing switch can add another check against many static photo and simple screen attacks, but it is not equivalent to hardware depth/IR Face ID.
 - Basic real-face verification uses the active left/right face-turn challenge. Advanced settings include an optional session-only `사진/화면 차단 모델` switch for passive PAD on top of that challenge; release builds package that model, and if it cannot be loaded at runtime the app continues in active-challenge mode.
 - Enrollment rejects near-duplicate samples, requires pose diversity before the final template is saved, and blocks faces that already match an enrolled user.
+- During enrollment save, the camera preview remains bound while heavy frame analysis pauses until encrypted template storage finishes.
 - The admin view supports selecting and deleting individual registered users, plus a separate all-users reset path for destructive maintenance.
 - Individual user deletion requires a name-specific confirmation dialog and then Android screen-lock verification. Relay activation is stored as an admin setting and remains enabled across normal app lifecycle changes until an admin disables it or the encrypted relay token cannot be opened.
 - Door relay requests are single-flight with a short cooldown, so repeated accepted frames while one relay request is pending do not send additional open requests.
 - Android relay requests do not include the recognized user's name in the outbound JSON payload; detailed identity remains local to the protected approval log.
+- Android includes a relay connection test in the locked admin view. It never calls the configured open URL; it only sends an HTTPS `GET` to `.well-known/ffacio-door-relay` under the same relay parent path and treats non-2xx responses as failure.
 - Real device camera/liveness testing is still required on actual phones.
 - Full Android lock-task kiosk enforcement still requires device-owner / managed-device setup outside the app. The app's immersive operation view is an ergonomic guard, not a replacement for MDM/device-owner lock task mode.

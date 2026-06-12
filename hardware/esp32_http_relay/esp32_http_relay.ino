@@ -85,6 +85,8 @@ void setup() {
 
   server.on("/test", HTTP_GET, handleTest);
   server.on("/test", HTTP_POST, handleTest);
+  server.on("/.well-known/ffacio-door-relay", HTTP_GET, handleTest);
+  server.on("/relay/.well-known/ffacio-door-relay", HTTP_GET, handleTest);
   server.on("/open", HTTP_POST, handleOpen);
   server.on("/state", HTTP_GET, handleState);
   server.begin();

@@ -1,5 +1,13 @@
 # FFacio Release Notes
 
+## Android 0.3.14
+
+- Adds an Android admin relay connection test for real door-terminal setup.
+- The test is fail-closed and never posts to the configured open URL. It sends an HTTPS `GET` only to `.well-known/ffacio-door-relay` under the same relay parent path and requires a successful response.
+- Adds unit coverage that the health-check URL strips the open endpoint/query, preserves path-based relay routing, rejects plain HTTP, and disables repeated/incomplete test requests.
+- Keeps camera preview responsive during enrollment storage by pausing heavy frame analysis while local template storage is busy.
+- Updates the ESP32 relay reference with Android-compatible non-opening health-check endpoints; Android deployments still need HTTPS relay access.
+
 ## Android 0.3.13
 
 - Hardens door relay execution with a process-wide single-flight gate and cooldown so an accepted face cannot trigger duplicate relay POSTs across rapid UI recomposition or Activity recreation.

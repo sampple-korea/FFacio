@@ -10,6 +10,8 @@ HTTP relay settings are not enough by themselves: the user must also enable the 
 
 Do not point the test URL at the open URL.
 
+Android uses a stricter built-in health check for the admin "릴레이 연결 테스트" button. It derives the test endpoint from the configured HTTPS open URL and sends `GET .well-known/ffacio-door-relay` under the same parent path, scheme, host, and port. For example, `https://door.example/relay/open` is tested as `https://door.example/relay/.well-known/ffacio-door-relay`. The Android app does not reuse the open endpoint or query string for this test, and any non-2xx response is treated as failure.
+
 ## Local Simulator
 
 The source tree includes a safe relay simulator at `scripts/mock_door_relay.py` for desk testing before wiring hardware:
@@ -30,9 +32,18 @@ The simulator only records state in memory; it does not control a real lock.
 
 These localhost URLs are for the Windows desktop app and local simulator. Android door arming requires an `https://` relay URL whenever a Bearer token is stored or sent; the Android app rejects token-backed plain HTTP relays.
 
+For Android relay hardware, implement:
+
+```http
+GET <open-url-parent>/.well-known/ffacio-door-relay
+Authorization: Bearer <token>
+```
+
+Return any `2xx` status only when the relay is reachable, authenticated, and safe to use. This endpoint must not energize the lock.
+
 ## ESP32 Example
 
-An ESP32 HTTP relay sketch is included at `hardware/esp32_http_relay/esp32_http_relay.ino`. Replace Wi-Fi credentials, set a long random Bearer token, verify the relay polarity, and bench-test with the test endpoint before connecting a lock.
+An ESP32 HTTP relay sketch is included at `hardware/esp32_http_relay/esp32_http_relay.ino`. Replace Wi-Fi credentials, set a long random Bearer token, verify the relay polarity, and bench-test with the test endpoint before connecting a lock. The sketch exposes `/test`, `/.well-known/ffacio-door-relay`, and `/relay/.well-known/ffacio-door-relay` as non-opening checks. Android still requires an HTTPS URL, so put this reference relay behind a trusted HTTPS bridge or use HTTPS-capable relay hardware for Android terminals.
 
 ## Request
 

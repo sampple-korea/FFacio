@@ -151,6 +151,7 @@ private const val USERS_KEY = "users"
 private const val DOOR_URL_KEY = "door_url"
 private const val DOOR_TOKEN_KEY = "door_token"
 private const val DOOR_ENABLED_KEY = "door_enabled"
+private const val DOOR_RELAY_HEALTH_PATH = "/.well-known/ffacio-door-relay"
 private const val PASSIVE_LIVENESS_ENABLED_KEY = "passive_liveness_enabled"
 private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key_v3"
 private const val LEGACY_KEYSTORE_ALIAS = "ffacio_mobile_store_key_v2"
@@ -348,6 +349,8 @@ private fun FFacioApp(
     var doorToken by remember { mutableStateOf("") }
     var doorConfigError by remember { mutableStateOf<Throwable?>(null) }
     var doorArmed by remember { mutableStateOf(prefs.getBoolean(DOOR_ENABLED_KEY, false)) }
+    var doorTestInFlight by remember { mutableStateOf(false) }
+    var doorTestRequestId by remember { mutableLongStateOf(0L) }
     var passiveLivenessEnabled by remember { mutableStateOf(false) }
     var cameraAvailable by remember { mutableStateOf(true) }
     var noCameraHardware by remember { mutableStateOf(false) }
@@ -373,6 +376,12 @@ private fun FFacioApp(
     }
     val currentAppScreen by rememberUpdatedState(appScreen)
     val currentAdminPromptInFlight by rememberUpdatedState(adminPromptInFlight)
+
+    fun invalidateDoorRelayTest() {
+        doorTestInFlight = false
+        doorTestRequestId += 1L
+    }
+
     DisposableEffect(appScreen, adminPromptInFlight, touchExplorationEnabled) {
         val activity = context as? Activity
         val window = activity?.window
@@ -430,6 +439,7 @@ private fun FFacioApp(
                     stableUser = stableUser,
                     stableCount = stableCount
                 ))
+                invalidateDoorRelayTest()
                 appScreen = AppScreen.Operation
                 mode = AppMode.Auth
                 adminSessionExpiresAt = 0L
@@ -472,6 +482,7 @@ private fun FFacioApp(
                     stableUser = stableUser,
                     stableCount = stableCount
                 ))
+                invalidateDoorRelayTest()
                 appScreen = AppScreen.Operation
                 mode = AppMode.Auth
                 adminSessionExpiresAt = 0L
@@ -691,6 +702,7 @@ private fun FFacioApp(
                         doorToken = ""
                         doorConfigError = null
                         doorArmed = false
+                        invalidateDoorRelayTest()
                         if (reset.isFailure) {
                             storeError = IllegalStateException("Local template reset could not be saved", reset.exceptionOrNull())
                             status = "로컬 템플릿 초기화 실패"
@@ -770,6 +782,7 @@ private fun FFacioApp(
             }
         } else {
             adminPromptInFlight = false
+            invalidateDoorRelayTest()
             appScreen = AppScreen.Operation
             mode = AppMode.Auth
             adminSessionExpiresAt = 0L
@@ -819,6 +832,7 @@ private fun FFacioApp(
                 }
             } else if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
                 if (shouldReturnToOperationOnLifecyclePause(currentAdminPromptInFlight)) {
+                    invalidateDoorRelayTest()
                     appScreen = AppScreen.Operation
                     mode = AppMode.Auth
                     adminSessionExpiresAt = 0L
@@ -883,8 +897,40 @@ private fun FFacioApp(
 
     fun disableDoorControl() {
         doorArmed = false
+        invalidateDoorRelayTest()
         prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).apply()
         doorConfigError = null
+    }
+
+    fun testDoorRelayHealth() {
+        if (!canTestDoorRelayConfig(doorUrl, doorToken, doorTestInFlight, canMutate = !storageBusy)) return
+        val relayUrl = doorUrl.trim()
+        val relayToken = doorToken.trim()
+        val requestId = doorTestRequestId + 1L
+        doorTestRequestId = requestId
+        doorTestInFlight = true
+        status = "릴레이 연결을 확인하는 중입니다"
+        detail = "이 테스트는 문을 열지 않습니다"
+        appScope.launch {
+            val checked = withContext(Dispatchers.IO) {
+                runCatching {
+                    if (relayUrl.isEmpty()) error("릴레이 URL이 필요합니다")
+                    if (relayToken.isEmpty()) error("릴레이 토큰이 필요합니다")
+                    val healthUrl = doorRelayHealthCheckUrl(relayUrl)
+                    val result = checkDoorRelayHealthUrl(healthUrl, relayToken)
+                    if (!result.accepted) error(result.message)
+                }
+            }
+            if (!active.get() || requestId != doorTestRequestId || appScreen != AppScreen.Admin) return@launch
+            doorTestInFlight = false
+            checked.onSuccess {
+                status = "릴레이 연결 정상"
+                detail = "릴레이가 안전 테스트 요청을 수락했습니다. 실제 문 열림은 얼굴 인증 후에만 실행됩니다"
+            }.onFailure {
+                status = "릴레이 연결 테스트 실패"
+                detail = it.message ?: "릴레이 주소, 토큰, 장치 상태를 확인하세요"
+            }
+        }
     }
 
     fun resetTransient() {
@@ -996,7 +1042,7 @@ private fun FFacioApp(
         isOperationScreen = appScreen == AppScreen.Operation,
         isAdminScreen = appScreen == AppScreen.Admin,
         isEnrollmentMode = mode == AppMode.Enroll,
-        hasIdleReason = idleReason() != null
+        hasIdleReason = idleReason() != null || blockedReason() != null
     )
 
     fun openDoor(user: UserTemplate) {
@@ -1194,6 +1240,7 @@ private fun FFacioApp(
                         TextButton(onClick = { requestAdmin(AdminAction.OpenAdmin) }) { Text("관리") }
                     } else {
                         TextButton(onClick = {
+                            invalidateDoorRelayTest()
                             appScreen = AppScreen.Operation
                             mode = AppMode.Auth
                             adminSessionExpiresAt = 0L
@@ -1284,6 +1331,7 @@ private fun FFacioApp(
                 doorUrl = doorUrl,
                 doorToken = doorToken,
                 doorArmed = doorArmed,
+                doorTestInFlight = doorTestInFlight,
                 passiveLivenessEnabled = passiveLivenessEnabled,
                 accessFeedback = accessFeedback,
                 approvalLogs = approvalLogs,
@@ -1295,9 +1343,20 @@ private fun FFacioApp(
                 canRetryBlocked = blockedReason() != null && !modelLoading && modelError == null && !storageBusy,
                 canMutate = !storageBusy,
                 onName = { if (mode != AppMode.Enroll) name = it },
-                onDoorUrl = { doorUrl = it },
-                onDoorToken = { doorToken = it },
-                onDoorArmed = {
+                onDoorUrl = {
+                    invalidateDoorRelayTest()
+                    doorUrl = it
+                },
+                onDoorToken = {
+                    invalidateDoorRelayTest()
+                    doorToken = it
+                },
+                onDoorArmed = onDoorArmed@{
+                    if (doorTestInFlight) {
+                        status = "릴레이 확인 중입니다"
+                        detail = "연결 테스트가 끝난 뒤 문 열림 릴레이를 변경하세요"
+                        return@onDoorArmed
+                    }
                     if (it && doorUrl.trim().isEmpty()) {
                         doorArmed = false
                         status = "릴레이 URL이 필요합니다"
@@ -1315,6 +1374,9 @@ private fun FFacioApp(
                     } else {
                         disableDoorControl()
                     }
+                },
+                onTestDoorRelay = {
+                    testDoorRelayHealth()
                 },
                 onPassiveLivenessEnabled = passiveToggle@{
                     if (it && engineProvider()?.hasPassiveLiveness() != true) {
@@ -1469,7 +1531,7 @@ private fun CameraStage(
             setBackgroundColor(Color.BLACK)
         }
     }
-    DisposableEffect(enabled, cameraRetryNonce) {
+    DisposableEffect(enabled, analysisEnabled, cameraRetryNonce) {
         var providerFuture: ListenableFuture<ProcessCameraProvider>? = null
         var boundProvider: ProcessCameraProvider? = null
         var boundUseCases: Array<UseCase> = emptyArray()
@@ -1485,7 +1547,7 @@ private fun CameraStage(
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
-                    val analysis = if (enabled) {
+                    val analysis = if (shouldBindCameraAnalysisUseCase(enabled, analysisEnabled)) {
                         ImageAnalysis.Builder()
                             .setTargetResolution(AndroidSize(640, 480))
                             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
@@ -1746,6 +1808,7 @@ private fun ControlPanel(
     doorUrl: String,
     doorToken: String,
     doorArmed: Boolean,
+    doorTestInFlight: Boolean,
     passiveLivenessEnabled: Boolean,
     accessFeedback: AccessFeedback?,
     approvalLogs: List<ApprovalLogEntry>,
@@ -1760,6 +1823,7 @@ private fun ControlPanel(
     onDoorUrl: (String) -> Unit,
     onDoorToken: (String) -> Unit,
     onDoorArmed: (Boolean) -> Unit,
+    onTestDoorRelay: () -> Unit,
     onPassiveLivenessEnabled: (Boolean) -> Unit,
     onEnroll: () -> Unit,
     onAuth: () -> Unit,
@@ -1968,7 +2032,7 @@ private fun ControlPanel(
                     Text("기본 모드: 좌우 얼굴 돌리기 챌린지로 실제 얼굴을 확인합니다", color = ComposeColor(0xFF6E6E73), fontSize = 13.sp)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Switch(checked = doorArmed, onCheckedChange = onDoorArmed, enabled = canMutate)
+                    Switch(checked = doorArmed, onCheckedChange = onDoorArmed, enabled = canMutate && !doorTestInFlight)
                     Text("인증 성공 시 HTTPS 릴레이 열기", color = ComposeColor(0xFF1D1D1F))
                 }
             if (doorArmed && doorUrl.trim().isEmpty()) {
@@ -1977,7 +2041,7 @@ private fun ControlPanel(
             OutlinedTextField(
                 value = doorUrl,
                 onValueChange = onDoorUrl,
-                enabled = canMutate && !doorArmed,
+                enabled = canMutate && !doorArmed && !doorTestInFlight,
                 keyboardOptions = KeyboardOptions(
                     keyboardType = KeyboardType.Uri,
                     imeAction = ImeAction.Next
@@ -1989,7 +2053,7 @@ private fun ControlPanel(
             OutlinedTextField(
                 value = doorToken,
                 onValueChange = onDoorToken,
-                enabled = canMutate && !doorArmed,
+                enabled = canMutate && !doorArmed && !doorTestInFlight,
                 label = { Text("Bearer 토큰") },
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(
@@ -1998,6 +2062,19 @@ private fun ControlPanel(
                 ),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
+            )
+            Button(
+                onClick = onTestDoorRelay,
+                enabled = canTestDoorRelayConfig(doorUrl, doorToken, doorTestInFlight, canMutate),
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF1D1D1F))
+            ) {
+                Text(if (doorTestInFlight) "릴레이 확인 중" else "릴레이 연결 테스트")
+            }
+            Text(
+                "테스트는 문을 열지 않습니다. 같은 릴레이 경로의 안전 확인 주소만 호출합니다.",
+                color = ComposeColor(0xFF6E6E73),
+                fontSize = 13.sp
             )
             }
         }
@@ -2412,6 +2489,11 @@ internal fun shouldAnalyzeCameraFrame(
     isEnrollmentMode = isEnrollmentMode
 ) && !hasIdleReason
 
+internal fun shouldBindCameraAnalysisUseCase(
+    cameraEnabled: Boolean,
+    analysisEnabled: Boolean
+): Boolean = cameraEnabled && analysisEnabled
+
 internal fun shouldReturnToOperationOnLifecyclePause(adminPromptInFlight: Boolean): Boolean =
     !adminPromptInFlight
 
@@ -2444,6 +2526,17 @@ internal class DoorRequestGate {
 }
 
 private val processDoorRequestGate = DoorRequestGate()
+
+internal fun canTestDoorRelayConfig(
+    relayUrl: String,
+    relayToken: String,
+    inFlight: Boolean,
+    canMutate: Boolean
+): Boolean =
+    canMutate &&
+        !inFlight &&
+        relayToken.trim().isNotEmpty() &&
+        runCatching { doorRelayHealthCheckUrl(relayUrl) }.isSuccess
 
 private fun applyDoorTerminalSystemUi(window: Window, immersive: Boolean) {
     WindowCompat.setDecorFitsSystemWindows(window, !immersive)
@@ -2796,6 +2889,59 @@ private fun formatClock(timeMillis: Long): String =
 
 internal fun doorRelayPayloadJson(): String =
     """{"event":"accepted","source":"ffacio-android"}"""
+
+internal fun doorRelayHealthCheckUrl(relayUrl: String): String {
+    val endpoint = URL(relayUrl.trim())
+    require(endpoint.protocol.lowercase(Locale.US) == "https") { "HTTPS 릴레이 URL만 사용할 수 있습니다" }
+    require(endpoint.host.isNotBlank()) { "릴레이 host가 필요합니다" }
+    val openPath = endpoint.path.orEmpty()
+    val parentPath = openPath.substringBeforeLast("/", missingDelimiterValue = "")
+    val healthPath = if (parentPath.isBlank()) {
+        DOOR_RELAY_HEALTH_PATH
+    } else {
+        "$parentPath$DOOR_RELAY_HEALTH_PATH"
+    }
+    return URL(endpoint.protocol, endpoint.host, endpoint.port, healthPath).toString()
+}
+
+internal data class DoorRelayHealthResult(val accepted: Boolean, val message: String)
+
+internal fun doorRelayHealthHttpFailureMessage(responseCode: Int): String = when (responseCode) {
+    401, 403 -> "릴레이 토큰이 거부되었습니다"
+    404 -> "릴레이 안전 확인 주소를 찾을 수 없습니다"
+    in 500..599 -> "릴레이 장치가 오류 응답을 보냈습니다"
+    else -> "릴레이가 테스트 요청을 수락하지 않았습니다"
+}
+
+internal fun doorRelayHealthNetworkFailureMessage(error: Throwable): String = when (error) {
+    is java.net.UnknownHostException -> "릴레이 주소를 찾을 수 없습니다"
+    is java.net.SocketTimeoutException -> "릴레이 응답 시간이 초과되었습니다"
+    is javax.net.ssl.SSLException -> "HTTPS 인증서를 확인할 수 없습니다"
+    else -> "릴레이에 연결할 수 없습니다"
+}
+
+private fun checkDoorRelayHealthUrl(healthUrl: String, token: String): DoorRelayHealthResult = runCatching {
+    val endpoint = URL(healthUrl)
+    val conn = (endpoint.openConnection() as HttpURLConnection).apply {
+        requestMethod = "GET"
+        instanceFollowRedirects = false
+        connectTimeout = 1800
+        readTimeout = 1800
+        doOutput = false
+        setRequestProperty("Accept", "application/json")
+        if (token.isNotBlank()) setRequestProperty("Authorization", "Bearer $token")
+    }
+    try {
+        val responseCode = conn.responseCode
+        if (responseCode in 200..299) {
+            DoorRelayHealthResult(true, "릴레이 연결 정상")
+        } else {
+            DoorRelayHealthResult(false, doorRelayHealthHttpFailureMessage(responseCode))
+        }
+    } finally {
+        conn.disconnect()
+    }
+}.getOrElse { DoorRelayHealthResult(false, doorRelayHealthNetworkFailureMessage(it)) }
 
 private fun postDoor(url: String, token: String): Boolean = runCatching {
     val endpoint = URL(url)
