@@ -87,7 +87,7 @@ class AdminOperationGateTest {
     @Test
     fun previewCanStayBoundWhileAnalysisUseCaseIsPaused() {
         assertTrue(shouldBindCameraAnalysisUseCase(cameraEnabled = true, analysisEnabled = true))
-        assertFalse(shouldBindCameraAnalysisUseCase(cameraEnabled = true, analysisEnabled = false))
+        assertTrue(shouldBindCameraAnalysisUseCase(cameraEnabled = true, analysisEnabled = false))
         assertFalse(shouldBindCameraAnalysisUseCase(cameraEnabled = false, analysisEnabled = true))
     }
 

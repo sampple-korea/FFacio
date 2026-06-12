@@ -39,10 +39,12 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -90,6 +92,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -98,6 +102,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -171,9 +176,10 @@ private const val MATCH_SAMPLE_THRESHOLD = 0.54
 private const val MATCH_MARGIN = 0.08
 private const val MATCH_MIN_SUPPORTING_SAMPLES = 2
 private const val ENROLL_SAMPLES = 5
+private const val ENROLL_POSE_HOLD_MS = 420L
 private const val ENROLL_REPEAT_THRESHOLD = 0.985
 private const val ENROLL_DUPLICATE_THRESHOLD = 0.68
-private const val ENROLL_MIN_DISTINCT_POSES = 2
+private const val ENROLL_MIN_DISTINCT_POSES = 3
 private const val ENROLL_TEMPLATE_MIN_SAMPLE_SCORE = 0.62
 private const val ENROLL_TEMPLATE_AVG_SAMPLE_SCORE = 0.70
 private const val ENROLL_TEMPLATE_MIN_PAIR_SCORE = 0.58
@@ -392,6 +398,8 @@ private fun FFacioApp(
     var accessFeedback by remember { mutableStateOf<AccessFeedback?>(null) }
     val liveness = remember { LivenessChallenge() }
     var guideState by remember { mutableStateOf(FaceGuideState.Searching) }
+    val enrollmentHold = remember { EnrollmentPoseHold() }
+    var enrollmentHoldProgress by remember { mutableStateOf(0.0f) }
     var liveCandidate by remember { mutableIntStateOf(-1) }
     var stableUser by remember { mutableIntStateOf(-1) }
     var stableCount by remember { mutableIntStateOf(0) }
@@ -986,6 +994,8 @@ private fun FFacioApp(
         stableUser = -1
         stableCount = 0
         liveness.reset()
+        enrollmentHold.reset()
+        enrollmentHoldProgress = 0.0f
     }
 
     fun clearAuthResultHold() {
@@ -1243,8 +1253,24 @@ private fun FFacioApp(
             return
         }
         if (mode == AppMode.Enroll) {
-            guideState = FaceGuideState.Center
+            val targetPose = enrollmentTargetPose(enrollSamples.size, enrollPoses)
+            guideState = faceGuideStateForPose(targetPose ?: obs.pose)
             val enrollmentEmbedding = normalizedEmbedding(obs.embedding)
+            val sampleDecision = enrollmentSampleDecision(enrollmentEmbedding, obs.pose, enrollSamples, enrollPoses)
+            if (!sampleDecision.accepted) {
+                enrollmentHold.reset()
+                enrollmentHoldProgress = 0.0f
+                status = sampleDecision.status
+                detail = sampleDecision.detail
+                return
+            }
+            if (!enrollmentHold.update(targetPose ?: obs.pose, obs.pose)) {
+                enrollmentHoldProgress = enrollmentHold.progress()
+                status = enrollmentTargetStatus(targetPose ?: obs.pose)
+                detail = "${enrollSamples.size}/$ENROLL_SAMPLES · ${enrollmentTargetInstruction(targetPose)}"
+                return
+            }
+            enrollmentHoldProgress = 1.0f
             val duplicateSample = duplicateUserForEnrollment(enrollmentEmbedding, users)
             if (duplicateSample != null) {
                 mode = AppMode.Auth
@@ -1257,22 +1283,20 @@ private fun FFacioApp(
                 detail = "${duplicateSample.name} 사용자와 너무 비슷합니다. 기존 사용자로 인증하거나 다른 사람을 등록해 주세요"
                 return
             }
-            val sampleDecision = enrollmentSampleDecision(enrollmentEmbedding, obs.pose, enrollSamples, enrollPoses)
-            if (!sampleDecision.accepted) {
-                status = sampleDecision.status
-                detail = sampleDecision.detail
-                return
-            }
             enrollSamples.add(enrollmentEmbedding)
             enrollPoses.add(obs.pose)
+            enrollmentHold.reset()
+            enrollmentHoldProgress = 0.0f
             enrollmentExpiresAt = SystemClock.elapsedRealtime() + ENROLLMENT_IDLE_TIMEOUT_MS
+            val nextTargetPose = enrollmentTargetPose(enrollSamples.size, enrollPoses)
+            guideState = faceGuideStateForPose(nextTargetPose ?: obs.pose)
             status = "샘플 수집 중"
-            detail = "${enrollSamples.size}/$ENROLL_SAMPLES · 실제 얼굴 확인 완료 · ${poseLabel(obs.pose)}"
+            detail = enrollmentProgressDetail(enrollSamples.size, obs.pose, nextTargetPose)
             if (enrollSamples.size >= ENROLL_SAMPLES) {
                 val cleanName = enrollmentName.ifBlank { name.trim() }
                 if (cleanName.isNotEmpty()) {
                     val averaged = average(enrollSamples)
-                    val templateQuality = enrollmentTemplateQuality(averaged, enrollSamples)
+                    val templateQuality = enrollmentTemplateQuality(averaged, enrollSamples, enrollPoses)
                     if (!templateQuality.accepted) {
                         enrollSamples.clear()
                         enrollPoses.clear()
@@ -1447,6 +1471,7 @@ private fun FFacioApp(
                 isEnrollmentMode = mode == AppMode.Enroll,
                 enrollmentPoses = enrollPoses.toList(),
                 enrollmentCount = enrollSamples.size,
+                enrollmentHoldProgress = enrollmentHoldProgress,
                 engineProvider = engineProvider,
                 analyzerExecutor = analyzerExecutor,
                 processing = processing,
@@ -1695,6 +1720,7 @@ private fun CameraStage(
     isEnrollmentMode: Boolean,
     enrollmentPoses: List<Int>,
     enrollmentCount: Int,
+    enrollmentHoldProgress: Float,
     engineProvider: () -> MobileFaceEngine?,
     analyzerExecutor: ExecutorService,
     processing: AtomicBoolean,
@@ -1716,7 +1742,7 @@ private fun CameraStage(
             setBackgroundColor(Color.BLACK)
         }
     }
-    DisposableEffect(enabled, analysisEnabled, cameraRetryNonce) {
+    DisposableEffect(enabled, cameraRetryNonce) {
         var providerFuture: ListenableFuture<ProcessCameraProvider>? = null
         var boundProvider: ProcessCameraProvider? = null
         var boundUseCases: Array<UseCase> = emptyArray()
@@ -1792,29 +1818,30 @@ private fun CameraStage(
             .clip(RoundedCornerShape(32.dp))
             .background(ComposeColor.Black)
     ) {
-        AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-        Box(
-            modifier = Modifier
-                .align(Alignment.Center)
-                .size(260.dp)
-                .clip(CircleShape)
-                .background(
-                    Brush.radialGradient(
-                        listOf(ComposeColor.Transparent, ComposeColor(0x330A84FF))
-                    )
-                )
-        )
-        FaceGuideOverlay(
-            state = guideState,
-            modifier = Modifier.align(Alignment.Center)
-        )
-        if (enabled && isEnrollmentMode) {
-            EnrollmentPoseRibbon(
-                poses = enrollmentPoses,
-                count = enrollmentCount,
+        val enrollmentGuide = if (enabled && isEnrollmentMode) {
+            enrollmentGuideState(enrollmentPoses, enrollmentCount, enrollmentHoldProgress)
+        } else {
+            null
+        }
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val ringSize = responsiveFaceGuideSize(maxWidth, maxHeight)
+            AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+            Box(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(horizontal = 22.dp, vertical = 10.dp)
+                    .align(Alignment.Center)
+                    .size(ringSize)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.radialGradient(
+                            listOf(ComposeColor.Transparent, ComposeColor(0x330A84FF))
+                        )
+                    )
+            )
+            FaceGuideOverlay(
+                state = guideState,
+                enrollmentGuide = enrollmentGuide,
+                ringSize = ringSize,
+                modifier = Modifier.align(Alignment.Center)
             )
         }
         if (!enabled) {
@@ -1831,13 +1858,24 @@ private fun CameraStage(
 }
 
 @Composable
-private fun FaceGuideOverlay(state: FaceGuideState, modifier: Modifier = Modifier) {
-    val ringColor = when (state) {
+private fun FaceGuideOverlay(
+    state: FaceGuideState,
+    enrollmentGuide: EnrollmentGuideState? = null,
+    ringSize: Dp = 260.dp,
+    modifier: Modifier = Modifier
+) {
+    val baseRingColor = when (state) {
         FaceGuideState.Approved -> ComposeColor(0xFF30D158)
         FaceGuideState.TurnLeft, FaceGuideState.TurnRight -> ComposeColor(0xFF0071E3)
         FaceGuideState.Center -> ComposeColor(0xFFFFFFFF)
         FaceGuideState.Searching -> ComposeColor(0x99FFFFFF)
     }
+    val ringColor = if (enrollmentGuide != null) ComposeColor(0xFF30D158) else baseRingColor
+    val progress by animateFloatAsState(
+        targetValue = enrollmentGuide?.progress ?: if (state == FaceGuideState.Approved) 1.0f else 0.0f,
+        animationSpec = tween(durationMillis = 280),
+        label = "face-guide-progress"
+    )
     val scale by animateFloatAsState(
         targetValue = if (state == FaceGuideState.Approved) 1.08f else 1.0f,
         animationSpec = tween(durationMillis = 240),
@@ -1849,43 +1887,101 @@ private fun FaceGuideOverlay(state: FaceGuideState, modifier: Modifier = Modifie
         label = "face-guide-alpha"
     )
     val symbolOffset by animateFloatAsState(
-        targetValue = when (state) {
-            FaceGuideState.TurnLeft -> -26.0f
-            FaceGuideState.TurnRight -> 26.0f
+        targetValue = when {
+            enrollmentGuide?.nextPose == -1 -> -26.0f
+            enrollmentGuide?.nextPose == 1 -> 26.0f
+            state == FaceGuideState.TurnLeft -> -26.0f
+            state == FaceGuideState.TurnRight -> 26.0f
             else -> 0.0f
         },
         animationSpec = tween(durationMillis = 280),
         label = "face-guide-symbol-offset"
     )
+    val symbolState = if (enrollmentGuide == null) state else FaceGuideState.Searching
     Box(
         modifier = modifier
-            .size(260.dp)
+            .size(ringSize)
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
                 this.alpha = alpha
-            },
+        },
         contentAlignment = Alignment.Center
     ) {
+        if (enrollmentGuide != null) {
+            Canvas(modifier = Modifier.fillMaxSize().padding(6.dp)) {
+                val outerStroke = Stroke(width = 7.dp.toPx(), cap = StrokeCap.Round)
+                val poseStroke = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
+                drawArc(
+                    color = ComposeColor.White.copy(alpha = 0.24f),
+                    startAngle = -90f,
+                    sweepAngle = 360f,
+                    useCenter = false,
+                    style = outerStroke
+                )
+                drawArc(
+                    color = ComposeColor(0xFF30D158).copy(alpha = 0.92f),
+                    startAngle = -90f,
+                    sweepAngle = 360f * progress,
+                    useCenter = false,
+                    style = outerStroke
+                )
+                drawArc(
+                    color = ComposeColor(0xFF0071E3).copy(alpha = 0.86f),
+                    startAngle = -90f,
+                    sweepAngle = 360f * enrollmentGuide.holdProgress,
+                    useCenter = false,
+                    style = poseStroke
+                )
+                drawArc(
+                    color = enrollmentPoseColor(enrollmentGuide.collected.contains(0)),
+                    startAngle = -106f,
+                    sweepAngle = 32f,
+                    useCenter = false,
+                    style = poseStroke
+                )
+                drawArc(
+                    color = enrollmentPoseColor(enrollmentGuide.collected.contains(-1)),
+                    startAngle = 158f,
+                    sweepAngle = 32f,
+                    useCenter = false,
+                    style = poseStroke
+                )
+                drawArc(
+                    color = enrollmentPoseColor(enrollmentGuide.collected.contains(1)),
+                    startAngle = -10f,
+                    sweepAngle = 32f,
+                    useCenter = false,
+                    style = poseStroke
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape)
+                    .background(ComposeColor(0xFF30D158).copy(alpha = 0.06f))
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape)
+                    .border(4.dp, ringColor.copy(alpha = 0.72f), CircleShape)
+                    .background(ringColor.copy(alpha = 0.10f))
+            )
+        }
         Box(
             modifier = Modifier
-                .fillMaxSize()
-                .clip(CircleShape)
-                .border(4.dp, ringColor.copy(alpha = 0.72f), CircleShape)
-                .background(ringColor.copy(alpha = 0.10f))
-        )
-        Box(
-            modifier = Modifier
-                .size(232.dp)
+                .size(ringSize - 28.dp)
                 .clip(CircleShape)
                 .border(1.dp, ComposeColor.White.copy(alpha = 0.28f), CircleShape)
                 .background(ComposeColor.Transparent)
         )
-        when (state) {
+        when (symbolState) {
             FaceGuideState.Approved -> Text("✓", color = ComposeColor.White, fontSize = 76.sp, fontWeight = FontWeight.Bold)
-            FaceGuideState.TurnLeft -> Text("‹", color = ComposeColor.White, fontSize = 78.sp, fontWeight = FontWeight.Bold, modifier = Modifier.graphicsLayer { translationX = symbolOffset })
-            FaceGuideState.TurnRight -> Text("›", color = ComposeColor.White, fontSize = 78.sp, fontWeight = FontWeight.Bold, modifier = Modifier.graphicsLayer { translationX = symbolOffset })
-            FaceGuideState.Center -> Text("•", color = ComposeColor.White, fontSize = 54.sp, fontWeight = FontWeight.Bold)
+            FaceGuideState.TurnLeft -> Text("‹", color = ComposeColor.White, fontSize = if (enrollmentGuide == null) 78.sp else 54.sp, fontWeight = FontWeight.Bold, modifier = Modifier.graphicsLayer { translationX = symbolOffset })
+            FaceGuideState.TurnRight -> Text("›", color = ComposeColor.White, fontSize = if (enrollmentGuide == null) 78.sp else 54.sp, fontWeight = FontWeight.Bold, modifier = Modifier.graphicsLayer { translationX = symbolOffset })
+            FaceGuideState.Center -> Text("•", color = ComposeColor.White, fontSize = if (enrollmentGuide == null) 54.sp else 34.sp, fontWeight = FontWeight.Bold)
             FaceGuideState.Searching -> Text("", color = ComposeColor.White)
         }
     }
@@ -1893,11 +1989,9 @@ private fun FaceGuideOverlay(state: FaceGuideState, modifier: Modifier = Modifie
 
 @Composable
 private fun EnrollmentPoseRibbon(
-    poses: List<Int>,
-    count: Int,
+    guide: EnrollmentGuideState,
     modifier: Modifier = Modifier
 ) {
-    val collected = poses.toSet()
     Surface(
         color = ComposeColor.Black.copy(alpha = 0.58f),
         shape = RoundedCornerShape(18.dp),
@@ -1905,18 +1999,18 @@ private fun EnrollmentPoseRibbon(
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                EnrollmentPoseDot("정면", collected.contains(0), Modifier.weight(1f))
-                EnrollmentPoseDot("왼쪽", collected.contains(-1), Modifier.weight(1f))
-                EnrollmentPoseDot("오른쪽", collected.contains(1), Modifier.weight(1f))
+                EnrollmentPoseDot("정면", guide.collected.contains(0), guide.nextPose == 0, Modifier.weight(1f))
+                EnrollmentPoseDot("왼쪽", guide.collected.contains(-1), guide.nextPose == -1, Modifier.weight(1f))
+                EnrollmentPoseDot("오른쪽", guide.collected.contains(1), guide.nextPose == 1, Modifier.weight(1f))
             }
             LinearProgressIndicator(
-                progress = { (count.toFloat() / ENROLL_SAMPLES.toFloat()).coerceIn(0f, 1f) },
+                progress = { guide.progress },
                 modifier = Modifier.fillMaxWidth(),
                 color = ComposeColor(0xFF30D158),
                 trackColor = ComposeColor.White.copy(alpha = 0.22f)
             )
             Text(
-                "얼굴을 천천히 좌우로 돌려 주세요 · $count/$ENROLL_SAMPLES",
+                "${guide.instruction} · ${guide.count}/$ENROLL_SAMPLES",
                 color = ComposeColor.White.copy(alpha = 0.92f),
                 fontSize = 11.sp,
                 textAlign = TextAlign.Center,
@@ -1927,22 +2021,39 @@ private fun EnrollmentPoseRibbon(
 }
 
 @Composable
-private fun EnrollmentPoseDot(label: String, collected: Boolean, modifier: Modifier = Modifier) {
+private fun EnrollmentPoseDot(label: String, collected: Boolean, active: Boolean, modifier: Modifier = Modifier) {
     val fill by animateColorAsState(
         targetValue = if (collected) ComposeColor(0xFF30D158) else ComposeColor.White.copy(alpha = 0.18f),
         animationSpec = tween(durationMillis = 220),
         label = "enrollment-pose-fill"
     )
+    val scale by animateFloatAsState(
+        targetValue = if (active && !collected) 1.16f else 1.0f,
+        animationSpec = tween(durationMillis = 260),
+        label = "enrollment-pose-active-scale"
+    )
     Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Box(
             Modifier
                 .size(10.dp)
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                }
                 .clip(CircleShape)
                 .background(fill)
                 .border(1.dp, ComposeColor.White.copy(alpha = 0.44f), CircleShape)
         )
-        Text(label, color = ComposeColor.White, fontSize = 11.sp)
+        Text(label, color = if (active || collected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.68f), fontSize = 11.sp)
     }
+}
+
+private fun enrollmentPoseColor(collected: Boolean): ComposeColor =
+    if (collected) ComposeColor(0xFF30D158).copy(alpha = 0.96f) else ComposeColor.White.copy(alpha = 0.42f)
+
+private fun responsiveFaceGuideSize(maxWidth: Dp, maxHeight: Dp): Dp {
+    val shortSide = min(maxWidth.value, maxHeight.value)
+    return (shortSide * 0.72f).coerceIn(210f, 300f).dp
 }
 
 @Composable
@@ -2586,8 +2697,8 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, arcFa
         val eyeDistance = max(1.0f, abs(face[6] - face[4]))
         val yaw = (face[8] - mid) / eyeDistance
         return when {
-            yaw < -0.08f -> -1
-            yaw > 0.08f -> 1
+            yaw < -0.16f -> -1
+            yaw > 0.16f -> 1
             else -> 0
         }
     }
@@ -2693,6 +2804,35 @@ private class LivenessChallenge {
     fun prompt(): String = if (index >= targets.size) "라이브니스 확인 완료" else "${poseLabel(targets[index])}을 보고 잠시 유지해 주세요"
 }
 
+internal class EnrollmentPoseHold(private val holdMillis: Long = ENROLL_POSE_HOLD_MS) {
+    private var targetPose: Int? = null
+    private var holdStartedAt = 0L
+    private var lastProgress = 0.0f
+
+    fun reset() {
+        targetPose = null
+        holdStartedAt = 0L
+        lastProgress = 0.0f
+    }
+
+    fun update(target: Int, pose: Int, now: Long = System.currentTimeMillis()): Boolean {
+        if (pose != target) {
+            reset()
+            return false
+        }
+        if (targetPose != target || holdStartedAt == 0L) {
+            targetPose = target
+            holdStartedAt = now
+            lastProgress = 0.0f
+            return false
+        }
+        lastProgress = ((now - holdStartedAt).toFloat() / holdMillis.toFloat()).coerceIn(0.0f, 1.0f)
+        return now - holdStartedAt >= holdMillis
+    }
+
+    fun progress(): Float = lastProgress
+}
+
 private enum class AppMode { Auth, Enroll }
 private enum class AppScreen { Operation, Admin }
 private enum class AdminAction { OpenAdmin, StartEnroll, DeleteUser, DeleteUsers, UnlockStore, ResetStore, ArmDoor, UnlockDoor }
@@ -2786,6 +2926,15 @@ internal data class UserTemplate(
             matchingSamples().all { it.size == FACE_EMBEDDING_SIZE }
 }
 internal data class Match(val index: Int, val score: Double, val secondScore: Double, val supportCount: Int)
+internal data class EnrollmentGuideState(
+    val count: Int,
+    val progress: Float,
+    val holdProgress: Float,
+    val collected: Set<Int>,
+    val nextPose: Int?,
+    val instruction: String,
+    val complete: Boolean
+)
 internal data class EnrollmentSampleDecision(val accepted: Boolean, val status: String, val detail: String)
 internal data class EnrollmentTemplateQualityDecision(val accepted: Boolean, val status: String, val detail: String)
 internal data class ApprovalLogEntry(val time: String, val userName: String, val result: String)
@@ -2833,7 +2982,7 @@ internal fun shouldAnalyzeCameraFrame(
 internal fun shouldBindCameraAnalysisUseCase(
     cameraEnabled: Boolean,
     analysisEnabled: Boolean
-): Boolean = cameraEnabled && analysisEnabled
+): Boolean = cameraEnabled
 
 internal fun canRetryCamera(
     cameraAvailable: Boolean,
@@ -3250,13 +3399,17 @@ internal fun enrollmentSampleDecision(
     if (samples.isNotEmpty() && samples.last().size != embedding.size) {
         return EnrollmentSampleDecision(false, "얼굴 특징을 다시 추출해 주세요", "등록 샘플 형식이 일치하지 않습니다")
     }
+    val targetPose = enrollmentTargetPose(samples.size, poses)
+    if (targetPose != null && pose != targetPose) {
+        return EnrollmentSampleDecision(false, enrollmentTargetStatus(targetPose), "${samples.size}/$ENROLL_SAMPLES · ${enrollmentTargetInstruction(targetPose)}")
+    }
     if (samples.any { cosine(embedding, it) > ENROLL_REPEAT_THRESHOLD }) {
         return EnrollmentSampleDecision(false, "고개를 좌우로 천천히 돌려 주세요", "${samples.size}/$ENROLL_SAMPLES · 이미 수집한 각도와 너무 비슷합니다")
     }
     if (samples.size >= ENROLL_SAMPLES - 1) {
         val distinctPoses = (poses + pose).toSet().size
         if (distinctPoses < ENROLL_MIN_DISTINCT_POSES) {
-            return EnrollmentSampleDecision(false, "고개를 살짝 돌려 주세요", "${samples.size}/$ENROLL_SAMPLES · 정면과 좌/우 중 최소 두 각도가 필요합니다")
+            return EnrollmentSampleDecision(false, "고개를 살짝 돌려 주세요", "${samples.size}/$ENROLL_SAMPLES · 정면, 왼쪽, 오른쪽 각도가 모두 필요합니다")
         }
     }
     return EnrollmentSampleDecision(true, "", "")
@@ -3265,6 +3418,7 @@ internal fun enrollmentSampleDecision(
 internal fun enrollmentTemplateQuality(
     centroid: FloatArray,
     samples: List<FloatArray>,
+    poses: List<Int> = emptyList(),
     minSampleScore: Double = ENROLL_TEMPLATE_MIN_SAMPLE_SCORE,
     averageSampleScore: Double = ENROLL_TEMPLATE_AVG_SAMPLE_SCORE,
     minPairScore: Double = ENROLL_TEMPLATE_MIN_PAIR_SCORE
@@ -3274,6 +3428,9 @@ internal fun enrollmentTemplateQuality(
     }
     if (samples.any { it.size != centroid.size }) {
         return EnrollmentTemplateQualityDecision(false, "등록 품질이 낮습니다", "얼굴 특징 형식이 일치하지 않습니다. 다시 등록해 주세요")
+    }
+    if (poses.isNotEmpty() && !enrollmentPoseCoverageAccepted(poses)) {
+        return EnrollmentTemplateQualityDecision(false, "등록 품질이 낮습니다", "정면, 왼쪽, 오른쪽을 모두 다시 수집해 주세요")
     }
     val scores = samples.map { cosine(centroid, it) }
     val weakest = scores.minOrNull() ?: 0.0
@@ -3296,8 +3453,14 @@ internal fun enrollmentTemplateQuality(
 }
 
 private fun duplicateUserForEnrollment(embedding: FloatArray, users: List<UserTemplate>): UserTemplate? {
-    val duplicate = match(embedding, users)
-    return if (duplicate.index >= 0 && duplicate.score >= ENROLL_DUPLICATE_THRESHOLD) users[duplicate.index] else null
+    return users.firstOrNull { user ->
+        user.isCompatible() && enrollmentDuplicateScore(embedding, user) >= ENROLL_DUPLICATE_THRESHOLD
+    }
+}
+
+internal fun enrollmentDuplicateScore(embedding: FloatArray, user: UserTemplate): Double {
+    val candidates = listOf(user.embedding) + user.matchingSamples()
+    return candidates.maxOfOrNull { cosine(embedding, it) } ?: -1.0
 }
 
 private fun average(samples: List<FloatArray>): FloatArray {
@@ -3335,6 +3498,61 @@ private fun poseLabel(pose: Int): String = when {
     pose < 0 -> "왼쪽"
     pose > 0 -> "오른쪽"
     else -> "정면"
+}
+
+internal fun enrollmentTargetPose(sampleCount: Int, poses: List<Int>): Int? {
+    val guidedSequence = intArrayOf(0, -1, 1, -1, 1)
+    return guidedSequence.getOrNull(sampleCount)
+}
+
+internal fun enrollmentGuideState(poses: List<Int>, count: Int, holdProgress: Float = 0.0f): EnrollmentGuideState {
+    val collected = poses.toSet()
+    val nextPose = enrollmentTargetPose(count, poses)
+    val complete = count >= ENROLL_SAMPLES
+    return EnrollmentGuideState(
+        count = count,
+        progress = (count.toFloat() / ENROLL_SAMPLES.toFloat()).coerceIn(0f, 1f),
+        holdProgress = holdProgress.coerceIn(0f, 1f),
+        collected = collected,
+        nextPose = nextPose,
+        instruction = if (complete) "등록 완료" else enrollmentTargetInstruction(nextPose),
+        complete = complete
+    )
+}
+
+private fun enrollmentTargetInstruction(targetPose: Int?): String = when (targetPose) {
+    -1 -> "왼쪽으로 천천히 돌려 잠시 유지"
+    1 -> "오른쪽으로 천천히 돌려 잠시 유지"
+    0 -> "정면을 바라보고 잠시 유지"
+    else -> "얼굴을 천천히 좌우로 움직여 주세요"
+}
+
+private fun enrollmentTargetStatus(targetPose: Int): String = when (targetPose) {
+    -1 -> "왼쪽을 바라봐 주세요"
+    1 -> "오른쪽을 바라봐 주세요"
+    else -> "정면을 바라봐 주세요"
+}
+
+private fun faceGuideStateForPose(pose: Int?): FaceGuideState = when (pose) {
+    -1 -> FaceGuideState.TurnLeft
+    1 -> FaceGuideState.TurnRight
+    0 -> FaceGuideState.Center
+    else -> FaceGuideState.Center
+}
+
+private fun enrollmentProgressDetail(count: Int, capturedPose: Int, nextPose: Int?): String {
+    val nextInstruction = enrollmentTargetInstruction(nextPose)
+    return "$count/$ENROLL_SAMPLES · ${poseLabel(capturedPose)} 수집 완료 · $nextInstruction"
+}
+
+internal fun enrollmentPoseCoverageAccepted(poses: List<Int>): Boolean {
+    val collected = poses.toSet()
+    return poses.size >= ENROLL_SAMPLES &&
+        collected.contains(0) &&
+        collected.contains(-1) &&
+        collected.contains(1) &&
+        poses.count { it == -1 } >= 2 &&
+        poses.count { it == 1 } >= 2
 }
 
 internal fun addApprovalLog(

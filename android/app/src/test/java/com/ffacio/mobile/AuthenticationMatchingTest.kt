@@ -53,6 +53,20 @@ class AuthenticationMatchingTest {
     }
 
     @Test
+    fun enrollmentDuplicateScoreUsesStoredSampleMaximum() {
+        val probe = unitEmbedding(0)
+        val user = UserTemplate(
+            name = "sample-match",
+            embedding = unitEmbedding(3),
+            samples = listOf(mixedEmbedding(0, 3, 0.96f), unitEmbedding(3)),
+            engineId = FACE_ENGINE_ID,
+            embeddingSize = FACE_EMBEDDING_SIZE
+        )
+
+        assertTrue(enrollmentDuplicateScore(probe, user) > 0.90)
+    }
+
+    @Test
     fun weakScoreThatPreviouslyCouldPassIsRejected() {
         assertFalse(
             acceptsAuthenticationCandidate(

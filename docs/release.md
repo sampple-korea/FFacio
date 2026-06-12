@@ -1,5 +1,14 @@
 # FFacio Android Release Notes
 
+## Android 0.4.0
+
+- Makes enrollment guidance more Face ID-like by turning the camera guide ring into the primary registration progress surface.
+- Requires a guided five-step center/left/right/left/right enrollment sequence with a short hold gate before each sample is saved, reducing one-frame pose mistakes and motion-blur samples.
+- Adds progress and hold arcs plus center/left/right collection markers around the face guide ring while removing central registration symbols so the user's face is less obstructed.
+- Keeps CameraX bound while encrypted enrollment storage is busy, so final save no longer tears down the camera pipeline and looks less like a freeze.
+- Uses stored enrollment sample maximums for duplicate-registration checks, not only the averaged face template.
+- Updates enrollment messages to tell the user the next required pose directly.
+
 ## Android 0.3.17
 
 - Adds an admin-only authentication decision log for real-device calibration and false-accept/false-reject investigation.
