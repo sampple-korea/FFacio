@@ -92,6 +92,190 @@ class AdminOperationGateTest {
     }
 
     @Test
+    fun cameraAnalysisWatchdogRetriesOnlyAfterStallAndCooldown() {
+        assertFalse(
+            shouldRetryCameraAnalysis(
+                analysisExpected = false,
+                nowMillis = 10_000L,
+                watchStartedAtMillis = 1_000L,
+                lastAnalysisAtMillis = 0L,
+                lastRetryAtMillis = 0L,
+                stallMillis = 5_000L,
+                retryCooldownMillis = 3_000L
+            )
+        )
+        assertFalse(
+            shouldRetryCameraAnalysis(
+                analysisExpected = true,
+                nowMillis = 5_900L,
+                watchStartedAtMillis = 1_000L,
+                lastAnalysisAtMillis = 0L,
+                lastRetryAtMillis = 0L,
+                stallMillis = 5_000L,
+                retryCooldownMillis = 3_000L
+            )
+        )
+        assertTrue(
+            shouldRetryCameraAnalysis(
+                analysisExpected = true,
+                nowMillis = 6_000L,
+                watchStartedAtMillis = 1_000L,
+                lastAnalysisAtMillis = 0L,
+                lastRetryAtMillis = 0L,
+                stallMillis = 5_000L,
+                retryCooldownMillis = 3_000L
+            )
+        )
+        assertFalse(
+            shouldRetryCameraAnalysis(
+                analysisExpected = true,
+                nowMillis = 6_000L,
+                watchStartedAtMillis = 1_000L,
+                lastAnalysisAtMillis = 5_500L,
+                lastRetryAtMillis = 0L,
+                stallMillis = 5_000L,
+                retryCooldownMillis = 3_000L
+            )
+        )
+        assertFalse(
+            shouldRetryCameraAnalysis(
+                analysisExpected = true,
+                nowMillis = 6_000L,
+                watchStartedAtMillis = 1_000L,
+                lastAnalysisAtMillis = 0L,
+                lastRetryAtMillis = 4_000L,
+                stallMillis = 5_000L,
+                retryCooldownMillis = 3_000L
+            )
+        )
+    }
+
+    @Test
+    fun cameraAnalysisWatchdogRebindsFeedStallsAndEscalatesRepeatedRebinds() {
+        assertEquals(
+            CameraAnalysisWatchdogAction.RebindCamera,
+            cameraAnalysisWatchdogAction(
+                analysisExpected = true,
+                nowMillis = 6_000L,
+                watchStartedAtMillis = 1_000L,
+                lastAnalysisAtMillis = 0L,
+                lastRetryAtMillis = 0L,
+                processingInFlight = false,
+                rebindAttemptCount = 0,
+                stallMillis = 5_000L,
+                retryCooldownMillis = 3_000L,
+                maxRebindAttempts = 2
+            )
+        )
+        assertEquals(
+            CameraAnalysisWatchdogAction.FailVisible,
+            cameraAnalysisWatchdogAction(
+                analysisExpected = true,
+                nowMillis = 6_000L,
+                watchStartedAtMillis = 1_000L,
+                lastAnalysisAtMillis = 0L,
+                lastRetryAtMillis = 0L,
+                processingInFlight = false,
+                rebindAttemptCount = 2,
+                stallMillis = 5_000L,
+                retryCooldownMillis = 3_000L,
+                maxRebindAttempts = 2
+            )
+        )
+        assertEquals(
+            CameraAnalysisWatchdogAction.None,
+            cameraAnalysisWatchdogAction(
+                analysisExpected = true,
+                nowMillis = 5_900L,
+                watchStartedAtMillis = 1_000L,
+                lastAnalysisAtMillis = 0L,
+                lastRetryAtMillis = 0L,
+                processingInFlight = false,
+                stallMillis = 5_000L,
+                retryCooldownMillis = 3_000L
+            )
+        )
+    }
+
+    @Test
+    fun cameraAnalysisWatchdogAllowsSlowAnalyzerBeforeFatalWindow() {
+        assertEquals(
+            CameraAnalysisWatchdogAction.None,
+            cameraAnalysisWatchdogAction(
+                analysisExpected = true,
+                nowMillis = 6_000L,
+                watchStartedAtMillis = 1_000L,
+                lastAnalysisAtMillis = 1_000L,
+                lastRetryAtMillis = 0L,
+                processingInFlight = true,
+                processingInFlightStartedAtMillis = 1_000L,
+                stallMillis = 5_000L,
+                retryCooldownMillis = 3_000L,
+                analyzerFatalStallMillis = 15_000L
+            )
+        )
+        assertEquals(
+            CameraAnalysisWatchdogAction.FailVisible,
+            cameraAnalysisWatchdogAction(
+                analysisExpected = true,
+                nowMillis = 16_000L,
+                watchStartedAtMillis = 1_000L,
+                lastAnalysisAtMillis = 1_000L,
+                lastRetryAtMillis = 0L,
+                processingInFlight = true,
+                processingInFlightStartedAtMillis = 1_000L,
+                stallMillis = 5_000L,
+                retryCooldownMillis = 3_000L,
+                analyzerFatalStallMillis = 15_000L
+            )
+        )
+    }
+
+    @Test
+    fun analyzerFatalStallCannotBeRetriedAsCameraRebind() {
+        assertTrue(
+            canRetryCamera(
+                cameraAvailable = false,
+                hasCameraPermission = true,
+                noCameraHardware = false,
+                analyzerFatalStall = false
+            )
+        )
+        assertFalse(
+            canRetryCamera(
+                cameraAvailable = false,
+                hasCameraPermission = true,
+                noCameraHardware = false,
+                analyzerFatalStall = true
+            )
+        )
+    }
+
+    @Test
+    fun analyzerFatalStallKeepsCameraPreviewDisabledUntilRestart() {
+        assertTrue(
+            canPreviewCamera(
+                modelError = null,
+                storeError = null,
+                hasCameraPermission = true,
+                cameraAvailable = true,
+                noCameraHardware = false,
+                analyzerFatalStall = false
+            )
+        )
+        assertFalse(
+            canPreviewCamera(
+                modelError = null,
+                storeError = null,
+                hasCameraPermission = true,
+                cameraAvailable = true,
+                noCameraHardware = false,
+                analyzerFatalStall = true
+            )
+        )
+    }
+
+    @Test
     fun lifecyclePauseReturnsToOperationOnlyOutsideAdminPrompt() {
         assertFalse(shouldReturnToOperationOnLifecyclePause(adminPromptInFlight = true))
         assertTrue(shouldReturnToOperationOnLifecyclePause(adminPromptInFlight = false))

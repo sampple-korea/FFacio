@@ -167,6 +167,10 @@ private const val ENROLL_REPEAT_THRESHOLD = 0.985
 private const val ENROLL_DUPLICATE_THRESHOLD = MATCH_THRESHOLD
 private const val ENROLL_MIN_DISTINCT_POSES = 2
 private const val ANALYSIS_INTERVAL_MS = 180L
+private const val CAMERA_ANALYSIS_STALL_MS = 6500L
+private const val CAMERA_WATCHDOG_RETRY_COOLDOWN_MS = 6000L
+private const val CAMERA_WATCHDOG_MAX_REBIND_ATTEMPTS = 2
+private const val CAMERA_ANALYZER_FATAL_STALL_MS = 20_000L
 private const val ANTISPOOF_THRESHOLD = 0.55f
 private const val AUTH_RESULT_HOLD_MS = 3500L
 private const val APPROVAL_LOG_LIMIT = 8
@@ -333,6 +337,7 @@ private fun FFacioApp(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val appScope = rememberCoroutineScope()
+    var cameraLifecycleActive by remember { mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) }
     val users = remember { mutableStateListOf<UserTemplate>() }
     val modelLoading = modelLoadState is ModelLoadState.Loading
     val modelError = (modelLoadState as? ModelLoadState.Failed)?.error
@@ -354,7 +359,12 @@ private fun FFacioApp(
     var passiveLivenessEnabled by remember { mutableStateOf(false) }
     var cameraAvailable by remember { mutableStateOf(true) }
     var noCameraHardware by remember { mutableStateOf(false) }
+    var analyzerFatalStall by remember { mutableStateOf(false) }
     var cameraRetryNonce by remember { mutableIntStateOf(0) }
+    var cameraAnalysisWatchStartedAt by remember { mutableLongStateOf(0L) }
+    var lastCameraWatchdogRetryAt by remember { mutableLongStateOf(0L) }
+    var cameraWatchdogRebindAttempts by remember { mutableIntStateOf(0) }
+    var analyzerProcessingWatchStartedAt by remember { mutableLongStateOf(0L) }
     var touchExplorationEnabled by remember { mutableStateOf(isTouchExplorationEnabled(context)) }
     var confirmDelete by remember { mutableStateOf(false) }
     var pendingDeleteUserIndex by remember { mutableIntStateOf(-1) }
@@ -801,6 +811,7 @@ private fun FFacioApp(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
+                cameraLifecycleActive = true
                 val resumedTouchExplorationEnabled = isTouchExplorationEnabled(context)
                 touchExplorationEnabled = resumedTouchExplorationEnabled
                 (context as? Activity)?.window?.let { window ->
@@ -817,10 +828,16 @@ private fun FFacioApp(
                 if (granted != hasCameraPermission) {
                     hasCameraPermission = granted
                     if (granted) {
-                        cameraAvailable = true
-                        cameraRetryNonce += 1
-                        status = if (users.isEmpty()) "첫 사용자를 등록하세요" else "인증 준비 완료"
-                        detail = if (users.isEmpty()) "카메라 권한이 허용되었습니다. 얼굴 등록을 시작하세요" else "카메라를 바라봐 주세요"
+                        if (analyzerFatalStall) {
+                            cameraAvailable = false
+                            status = "카메라 분석이 멈췄습니다"
+                            detail = "앱을 완전히 종료한 뒤 다시 실행해 주세요"
+                        } else {
+                            cameraAvailable = true
+                            cameraRetryNonce += 1
+                            status = if (users.isEmpty()) "첫 사용자를 등록하세요" else "인증 준비 완료"
+                            detail = if (users.isEmpty()) "카메라 권한이 허용되었습니다. 얼굴 등록을 시작하세요" else "카메라를 바라봐 주세요"
+                        }
                     } else {
                         liveCandidate = -1
                         stableUser = -1
@@ -831,6 +848,10 @@ private fun FFacioApp(
                     }
                 }
             } else if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                cameraLifecycleActive = false
+                cameraAnalysisWatchStartedAt = 0L
+                analyzerProcessingWatchStartedAt = 0L
+                cameraWatchdogRebindAttempts = 0
                 if (shouldReturnToOperationOnLifecyclePause(currentAdminPromptInFlight)) {
                     invalidateDoorRelayTest()
                     appScreen = AppScreen.Operation
@@ -1012,6 +1033,7 @@ private fun FFacioApp(
         storeError != null -> "로컬 생체 저장소가 잠겨 있습니다"
         !hasCameraPermission -> "카메라 권한이 필요합니다"
         noCameraHardware -> "이 기기에는 사용할 수 있는 카메라가 없습니다"
+        analyzerFatalStall -> "카메라 분석이 멈췄습니다"
         !cameraAvailable -> "카메라를 사용할 수 없습니다"
         else -> null
     }
@@ -1022,11 +1044,14 @@ private fun FFacioApp(
     }
 
     fun cameraCanPreview(): Boolean = !modelLoading &&
-        modelError == null &&
-        storeError == null &&
-        hasCameraPermission &&
-        cameraAvailable &&
-        !noCameraHardware
+        canPreviewCamera(
+            modelError = modelError,
+            storeError = storeError,
+            hasCameraPermission = hasCameraPermission,
+            cameraAvailable = cameraAvailable,
+            noCameraHardware = noCameraHardware,
+            analyzerFatalStall = analyzerFatalStall
+        )
 
     fun cameraCanUseForCurrentScreen(): Boolean = shouldUseCameraForScreen(
         baseReady = cameraCanPreview(),
@@ -1044,6 +1069,69 @@ private fun FFacioApp(
         isEnrollmentMode = mode == AppMode.Enroll,
         hasIdleReason = idleReason() != null || blockedReason() != null
     )
+
+    LaunchedEffect(cameraLifecycleActive, cameraCanAnalyze(), cameraRetryNonce, appScreen, mode, storageBusy) {
+        if (!cameraLifecycleActive || !cameraCanAnalyze()) {
+            cameraAnalysisWatchStartedAt = 0L
+            analyzerProcessingWatchStartedAt = 0L
+            cameraWatchdogRebindAttempts = 0
+            return@LaunchedEffect
+        }
+        if (cameraAnalysisWatchStartedAt <= 0L) {
+            cameraAnalysisWatchStartedAt = System.currentTimeMillis()
+        }
+        while (cameraLifecycleActive && cameraCanAnalyze()) {
+            delay(1000L)
+            val now = System.currentTimeMillis()
+            val processingNow = processing.get()
+            if (processingNow && analyzerProcessingWatchStartedAt <= 0L) {
+                analyzerProcessingWatchStartedAt = now
+            } else if (!processingNow && analyzerProcessingWatchStartedAt > 0L) {
+                analyzerProcessingWatchStartedAt = 0L
+            }
+            when (cameraAnalysisWatchdogAction(
+                    analysisExpected = true,
+                    nowMillis = now,
+                    watchStartedAtMillis = cameraAnalysisWatchStartedAt,
+                    lastAnalysisAtMillis = lastAnalysisAt.get(),
+                    lastRetryAtMillis = lastCameraWatchdogRetryAt,
+                    processingInFlight = processingNow,
+                    processingInFlightStartedAtMillis = analyzerProcessingWatchStartedAt,
+                    rebindAttemptCount = cameraWatchdogRebindAttempts
+                )
+            ) {
+                CameraAnalysisWatchdogAction.None -> Unit
+                CameraAnalysisWatchdogAction.FailVisible -> {
+                    lastCameraWatchdogRetryAt = now
+                    cameraAnalysisWatchStartedAt = now
+                    analyzerFatalStall = true
+                    cameraAvailable = false
+                    resetTransient()
+                    status = "카메라 분석이 멈췄습니다"
+                    detail = if (processingNow) {
+                        "분석 작업이 오래 응답하지 않습니다. 앱을 완전히 종료한 뒤 다시 실행해 주세요"
+                    } else {
+                        "프레임 수신이 반복해서 멈췄습니다. 앱을 완전히 종료한 뒤 다시 실행해 주세요"
+                    }
+                    break
+                }
+                CameraAnalysisWatchdogAction.RebindCamera -> {
+                    lastCameraWatchdogRetryAt = now
+                    cameraAnalysisWatchStartedAt = now
+                    cameraWatchdogRebindAttempts += 1
+                    analyzerProcessingWatchStartedAt = 0L
+                    firstAnalyzedFrameLogged.set(false)
+                    lastAnalysisAt.set(0L)
+                    cameraAvailable = true
+                    cameraRetryNonce += 1
+                    resetTransient()
+                    status = "카메라 분석을 다시 연결하는 중입니다"
+                    detail = "프레임 수신이 지연되어 카메라를 자동으로 복구합니다"
+                    break
+                }
+            }
+        }
+    }
 
     fun openDoor(user: UserTemplate) {
         if (adminPromptInFlight || appScreen != AppScreen.Operation) return
@@ -1085,6 +1173,9 @@ private fun FFacioApp(
     }
 
     fun onObservation(obs: Observation) {
+        if (analyzerFatalStall || !cameraAvailable) return
+        if (cameraWatchdogRebindAttempts != 0) cameraWatchdogRebindAttempts = 0
+        if (analyzerProcessingWatchStartedAt != 0L) analyzerProcessingWatchStartedAt = 0L
         if (modelLoading || modelError != null || storeError != null || storageBusy) return
         if (adminPromptInFlight) return
         if (mode == AppMode.Enroll && appScreen != AppScreen.Admin) return
@@ -1309,7 +1400,7 @@ private fun FFacioApp(
                     accessFeedback = accessFeedback,
                     approvalLogs = approvalLogs,
                     blockedReason = blockedReason(),
-                    canRetryCamera = !cameraAvailable && hasCameraPermission && !noCameraHardware,
+                    canRetryCamera = canRetryCamera(cameraAvailable, hasCameraPermission, noCameraHardware, analyzerFatalStall),
                     onRetryCamera = {
                         cameraAvailable = true
                         cameraRetryNonce += 1
@@ -1444,6 +1535,11 @@ private fun FFacioApp(
                     if (modelError != null || noCameraHardware) {
                         status = blockedReason() ?: status
                         detail = if (modelError != null) "앱을 다시 설치해 주세요" else "전면 또는 후면 카메라가 있는 기기에서 실행해 주세요"
+                        return@retry
+                    }
+                    if (analyzerFatalStall) {
+                        status = "카메라 분석이 멈췄습니다"
+                        detail = "안전하게 복구하려면 앱을 완전히 종료한 뒤 다시 실행해 주세요"
                         return@retry
                     }
                     cameraAvailable = true
@@ -2493,6 +2589,87 @@ internal fun shouldBindCameraAnalysisUseCase(
     cameraEnabled: Boolean,
     analysisEnabled: Boolean
 ): Boolean = cameraEnabled && analysisEnabled
+
+internal fun canRetryCamera(
+    cameraAvailable: Boolean,
+    hasCameraPermission: Boolean,
+    noCameraHardware: Boolean,
+    analyzerFatalStall: Boolean
+): Boolean =
+    !cameraAvailable && hasCameraPermission && !noCameraHardware && !analyzerFatalStall
+
+internal fun canPreviewCamera(
+    modelError: Throwable?,
+    storeError: Throwable?,
+    hasCameraPermission: Boolean,
+    cameraAvailable: Boolean,
+    noCameraHardware: Boolean,
+    analyzerFatalStall: Boolean
+): Boolean =
+    modelError == null &&
+        storeError == null &&
+        hasCameraPermission &&
+        cameraAvailable &&
+        !noCameraHardware &&
+        !analyzerFatalStall
+
+internal fun shouldRetryCameraAnalysis(
+    analysisExpected: Boolean,
+    nowMillis: Long,
+    watchStartedAtMillis: Long,
+    lastAnalysisAtMillis: Long,
+    lastRetryAtMillis: Long,
+    stallMillis: Long = CAMERA_ANALYSIS_STALL_MS,
+    retryCooldownMillis: Long = CAMERA_WATCHDOG_RETRY_COOLDOWN_MS
+): Boolean {
+    if (!analysisExpected || watchStartedAtMillis <= 0L) return false
+    if (lastRetryAtMillis > 0L && nowMillis - lastRetryAtMillis < retryCooldownMillis) return false
+    val lastActivityAt = max(watchStartedAtMillis, lastAnalysisAtMillis)
+    return nowMillis - lastActivityAt >= stallMillis
+}
+
+internal enum class CameraAnalysisWatchdogAction { None, RebindCamera, FailVisible }
+
+internal fun cameraAnalysisWatchdogAction(
+    analysisExpected: Boolean,
+    nowMillis: Long,
+    watchStartedAtMillis: Long,
+    lastAnalysisAtMillis: Long,
+    lastRetryAtMillis: Long,
+    processingInFlight: Boolean,
+    processingInFlightStartedAtMillis: Long = 0L,
+    rebindAttemptCount: Int = 0,
+    stallMillis: Long = CAMERA_ANALYSIS_STALL_MS,
+    retryCooldownMillis: Long = CAMERA_WATCHDOG_RETRY_COOLDOWN_MS,
+    maxRebindAttempts: Int = CAMERA_WATCHDOG_MAX_REBIND_ATTEMPTS,
+    analyzerFatalStallMillis: Long = CAMERA_ANALYZER_FATAL_STALL_MS
+): CameraAnalysisWatchdogAction {
+    if (!shouldRetryCameraAnalysis(
+            analysisExpected = analysisExpected,
+            nowMillis = nowMillis,
+            watchStartedAtMillis = watchStartedAtMillis,
+            lastAnalysisAtMillis = lastAnalysisAtMillis,
+            lastRetryAtMillis = lastRetryAtMillis,
+            stallMillis = stallMillis,
+            retryCooldownMillis = retryCooldownMillis
+        )
+    ) {
+        return CameraAnalysisWatchdogAction.None
+    }
+    if (processingInFlight) {
+        if (processingInFlightStartedAtMillis <= 0L) return CameraAnalysisWatchdogAction.None
+        return if (nowMillis - processingInFlightStartedAtMillis >= analyzerFatalStallMillis) {
+            CameraAnalysisWatchdogAction.FailVisible
+        } else {
+            CameraAnalysisWatchdogAction.None
+        }
+    }
+    return if (rebindAttemptCount >= maxRebindAttempts) {
+        CameraAnalysisWatchdogAction.FailVisible
+    } else {
+        CameraAnalysisWatchdogAction.RebindCamera
+    }
+}
 
 internal fun shouldReturnToOperationOnLifecyclePause(adminPromptInFlight: Boolean): Boolean =
     !adminPromptInFlight

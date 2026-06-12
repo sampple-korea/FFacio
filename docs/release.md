@@ -1,5 +1,12 @@
 # FFacio Release Notes
 
+## Android 0.3.15
+
+- Adds an Android camera-analysis watchdog for real-device enrollment/auth stability.
+- If analysis frames stop arriving while the app expects face analysis, the app automatically rebinds the CameraX pipeline for camera-feed stalls and then fails visibly after repeated unsuccessful recovery attempts.
+- If the analyzer thread itself remains stuck inside a frame for an extended window, the app fails visibly and asks for a full restart instead of racing native face-engine cleanup.
+- Adds unit coverage for the watchdog stall/cooldown decision, repeated camera-feed stalls, and sustained analyzer hangs.
+
 ## Android 0.3.14
 
 - Adds an Android admin relay connection test for real door-terminal setup.
