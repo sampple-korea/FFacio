@@ -1199,13 +1199,14 @@ private fun FFacioApp(
         if (relayUrl.isEmpty() || relayToken.isEmpty()) {
             doorArmed = false
             prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).apply()
-            status = "문 제어가 설정되지 않았습니다"
-            detail = "릴레이 URL과 토큰을 저장한 뒤 다시 활성화하세요"
+            accessFeedback = AccessFeedback(AccessFeedbackKind.AuthOnly, user.name)
+            status = welcomeStatus(user.name)
+            detail = "문 제어는 릴레이 URL과 토큰 설정 후 사용할 수 있습니다"
             return
         }
         if (!processDoorRequestGate.tryStart(doorArmed = doorArmed, nowMillis = SystemClock.elapsedRealtime())) return
         accessFeedback = AccessFeedback(AccessFeedbackKind.DoorPending, user.name)
-        status = "인증 완료 · 문 열림 요청"
+        status = welcomeStatus(user.name)
         detail = "인증 승인 · 릴레이 응답을 기다리고 있습니다"
         try {
             doorExecutor.execute {
@@ -1408,7 +1409,12 @@ private fun FFacioApp(
         }
         val user = users[match.index]
         recordAuthDecision(user.name, "승인", "score/support/liveness/stability 통과", match)
-        val shouldOpenDoor = doorArmed
+        val doorConfigured = doorRelayConfigured(doorUrl, doorToken)
+        if (doorArmed && !doorConfigured) {
+            doorArmed = false
+            prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).apply()
+        }
+        val shouldOpenDoor = doorArmed && doorConfigured
         authResultHoldUntil = System.currentTimeMillis() + AUTH_RESULT_HOLD_MS
         guideState = if (shouldOpenDoor) FaceGuideState.Center else FaceGuideState.Approved
         accessFeedback = if (shouldOpenDoor) {
@@ -1417,8 +1423,12 @@ private fun FFacioApp(
             AccessFeedback(AccessFeedbackKind.AuthOnly, user.name)
         }
         if (!shouldOpenDoor) recordApproval(user.name, "승인")
-        status = "인증 완료"
-        detail = if (shouldOpenDoor) "인증 승인 · 릴레이 결과를 기다리고 있습니다" else "인증 승인 · 최근 승인 로그에 기록했습니다"
+        status = welcomeStatus(user.name)
+        detail = when {
+            shouldOpenDoor -> "인증 승인 · 릴레이 결과를 기다리고 있습니다"
+            !doorConfigured -> "문 제어는 릴레이 URL과 토큰 설정 후 사용할 수 있습니다"
+            else -> "인증 승인 · 최근 승인 로그에 기록했습니다"
+        }
         resetTransient()
         openDoor(user)
     }
@@ -2139,7 +2149,7 @@ private fun OperationPanel(
                             Text(accessFeedbackSymbol(feedback.kind), color = ComposeColor.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(accessFeedbackTitle(feedback.kind), color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.Bold)
+                            Text(accessFeedbackTitle(feedback), color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.Bold)
                             Text(
                                 accessFeedbackPublicMessage(feedback),
                                 color = accessFeedbackText(feedback.kind),
@@ -2258,7 +2268,7 @@ private fun ControlPanel(
                             Text(accessFeedbackSymbol(feedback.kind), color = ComposeColor.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(accessFeedbackTitle(feedback.kind), color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.Bold)
+                            Text(accessFeedbackTitle(feedback), color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.Bold)
                             Text(
                                 accessFeedbackMessage(feedback),
                                 color = accessFeedbackText(feedback.kind),
@@ -3633,16 +3643,16 @@ internal fun accessFeedbackSymbol(kind: AccessFeedbackKind): String = when (kind
     AccessFeedbackKind.DoorFailed -> "!"
 }
 
-internal fun accessFeedbackTitle(kind: AccessFeedbackKind): String = when (kind) {
-    AccessFeedbackKind.AuthOnly -> "인증 승인"
-    AccessFeedbackKind.DoorPending -> "문 열림 요청 중"
-    AccessFeedbackKind.DoorSucceeded -> "문 열림 완료"
+internal fun accessFeedbackTitle(feedback: AccessFeedback): String = when (feedback.kind) {
+    AccessFeedbackKind.AuthOnly -> welcomeStatus(feedback.userName)
+    AccessFeedbackKind.DoorPending -> welcomeStatus(feedback.userName)
+    AccessFeedbackKind.DoorSucceeded -> welcomeStatus(feedback.userName)
     AccessFeedbackKind.DoorFailed -> "문 제어 실패"
 }
 
 private fun accessFeedbackMessage(feedback: AccessFeedback): String = when (feedback.kind) {
-    AccessFeedbackKind.AuthOnly -> "${feedback.userName}님 얼굴 인증이 완료되었습니다"
-    AccessFeedbackKind.DoorPending -> "${feedback.userName}님 승인 · 릴레이 응답을 기다리고 있습니다"
+    AccessFeedbackKind.AuthOnly -> "얼굴 인증이 완료되었습니다"
+    AccessFeedbackKind.DoorPending -> "인증 승인 · 릴레이 응답을 기다리고 있습니다"
     AccessFeedbackKind.DoorSucceeded -> "릴레이가 문 열림 요청을 수락했습니다"
     AccessFeedbackKind.DoorFailed -> "얼굴 인증은 통과했지만 릴레이 요청이 실패했습니다"
 }
@@ -3653,6 +3663,11 @@ internal fun accessFeedbackPublicMessage(feedback: AccessFeedback): String = whe
     AccessFeedbackKind.DoorSucceeded -> "릴레이가 문 열림 요청을 수락했습니다"
     AccessFeedbackKind.DoorFailed -> "얼굴 인증은 통과했지만 릴레이 요청이 실패했습니다"
 }
+
+internal fun welcomeStatus(userName: String): String = "환영합니다, ${userName}님"
+
+internal fun doorRelayConfigured(doorUrl: String, doorToken: String): Boolean =
+    doorUrl.trim().isNotEmpty() && doorToken.trim().isNotEmpty()
 
 internal fun approvalPublicSummary(entry: ApprovalLogEntry): String =
     "최근 출입 이벤트 · ${entry.result}"

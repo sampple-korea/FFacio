@@ -1,5 +1,11 @@
 # FFacio Android Release Notes
 
+## Android 0.4.1
+
+- Shows a clear welcome message with the accepted user's name after successful face authentication.
+- Keeps door relay setup problems as secondary guidance instead of replacing the successful authentication state.
+- Treats an armed-but-unconfigured relay as authentication-only, so a missing relay URL/token does not make a valid face approval look like a failure.
+
 ## Android 0.4.0
 
 - Makes enrollment guidance more Face ID-like by turning the camera guide ring into the primary registration progress surface.

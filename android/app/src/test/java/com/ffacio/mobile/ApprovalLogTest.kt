@@ -123,20 +123,32 @@ class ApprovalLogTest {
     @Test
     fun relayPendingIsNotRenderedAsFinalSuccess() {
         assertEquals("…", accessFeedbackSymbol(AccessFeedbackKind.DoorPending))
-        assertEquals("문 열림 요청 중", accessFeedbackTitle(AccessFeedbackKind.DoorPending))
+        assertEquals("환영합니다, 민수님", accessFeedbackTitle(AccessFeedback(AccessFeedbackKind.DoorPending, "민수")))
         assertEquals("✓", accessFeedbackSymbol(AccessFeedbackKind.DoorSucceeded))
-        assertEquals("문 열림 완료", accessFeedbackTitle(AccessFeedbackKind.DoorSucceeded))
+        assertEquals("환영합니다, 민수님", accessFeedbackTitle(AccessFeedback(AccessFeedbackKind.DoorSucceeded, "민수")))
     }
 
     @Test
-    fun publicOperationFeedbackDoesNotExposeUserNameOrTime() {
+    fun publicOperationFeedbackWelcomesAcceptedUserButHidesApprovalTime() {
         val feedback = AccessFeedback(AccessFeedbackKind.AuthOnly, "민수")
         val summary = approvalPublicSummary(ApprovalLogEntry("09:31:15", "민수", "승인"))
 
+        assertEquals("환영합니다, 민수님", accessFeedbackTitle(feedback))
         assertEquals("얼굴 인증이 완료되었습니다", accessFeedbackPublicMessage(feedback))
         assertEquals("최근 출입 이벤트 · 승인", summary)
-        assertEquals(false, accessFeedbackPublicMessage(feedback).contains("민수"))
         assertEquals(false, summary.contains("민수"))
         assertEquals(false, summary.contains("09:31:15"))
+    }
+
+    @Test
+    fun doorRelayConfiguredRequiresUrlAndToken() {
+        assertEquals(true, doorRelayConfigured("https://relay.example/open", "token"))
+        assertEquals(false, doorRelayConfigured("", "token"))
+        assertEquals(false, doorRelayConfigured("https://relay.example/open", ""))
+    }
+
+    @Test
+    fun welcomeStatusUsesAcceptedUserName() {
+        assertEquals("환영합니다, 민수님", welcomeStatus("민수"))
     }
 }
