@@ -66,6 +66,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -194,6 +195,7 @@ private const val APPROVAL_LOG_LIMIT = 8
 private const val AUTH_DECISION_LOG_LIMIT = 8
 private const val AUTH_DECISION_LOG_DEDUPE_MS = 2500L
 private const val ADMIN_SESSION_TIMEOUT_MS = 120_000L
+private const val ADMIN_FACE_AUTH_TIMEOUT_MS = 30_000L
 private const val ENROLLMENT_IDLE_TIMEOUT_MS = 60_000L
 
 class MainActivity : ComponentActivity() {
@@ -376,7 +378,8 @@ private fun FFacioApp(
     var doorArmed by remember { mutableStateOf(prefs.getBoolean(DOOR_ENABLED_KEY, false)) }
     var doorTestInFlight by remember { mutableStateOf(false) }
     var doorTestRequestId by remember { mutableLongStateOf(0L) }
-    var passiveLivenessEnabled by remember { mutableStateOf(false) }
+    var passiveLivenessEnabled by remember { mutableStateOf(prefs.getBoolean(PASSIVE_LIVENESS_ENABLED_KEY, false)) }
+    var pendingPassiveLivenessEnabled by remember { mutableStateOf<Boolean?>(null) }
     var cameraAvailable by remember { mutableStateOf(true) }
     var noCameraHardware by remember { mutableStateOf(false) }
     var analyzerFatalStall by remember { mutableStateOf(false) }
@@ -388,7 +391,9 @@ private fun FFacioApp(
     var touchExplorationEnabled by remember { mutableStateOf(isTouchExplorationEnabled(context)) }
     var confirmDelete by remember { mutableStateOf(false) }
     var pendingDeleteUserIndex by remember { mutableIntStateOf(-1) }
+    var pendingHeadAdminUserIndex by remember { mutableIntStateOf(-1) }
     var pendingAdminAction by remember { mutableStateOf<AdminAction?>(null) }
+    var adminFaceAuthExpiresAt by remember { mutableLongStateOf(0L) }
     val enrollSamples = remember { mutableStateListOf<FloatArray>() }
     val enrollPoses = remember { mutableStateListOf<Int>() }
     val approvalLogs = remember { mutableStateListOf<ApprovalLogEntry>() }
@@ -435,9 +440,6 @@ private fun FFacioApp(
                 applyDoorTerminalSystemUi(window = window, immersive = false)
             }
         }
-    }
-    LaunchedEffect(Unit) {
-        prefs.edit().remove(PASSIVE_LIVENESS_ENABLED_KEY).apply()
     }
     LaunchedEffect(authResultHoldUntil) {
         val remaining = authResultHoldUntil - System.currentTimeMillis()
@@ -538,6 +540,31 @@ private fun FFacioApp(
             }
         }
     }
+    LaunchedEffect(mode, adminFaceAuthExpiresAt, pendingAdminAction) {
+        if (mode == AppMode.AdminAuth && pendingAdminAction != null && adminFaceAuthExpiresAt > 0L) {
+            val remaining = adminFaceAuthExpiresAt - SystemClock.elapsedRealtime()
+            if (remaining > 0L) delay(remaining)
+            if (mode == AppMode.AdminAuth && pendingAdminAction != null && SystemClock.elapsedRealtime() >= adminFaceAuthExpiresAt) {
+                pendingAdminAction = null
+                adminFaceAuthExpiresAt = 0L
+                adminPromptInFlight = false
+                invalidateDoorRelayTest()
+                appScreen = AppScreen.Operation
+                mode = AppMode.Auth
+                adminSessionExpiresAt = 0L
+                enrollmentExpiresAt = 0L
+                authResultHoldUntil = 0L
+                liveCandidate = -1
+                stableUser = -1
+                stableCount = 0
+                pendingDeleteUserIndex = -1
+                pendingHeadAdminUserIndex = -1
+                liveness.reset()
+                status = "Head Admin 확인 시간이 초과되었습니다"
+                detail = "관리 버튼을 다시 눌러 Head Admin 얼굴 인증을 시작해 주세요"
+            }
+        }
+    }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         hasCameraPermission = it
         if (!it) {
@@ -545,13 +572,10 @@ private fun FFacioApp(
             detail = "앱 설정에서 카메라 권한을 허용해 주세요"
         }
     }
+    var testDoorRelayHealth: () -> Unit = {}
 
-    val adminLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        val action = pendingAdminAction
-        pendingAdminAction = null
-        adminPromptInFlight = false
-        if (it.resultCode == Activity.RESULT_OK && action != null) {
-            adminSessionExpiresAt = SystemClock.elapsedRealtime() + ADMIN_SESSION_TIMEOUT_MS
+    fun completeAdminAction(action: AdminAction) {
+        adminSessionExpiresAt = SystemClock.elapsedRealtime() + ADMIN_SESSION_TIMEOUT_MS
             when (action) {
                 AdminAction.OpenAdmin -> {
                     appScreen = AppScreen.Admin
@@ -602,14 +626,14 @@ private fun FFacioApp(
                     if (deleteIndex !in users.indices) {
                         status = "삭제할 사용자를 찾을 수 없습니다"
                         detail = "등록 사용자 목록을 다시 확인해 주세요"
-                        return@rememberLauncherForActivityResult
+                        return
                     }
                     val deleteName = users[deleteIndex].name
                     val nextUsers = removeRegisteredUserAt(users.toList(), deleteIndex)
                         ?: run {
                             status = "삭제할 사용자를 찾을 수 없습니다"
                             detail = "등록 사용자 목록을 다시 확인해 주세요"
-                            return@rememberLauncherForActivityResult
+                            return
                         }
                     storageBusy = true
                     status = "등록 사용자 삭제 중"
@@ -674,6 +698,75 @@ private fun FFacioApp(
                         }
                     }
                 }
+                AdminAction.SetHeadAdmin -> {
+                    val targetIndex = pendingHeadAdminUserIndex
+                    pendingHeadAdminUserIndex = -1
+                    if (targetIndex !in users.indices) {
+                        status = "Head Admin을 설정할 수 없습니다"
+                        detail = "등록 사용자 목록을 다시 확인해 주세요"
+                        return
+                    }
+                    if (!users[targetIndex].isCompatible()) {
+                        status = "Head Admin을 설정할 수 없습니다"
+                        detail = "이 사용자는 현재 얼굴 인식 모델과 호환되지 않습니다. 다시 등록해 주세요"
+                        return
+                    }
+                    val targetName = users[targetIndex].name
+                    val nextUsers = users.mapIndexed { index, user -> if (index == targetIndex) user.copy(isHeadAdmin = true) else user }
+                    storageBusy = true
+                    status = "Head Admin 설정 중"
+                    detail = "$targetName 사용자에게 관리자 권한을 저장하고 있습니다"
+                    appScope.launch {
+                        val saved = withContext(Dispatchers.IO) { runCatching { saveUsers(context, prefs, nextUsers) } }
+                        if (!active.get()) return@launch
+                        storageBusy = false
+                        saved.onSuccess {
+                            storeError = null
+                            appScreen = AppScreen.Admin
+                            users.replaceWith(nextUsers)
+                            status = "Head Admin 설정 완료"
+                            detail = "$targetName 사용자의 얼굴로도 관리자 진입과 등록 작업을 승인할 수 있습니다"
+                        }.onFailure {
+                            storeError = it
+                            status = "Head Admin을 저장할 수 없습니다"
+                            detail = "암호화된 얼굴 템플릿 저장소 업데이트에 실패했습니다"
+                        }
+                    }
+                }
+                AdminAction.ClearHeadAdmin -> {
+                    val targetIndex = pendingHeadAdminUserIndex
+                    pendingHeadAdminUserIndex = -1
+                    if (targetIndex !in users.indices || !users[targetIndex].isHeadAdmin) {
+                        status = "해제할 Head Admin을 찾을 수 없습니다"
+                        detail = "등록 사용자 목록을 다시 확인해 주세요"
+                        return
+                    }
+                    val targetName = users[targetIndex].name
+                    val nextUsers = users.mapIndexed { index, user -> if (index == targetIndex) user.copy(isHeadAdmin = false) else user }
+                    storageBusy = true
+                    status = "Head Admin 해제 중"
+                    detail = "$targetName 사용자의 관리자 권한을 해제하고 있습니다"
+                    appScope.launch {
+                        val saved = withContext(Dispatchers.IO) { runCatching { saveUsers(context, prefs, nextUsers) } }
+                        if (!active.get()) return@launch
+                        storageBusy = false
+                        saved.onSuccess {
+                            storeError = null
+                            appScreen = AppScreen.Admin
+                            users.replaceWith(nextUsers)
+                            status = "Head Admin 해제 완료"
+                            detail = if (hasHeadAdmin(nextUsers)) {
+                                "남은 Head Admin 얼굴로 계속 관리자 작업을 승인할 수 있습니다"
+                            } else {
+                                "새 Head Admin을 설정하기 전까지 초기 설정은 Android 화면잠금으로 진행합니다"
+                            }
+                        }.onFailure {
+                            storeError = it
+                            status = "Head Admin을 해제할 수 없습니다"
+                            detail = "암호화된 얼굴 템플릿 저장소 업데이트에 실패했습니다"
+                        }
+                    }
+                }
                 AdminAction.UnlockStore -> {
                     storageBusy = true
                     status = "로컬 템플릿을 여는 중입니다"
@@ -733,6 +826,12 @@ private fun FFacioApp(
                         }
                         if (!active.get()) return@launch
                         storageBusy = false
+                        if (reset.isFailure) {
+                            storeError = IllegalStateException("Local template reset could not be saved", reset.exceptionOrNull())
+                            status = "로컬 템플릿 초기화 실패"
+                            detail = "기기 저장소 상태를 확인한 뒤 다시 시도하세요"
+                            return@launch
+                        }
                         users.clear()
                         approvalLogs.clear()
                         authDecisionLogs.clear()
@@ -748,12 +847,6 @@ private fun FFacioApp(
                         doorConfigError = null
                         doorArmed = false
                         invalidateDoorRelayTest()
-                        if (reset.isFailure) {
-                            storeError = IllegalStateException("Local template reset could not be saved", reset.exceptionOrNull())
-                            status = "로컬 템플릿 초기화 실패"
-                            detail = "현재 세션의 인증과 문 제어 상태는 비웠습니다. 기기 저장소 상태를 확인한 뒤 다시 시도하세요"
-                            return@launch
-                        }
                         storeError = null
                         appScreen = AppScreen.Admin
                         status = "로컬 템플릿 저장소 초기화 완료"
@@ -772,9 +865,14 @@ private fun FFacioApp(
                                 if (relayUrl.isEmpty()) error("릴레이 URL이 필요합니다")
                                 if (relayToken.isEmpty()) error("릴레이 토큰이 필요합니다")
                                 if (URL(relayUrl).protocol.lowercase() != "https") error("HTTPS 릴레이 URL만 사용할 수 있습니다")
-                                if (!prefs.edit().putString(DOOR_URL_KEY, relayUrl).commit()) error("릴레이 URL을 저장하지 못했습니다")
                                 securePutString(context, prefs, DOOR_TOKEN_KEY, relayToken)
-                                if (!prefs.edit().putBoolean(DOOR_ENABLED_KEY, true).commit()) error("릴레이 활성화 상태를 저장하지 못했습니다")
+                                if (!prefs.edit()
+                                        .putString(DOOR_URL_KEY, relayUrl)
+                                        .putBoolean(DOOR_ENABLED_KEY, true)
+                                        .commit()
+                                ) {
+                                    error("릴레이 URL과 활성화 상태를 저장하지 못했습니다")
+                                }
                             }
                         }
                         if (!active.get()) return@launch
@@ -787,15 +885,33 @@ private fun FFacioApp(
                             detail = "얼굴 인증과 라이브니스 확인을 모두 통과한 뒤에만 요청합니다"
                         } else {
                             doorArmed = false
-                            prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).apply()
+                            val rollbackSaved = prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).commit()
                             doorConfigError = saved.exceptionOrNull()
                             status = "릴레이 설정을 저장할 수 없습니다"
-                            detail = saved.exceptionOrNull()?.message ?: "암호화된 릴레이 토큰 저장에 실패했습니다"
+                            detail = if (rollbackSaved) {
+                                saved.exceptionOrNull()?.message ?: "암호화된 릴레이 토큰 저장에 실패했습니다"
+                            } else {
+                                "릴레이 저장에 실패했고 비활성화 상태 저장도 확인하지 못했습니다. 앱을 재시작해 설정 상태를 확인해 주세요"
+                            }
                             liveCandidate = -1
                             stableUser = -1
                             stableCount = 0
                             liveness.reset()
                         }
+                    }
+                }
+                AdminAction.DisarmDoor -> {
+                    appScreen = AppScreen.Admin
+                    if (prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).commit()) {
+                        doorArmed = false
+                        invalidateDoorRelayTest()
+                        doorConfigError = null
+                        status = "문 열림 릴레이 비활성화 완료"
+                        detail = "얼굴 인증은 계속 진행되지만 릴레이 요청은 보내지 않습니다"
+                    } else {
+                        doorConfigError = IllegalStateException("릴레이 비활성화 상태를 저장하지 못했습니다")
+                        status = "릴레이를 끌 수 없습니다"
+                        detail = "저장소 업데이트에 실패해 문 열림 설정을 유지했습니다"
                     }
                 }
                 AdminAction.UnlockDoor -> {
@@ -824,22 +940,82 @@ private fun FFacioApp(
                         }
                     }
                 }
+                AdminAction.TestDoorRelay -> {
+                    appScreen = AppScreen.Admin
+                    testDoorRelayHealth()
+                }
+                AdminAction.SetPassiveLiveness -> {
+                    val nextEnabled = pendingPassiveLivenessEnabled
+                    pendingPassiveLivenessEnabled = null
+                    if (nextEnabled == null) {
+                        status = "실제 얼굴 체크 설정을 바꿀 수 없습니다"
+                        detail = "설정 값을 다시 선택해 주세요"
+                        return
+                    }
+                    if (nextEnabled && engineProvider()?.hasPassiveLiveness() != true) {
+                        val saved = prefs.edit().putBoolean(PASSIVE_LIVENESS_ENABLED_KEY, false).commit()
+                        passiveLivenessEnabled = false
+                        liveCandidate = -1
+                        stableUser = -1
+                        stableCount = 0
+                        liveness.reset()
+                        status = if (saved) "좌우 얼굴 돌리기 모드" else "실제 얼굴 체크 설정을 저장할 수 없습니다"
+                        detail = if (saved) {
+                            "선택형 사진/화면 차단 모델을 사용할 수 없어 기본 챌린지로 계속합니다"
+                        } else {
+                            "선택형 모델을 사용할 수 없고 설정 저장에도 실패했습니다. 앱을 재시작해 상태를 확인해 주세요"
+                        }
+                        return
+                    }
+                    if (!prefs.edit().putBoolean(PASSIVE_LIVENESS_ENABLED_KEY, nextEnabled).commit()) {
+                        status = "실제 얼굴 체크 설정을 저장할 수 없습니다"
+                        detail = "저장소 업데이트에 실패했습니다. 다시 시도해 주세요"
+                        return
+                    }
+                    passiveLivenessEnabled = nextEnabled
+                    liveCandidate = -1
+                    stableUser = -1
+                    stableCount = 0
+                    liveness.reset()
+                    appScreen = AppScreen.Admin
+                    status = if (nextEnabled) "사진/화면 차단 모델 켜짐" else "좌우 얼굴 돌리기 모드"
+                    detail = if (nextEnabled) "선택 강화 모델을 함께 사용합니다" else "기본 실제 얼굴 확인은 좌우 얼굴 돌리기 챌린지로 진행합니다"
+                }
             }
+    }
+
+    fun cancelAdminAction(message: String = "Head Admin 확인이 취소되었습니다", detailMessage: String = "관리 작업에는 Head Admin 얼굴 인증이 필요합니다") {
+        adminPromptInFlight = false
+        pendingAdminAction = null
+        adminFaceAuthExpiresAt = 0L
+        invalidateDoorRelayTest()
+        appScreen = AppScreen.Operation
+        mode = AppMode.Auth
+        adminSessionExpiresAt = 0L
+        enrollmentExpiresAt = 0L
+        authResultHoldUntil = 0L
+        liveCandidate = -1
+        stableUser = -1
+        stableCount = 0
+        pendingDeleteUserIndex = -1
+        pendingHeadAdminUserIndex = -1
+        pendingPassiveLivenessEnabled = null
+        liveness.reset()
+        status = message
+        detail = detailMessage
+    }
+
+    val adminLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        val action = pendingAdminAction
+        pendingAdminAction = null
+        adminPromptInFlight = false
+        if (it.resultCode == Activity.RESULT_OK && action != null) {
+            completeAdminAction(action)
         } else {
-            adminPromptInFlight = false
-            invalidateDoorRelayTest()
-            appScreen = AppScreen.Operation
-            mode = AppMode.Auth
-            adminSessionExpiresAt = 0L
-            enrollmentExpiresAt = 0L
-            authResultHoldUntil = 0L
-            liveCandidate = -1
-            stableUser = -1
-            stableCount = 0
-            pendingDeleteUserIndex = -1
-            liveness.reset()
-            status = "기기 인증이 취소되었습니다"
-            detail = "등록, 삭제, 문 열림 활성화에는 기기 잠금 해제가 필요합니다"
+            cancelAdminAction(
+                message = "기기 인증이 취소되었습니다",
+                detailMessage = "Head Admin 등록/해제에는 Android 화면잠금 인증이 필요합니다"
+            )
         }
     }
 
@@ -891,6 +1067,11 @@ private fun FFacioApp(
                     invalidateDoorRelayTest()
                     appScreen = AppScreen.Operation
                     mode = AppMode.Auth
+                    pendingAdminAction = null
+                    pendingHeadAdminUserIndex = -1
+                    pendingDeleteUserIndex = -1
+                    pendingPassiveLivenessEnabled = null
+                    adminFaceAuthExpiresAt = 0L
                     adminSessionExpiresAt = 0L
                     enrollmentExpiresAt = 0L
                     enrollmentName = ""
@@ -951,40 +1132,34 @@ private fun FFacioApp(
         if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    fun disableDoorControl() {
-        doorArmed = false
-        invalidateDoorRelayTest()
-        prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).apply()
-        doorConfigError = null
-    }
-
-    fun testDoorRelayHealth() {
-        if (!canTestDoorRelayConfig(doorUrl, doorToken, doorTestInFlight, canMutate = !storageBusy)) return
-        val relayUrl = doorUrl.trim()
-        val relayToken = doorToken.trim()
-        val requestId = doorTestRequestId + 1L
-        doorTestRequestId = requestId
-        doorTestInFlight = true
-        status = "릴레이 연결을 확인하는 중입니다"
-        detail = "이 테스트는 문을 열지 않습니다"
-        appScope.launch {
-            val checked = withContext(Dispatchers.IO) {
-                runCatching {
-                    if (relayUrl.isEmpty()) error("릴레이 URL이 필요합니다")
-                    if (relayToken.isEmpty()) error("릴레이 토큰이 필요합니다")
-                    val healthUrl = doorRelayHealthCheckUrl(relayUrl)
-                    val result = checkDoorRelayHealthUrl(healthUrl, relayToken)
-                    if (!result.accepted) error(result.message)
+    testDoorRelayHealth = {
+        if (canTestDoorRelayConfig(doorUrl, doorToken, doorTestInFlight, canMutate = !storageBusy)) {
+            val relayUrl = doorUrl.trim()
+            val relayToken = doorToken.trim()
+            val requestId = doorTestRequestId + 1L
+            doorTestRequestId = requestId
+            doorTestInFlight = true
+            status = "릴레이 연결을 확인하는 중입니다"
+            detail = "이 테스트는 문을 열지 않습니다"
+            appScope.launch {
+                val checked = withContext(Dispatchers.IO) {
+                    runCatching {
+                        if (relayUrl.isEmpty()) error("릴레이 URL이 필요합니다")
+                        if (relayToken.isEmpty()) error("릴레이 토큰이 필요합니다")
+                        val healthUrl = doorRelayHealthCheckUrl(relayUrl)
+                        val result = checkDoorRelayHealthUrl(healthUrl, relayToken)
+                        if (!result.accepted) error(result.message)
+                    }
                 }
-            }
-            if (!active.get() || requestId != doorTestRequestId || appScreen != AppScreen.Admin) return@launch
-            doorTestInFlight = false
-            checked.onSuccess {
-                status = "릴레이 연결 정상"
-                detail = "릴레이가 안전 테스트 요청을 수락했습니다. 실제 문 열림은 얼굴 인증 후에만 실행됩니다"
-            }.onFailure {
-                status = "릴레이 연결 테스트 실패"
-                detail = it.message ?: "릴레이 주소, 토큰, 장치 상태를 확인하세요"
+                if (!active.get() || requestId != doorTestRequestId || appScreen != AppScreen.Admin) return@launch
+                doorTestInFlight = false
+                checked.onSuccess {
+                    status = "릴레이 연결 정상"
+                    detail = "릴레이가 안전 테스트 요청을 수락했습니다. 실제 문 열림은 얼굴 인증 후에만 실행됩니다"
+                }.onFailure {
+                    status = "릴레이 연결 테스트 실패"
+                    detail = it.message ?: "릴레이 주소, 토큰, 장치 상태를 확인하세요"
+                }
             }
         }
     }
@@ -1056,16 +1231,31 @@ private fun FFacioApp(
     }
 
     fun requestAdmin(action: AdminAction) {
+        if (canAuthorizeAdminActionWithHeadAdminFace(action, users)) {
+            pendingAdminAction = action
+            adminPromptInFlight = false
+            adminFaceAuthExpiresAt = SystemClock.elapsedRealtime() + ADMIN_FACE_AUTH_TIMEOUT_MS
+            appScreen = AppScreen.Operation
+            mode = AppMode.AdminAuth
+            enrollmentExpiresAt = 0L
+            authResultHoldUntil = 0L
+            accessFeedback = null
+            resetTransient()
+            guideState = FaceGuideState.Searching
+            status = "Head Admin 얼굴 인증"
+            detail = "관리 작업을 승인하려면 Head Admin 사용자가 카메라를 바라봐 주세요"
+            return
+        }
         val keyguard = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         if (!keyguard.isDeviceSecure) {
             (context as? Activity)?.window?.let { applyDoorTerminalSystemUi(window = it, immersive = false) }
             status = "기기 잠금 설정이 필요합니다"
-            detail = "등록, 삭제, 문 열림 활성화 전에 Android 화면 잠금을 설정하세요"
+            detail = "Head Admin 등록/해제와 초기 설정에는 Android 화면 잠금이 필요합니다"
             return
         }
         val prompt = keyguard.createConfirmDeviceCredentialIntent(
-            "FFacio 관리자 확인",
-            "로컬 생체 템플릿과 문 제어 설정을 보호합니다"
+            if (requiresAndroidLockForAdminAction(action, users)) "FFacio Head Admin 설정" else "FFacio 초기 관리자 확인",
+            if (requiresAndroidLockForAdminAction(action, users)) "Head Admin 등록/해제를 보호합니다" else "Head Admin이 없을 때만 초기 설정에 사용합니다"
         )
         if (prompt == null) {
             (context as? Activity)?.window?.let { applyDoorTerminalSystemUi(window = it, immersive = false) }
@@ -1074,6 +1264,7 @@ private fun FFacioApp(
             return
         }
         pendingAdminAction = action
+        adminFaceAuthExpiresAt = 0L
         adminPromptInFlight = true
         authResultHoldUntil = 0L
         liveCandidate = -1
@@ -1356,7 +1547,16 @@ private fun FFacioApp(
             return
         }
         val authEmbedding = normalizedEmbedding(obs.embedding)
-        val match = match(authEmbedding, users)
+        val candidateIndices = if (mode == AppMode.AdminAuth) adminAuthCandidateIndices(users) else users.indices.toList()
+        if (candidateIndices.isEmpty()) {
+            resetTransient()
+            guideState = FaceGuideState.Searching
+            status = if (mode == AppMode.AdminAuth) "Head Admin 재설정이 필요합니다" else "사용자 재등록이 필요합니다"
+            detail = if (mode == AppMode.AdminAuth) "호환되는 Head Admin이 없습니다. Android 화면잠금으로 다시 설정해 주세요" else "이전 얼굴 템플릿은 새 ArcFace 모델과 호환되지 않습니다"
+            return
+        }
+        val candidateUsers = candidateIndices.map { users[it] }
+        val match = match(authEmbedding, candidateUsers)
         if (match.index < 0) {
             resetTransient()
             guideState = FaceGuideState.Searching
@@ -1364,7 +1564,8 @@ private fun FFacioApp(
             detail = "조명과 거리를 맞춘 뒤 다시 시도해 주세요"
             return
         }
-        val matchedUser = users[match.index]
+        val matchedUserIndex = candidateIndices[match.index]
+        val matchedUser = users[matchedUserIndex]
         if (!acceptsAuthenticationCandidate(
                 score = match.score,
                 secondScore = match.secondScore,
@@ -1379,8 +1580,8 @@ private fun FFacioApp(
             detail = "등록된 얼굴과 충분히 일치하지 않습니다. 정면과 거리를 맞춰 다시 시도해 주세요"
             return
         }
-        if (liveCandidate != match.index) {
-            liveCandidate = match.index
+        if (liveCandidate != matchedUserIndex) {
+            liveCandidate = matchedUserIndex
             stableUser = -1
             stableCount = 0
             liveness.reset()
@@ -1397,8 +1598,8 @@ private fun FFacioApp(
             detail = "등록된 얼굴 후보의 실제 얼굴 여부를 확인합니다"
             return
         }
-        if (stableUser == match.index) stableCount += 1 else {
-            stableUser = match.index
+        if (stableUser == matchedUserIndex) stableCount += 1 else {
+            stableUser = matchedUserIndex
             stableCount = 1
         }
         if (stableCount < 3) {
@@ -1407,7 +1608,39 @@ private fun FFacioApp(
             detail = "잠시 그대로 유지해 주세요"
             return
         }
-        val user = users[match.index]
+        val user = users[matchedUserIndex]
+        if (mode == AppMode.AdminAuth) {
+            val action = pendingAdminAction
+            when (adminAuthDecision(action, user)) {
+                AdminAuthDecision.Expired -> {
+                    cancelAdminAction(
+                        message = "관리자 요청이 만료되었습니다",
+                        detailMessage = "관리 버튼을 다시 눌러 주세요"
+                    )
+                    return
+                }
+                AdminAuthDecision.Rejected -> {
+                    recordAuthDecision(user.name, "보류", "not head admin", match)
+                    resetTransient()
+                    status = "Head Admin 얼굴이 아닙니다"
+                    detail = "설정된 Head Admin 중 한 명이 카메라를 바라봐 주세요"
+                    return
+                }
+                AdminAuthDecision.Approved -> Unit
+            }
+            val approvedAction = action ?: return
+            pendingAdminAction = null
+            adminFaceAuthExpiresAt = 0L
+            mode = AppMode.Auth
+            recordAuthDecision(user.name, "승인", "head admin face approved", match)
+            recordApproval(user.name, "관리 승인")
+            accessFeedback = AccessFeedback(AccessFeedbackKind.AuthOnly, user.name)
+            status = "Head Admin 확인 완료"
+            detail = "관리 작업을 여는 중입니다"
+            resetTransient()
+            completeAdminAction(approvedAction)
+            return
+        }
         recordAuthDecision(user.name, "승인", "score/support/liveness/stability 통과", match)
         val doorConfigured = doorRelayConfigured(doorUrl, doorToken)
         if (doorArmed && !doorConfigured) {
@@ -1516,6 +1749,7 @@ private fun FFacioApp(
                     status = status,
                     detail = detail,
                     userCount = users.size,
+                    headAdminConfigured = hasHeadAdmin(users),
                     doorArmed = doorArmed,
                     accessFeedback = accessFeedback,
                     approvalLogs = approvalLogs,
@@ -1584,26 +1818,15 @@ private fun FFacioApp(
                     } else if (it) {
                         requestAdmin(AdminAction.ArmDoor)
                     } else {
-                        disableDoorControl()
+                        requestAdmin(AdminAction.DisarmDoor)
                     }
                 },
                 onTestDoorRelay = {
-                    testDoorRelayHealth()
+                    requestAdmin(AdminAction.TestDoorRelay)
                 },
                 onPassiveLivenessEnabled = passiveToggle@{
-                    if (it && engineProvider()?.hasPassiveLiveness() != true) {
-                        passiveLivenessEnabled = false
-                        prefs.edit().remove(PASSIVE_LIVENESS_ENABLED_KEY).apply()
-                        resetTransient()
-                        status = "좌우 얼굴 돌리기 모드"
-                        detail = "선택형 사진/화면 차단 모델을 사용할 수 없어 기본 챌린지로 계속합니다"
-                        return@passiveToggle
-                    }
-                    passiveLivenessEnabled = it
-                    prefs.edit().remove(PASSIVE_LIVENESS_ENABLED_KEY).apply()
-                    resetTransient()
-                    status = if (it) "사진/화면 차단 모델 켜짐" else "좌우 얼굴 돌리기 모드"
-                    detail = if (it) "선택 강화 모델을 함께 사용합니다" else "기본 실제 얼굴 확인은 좌우 얼굴 돌리기 챌린지로 진행합니다"
+                    pendingPassiveLivenessEnabled = it
+                    requestAdmin(AdminAction.SetPassiveLiveness)
                 },
                 onEnroll = enroll@{
                     blockedReason()?.let {
@@ -1642,6 +1865,14 @@ private fun FFacioApp(
                 },
                 onDeleteUser = { index ->
                     pendingDeleteUserIndex = index
+                },
+                onSetHeadAdmin = { index ->
+                    pendingHeadAdminUserIndex = index
+                    requestAdmin(AdminAction.SetHeadAdmin)
+                },
+                onClearHeadAdmin = { index ->
+                    pendingHeadAdminUserIndex = index
+                    requestAdmin(AdminAction.ClearHeadAdmin)
                 },
                 onUnlockStore = {
                     requestAdmin(AdminAction.UnlockStore)
@@ -1689,7 +1920,9 @@ private fun FFacioApp(
         AlertDialog(
             onDismissRequest = { if (!storageBusy) confirmDelete = false },
             title = { Text("등록 사용자를 삭제할까요?") },
-            text = { Text("이 기기에 저장된 얼굴 템플릿이 삭제됩니다. 이 작업은 되돌릴 수 없습니다.") },
+            text = {
+                Text("이 기기에 저장된 얼굴 템플릿이 삭제됩니다. Head Admin 얼굴 인증 후 실행되며, 작업은 되돌릴 수 없습니다.")
+            },
             confirmButton = {
                 TextButton(
                     enabled = !storageBusy,
@@ -1705,7 +1938,7 @@ private fun FFacioApp(
         AlertDialog(
             onDismissRequest = { if (!storageBusy) pendingDeleteUserIndex = -1 },
             title = { Text("${deleteUser.name} 사용자를 삭제할까요?") },
-            text = { Text("이 사용자의 로컬 얼굴 템플릿을 삭제합니다. 확인 후 Android 화면잠금 인증이 필요합니다.") },
+            text = { Text("이 사용자의 로컬 얼굴 템플릿을 삭제합니다. 확인 후 Head Admin 얼굴 인증이 필요합니다.") },
             confirmButton = {
                 TextButton(
                     enabled = !storageBusy,
@@ -2072,6 +2305,7 @@ private fun OperationPanel(
     status: String,
     detail: String,
     userCount: Int,
+    headAdminConfigured: Boolean,
     doorArmed: Boolean,
     accessFeedback: AccessFeedback?,
     approvalLogs: List<ApprovalLogEntry>,
@@ -2117,8 +2351,10 @@ private fun OperationPanel(
                     Text(
                         if (userCount == 0) {
                             "관리 버튼을 눌러 화면잠금 인증 후 첫 사용자를 등록하세요."
+                        } else if (!headAdminConfigured) {
+                            "관리 버튼을 눌러 Android 화면잠금으로 Head Admin을 설정하세요. 이후 관리 작업은 Head Admin 얼굴로 승인됩니다."
                         } else {
-                            "카메라를 바라보고 화면 안내에 따라 정면, 왼쪽, 오른쪽을 천천히 보여 주세요."
+                            "관리 화면 진입과 새 얼굴 등록은 Head Admin 얼굴 인증으로 승인됩니다."
                         },
                         color = ComposeColor(0xFF6E6E73),
                         fontSize = 14.sp
@@ -2199,6 +2435,8 @@ private fun ControlPanel(
     onAuth: () -> Unit,
     onDelete: () -> Unit,
     onDeleteUser: (Int) -> Unit,
+    onSetHeadAdmin: (Int) -> Unit,
+    onClearHeadAdmin: (Int) -> Unit,
     onUnlockStore: () -> Unit,
     onResetStore: () -> Unit,
     onUnlockDoor: () -> Unit,
@@ -2383,15 +2621,52 @@ private fun ControlPanel(
                     if (users.isEmpty()) {
                         Text("등록된 사용자가 없습니다", color = ComposeColor(0xFF6E6E73), fontSize = 13.sp)
                     } else {
+                        val headAdminConfigured = users.any { it.isCompatible() && it.isHeadAdmin }
+                        if (!headAdminConfigured) {
+                            Surface(color = ComposeColor(0xFFFFF4E5), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    "Head Admin을 1명 이상 설정하세요. 이후 관리자 진입과 등록 승인은 Head Admin 얼굴로 진행됩니다.",
+                                    color = ComposeColor(0xFF8A4B00),
+                                    fontSize = 13.sp,
+                                    modifier = Modifier.padding(12.dp)
+                                )
+                            }
+                        }
                         users.forEachIndexed { index, user ->
+                            Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text(user.name, color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
-                                    Text("로컬 얼굴 템플릿", color = ComposeColor(0xFF6E6E73), fontSize = 12.sp)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Text(user.name, color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
+                                        if (user.isHeadAdmin) {
+                                            Surface(color = ComposeColor(0xFF0071E3), shape = RoundedCornerShape(999.dp)) {
+                                                Text(
+                                                    "Head Admin",
+                                                    color = ComposeColor.White,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    Text(
+                                        if (user.isHeadAdmin) "관리 작업 얼굴 인증 권한 보유" else "로컬 얼굴 템플릿",
+                                        color = if (user.isHeadAdmin) ComposeColor(0xFF248A3D) else ComposeColor(0xFF6E6E73),
+                                        fontSize = 12.sp
+                                    )
                                 }
                                 TextButton(enabled = canMutate, onClick = { onDeleteUser(index) }) {
                                     Text("삭제", color = ComposeColor(0xFFFF3B30))
                                 }
+                            }
+                            OutlinedButton(
+                                onClick = { if (user.isHeadAdmin) onClearHeadAdmin(index) else onSetHeadAdmin(index) },
+                                enabled = canMutate,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(if (user.isHeadAdmin) "Head Admin 해제" else "Head Admin 추가")
+                            }
                             }
                         }
                     }
@@ -2843,9 +3118,24 @@ internal class EnrollmentPoseHold(private val holdMillis: Long = ENROLL_POSE_HOL
     fun progress(): Float = lastProgress
 }
 
-private enum class AppMode { Auth, Enroll }
+private enum class AppMode { Auth, Enroll, AdminAuth }
 private enum class AppScreen { Operation, Admin }
-private enum class AdminAction { OpenAdmin, StartEnroll, DeleteUser, DeleteUsers, UnlockStore, ResetStore, ArmDoor, UnlockDoor }
+internal enum class AdminAction {
+    OpenAdmin,
+    StartEnroll,
+    DeleteUser,
+    DeleteUsers,
+    UnlockStore,
+    ResetStore,
+    ArmDoor,
+    DisarmDoor,
+    UnlockDoor,
+    TestDoorRelay,
+    SetPassiveLiveness,
+    SetHeadAdmin,
+    ClearHeadAdmin
+}
+internal enum class AdminAuthDecision { Approved, Rejected, Expired }
 private enum class FaceGuideState { Searching, Center, TurnLeft, TurnRight, Approved }
 internal enum class AccessFeedbackKind { AuthOnly, DoorPending, DoorSucceeded, DoorFailed }
 private sealed class ModelLoadState {
@@ -2924,7 +3214,8 @@ internal data class UserTemplate(
     val embedding: FloatArray,
     val samples: List<FloatArray> = emptyList(),
     val engineId: String = FACE_ENGINE_ID,
-    val embeddingSize: Int = embedding.size
+    val embeddingSize: Int = embedding.size,
+    val isHeadAdmin: Boolean = false
 ) {
     fun matchingSamples(): List<FloatArray> = samples
     fun matchSampleCount(): Int = matchingSamples().size
@@ -2993,6 +3284,33 @@ internal fun shouldBindCameraAnalysisUseCase(
     cameraEnabled: Boolean,
     analysisEnabled: Boolean
 ): Boolean = cameraEnabled
+
+internal fun hasHeadAdmin(users: List<UserTemplate>): Boolean =
+    users.any { it.isCompatible() && it.isHeadAdmin }
+
+internal fun requiresAndroidLockForAdminAction(action: AdminAction, users: List<UserTemplate>): Boolean = when (action) {
+    AdminAction.SetHeadAdmin, AdminAction.ClearHeadAdmin -> true
+    else -> !hasHeadAdmin(users)
+}
+
+internal fun canAuthorizeAdminActionWithHeadAdminFace(action: AdminAction, users: List<UserTemplate>): Boolean =
+    hasHeadAdmin(users) && !requiresAndroidLockForAdminAction(action, users)
+
+internal fun adminAuthCandidateIndices(users: List<UserTemplate>): List<Int> =
+    users.indices.filter { index -> users[index].isHeadAdmin && users[index].isCompatible() }
+
+internal fun adminAuthDecision(action: AdminAction?, matchedUser: UserTemplate?): AdminAuthDecision = when {
+    action == null -> AdminAuthDecision.Expired
+    matchedUser?.isHeadAdmin == true && matchedUser.isCompatible() -> AdminAuthDecision.Approved
+    else -> AdminAuthDecision.Rejected
+}
+
+internal fun normalizeHeadAdminUsers(users: List<UserTemplate>): List<UserTemplate> {
+    return users.map { user ->
+        val keepHeadAdmin = user.isHeadAdmin && user.isCompatible()
+        if (user.isHeadAdmin == keepHeadAdmin) user else user.copy(isHeadAdmin = keepHeadAdmin)
+    }
+}
 
 internal fun canRetryCamera(
     cameraAvailable: Boolean,
@@ -3221,7 +3539,7 @@ internal fun <T> removeRegisteredUserAt(users: List<T>, index: Int): List<T>? =
 private fun loadUsers(context: Context, prefs: SharedPreferences): StoreLoadResult = runCatching {
     val raw = secureGetString(context, prefs, USERS_KEY, "[]", failClosed = true)
     val array = JSONArray(raw)
-    StoreLoadResult(buildList {
+    StoreLoadResult(normalizeHeadAdminUsers(buildList {
         for (i in 0 until array.length()) {
             val item = array.getJSONObject(i)
             val embedding = normalizedEmbedding(parseEmbeddingArray(item.getJSONArray("embedding")))
@@ -3232,9 +3550,9 @@ private fun loadUsers(context: Context, prefs: SharedPreferences): StoreLoadResu
             } else {
                 emptyList()
             }
-            add(UserTemplate(item.getString("name"), embedding, samples, engineId, embeddingSize))
+            add(UserTemplate(item.getString("name"), embedding, samples, engineId, embeddingSize, item.optBoolean("head_admin", false)))
         }
-    }, null)
+    }), null)
 }.getOrElse { StoreLoadResult(emptyList(), it) }
 
 private fun saveUsers(context: Context, prefs: SharedPreferences, users: List<UserTemplate>) {
@@ -3244,6 +3562,7 @@ private fun saveUsers(context: Context, prefs: SharedPreferences, users: List<Us
         item.put("name", user.name)
         item.put("engine_id", user.engineId)
         item.put("embedding_size", user.embeddingSize)
+        item.put("head_admin", user.isHeadAdmin)
         val values = JSONArray()
         user.embedding.forEach { values.put(it) }
         item.put("embedding", values)
@@ -3311,6 +3630,7 @@ private fun securePutString(context: Context, prefs: SharedPreferences, key: Str
     prefs.edit()
         .putString("$key$SECURE_SUFFIX", Base64.encodeToString(payload, Base64.NO_WRAP))
         .remove("$key$LEGACY_SECURE_SUFFIX")
+        .remove("$key$OLDER_SECURE_SUFFIX")
         .remove(key)
         .commit()
         .also { if (!it) error("Encrypted local store could not be saved") }

@@ -36,6 +36,91 @@ class AdminOperationGateTest {
     }
 
     @Test
+    fun headAdminFaceAuthorizesGeneralAdminActions() {
+        val headAdmin = compatibleUser("head", isHeadAdmin = true)
+
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.OpenAdmin, listOf(headAdmin)))
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.StartEnroll, listOf(headAdmin)))
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.DeleteUser, listOf(headAdmin)))
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.DeleteUsers, listOf(headAdmin)))
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.ResetStore, listOf(headAdmin)))
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.ArmDoor, listOf(headAdmin)))
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.DisarmDoor, listOf(headAdmin)))
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.UnlockDoor, listOf(headAdmin)))
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.UnlockStore, listOf(headAdmin)))
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.TestDoorRelay, listOf(headAdmin)))
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.SetPassiveLiveness, listOf(headAdmin)))
+        assertFalse(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.SetHeadAdmin, listOf(headAdmin)))
+        assertFalse(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.ClearHeadAdmin, listOf(headAdmin)))
+    }
+
+    @Test
+    fun androidLockIsRequiredForHeadAdminSetClearAndInitialSetup() {
+        val regular = compatibleUser("regular", isHeadAdmin = false)
+        val headAdmin = compatibleUser("head", isHeadAdmin = true)
+
+        assertTrue(requiresAndroidLockForAdminAction(AdminAction.OpenAdmin, emptyList()))
+        assertTrue(requiresAndroidLockForAdminAction(AdminAction.OpenAdmin, listOf(regular)))
+        assertTrue(requiresAndroidLockForAdminAction(AdminAction.StartEnroll, listOf(regular)))
+        assertFalse(requiresAndroidLockForAdminAction(AdminAction.OpenAdmin, listOf(headAdmin)))
+        assertFalse(requiresAndroidLockForAdminAction(AdminAction.StartEnroll, listOf(headAdmin)))
+        assertFalse(requiresAndroidLockForAdminAction(AdminAction.ResetStore, listOf(headAdmin)))
+        assertFalse(requiresAndroidLockForAdminAction(AdminAction.DisarmDoor, listOf(headAdmin)))
+        assertFalse(requiresAndroidLockForAdminAction(AdminAction.TestDoorRelay, listOf(headAdmin)))
+        assertFalse(requiresAndroidLockForAdminAction(AdminAction.SetPassiveLiveness, listOf(headAdmin)))
+        assertTrue(requiresAndroidLockForAdminAction(AdminAction.SetHeadAdmin, listOf(headAdmin)))
+        assertTrue(requiresAndroidLockForAdminAction(AdminAction.ClearHeadAdmin, listOf(headAdmin)))
+    }
+
+    @Test
+    fun incompatibleHeadAdminDoesNotAuthorizeAdminActions() {
+        val legacyHeadAdmin = incompatibleUser("legacy", isHeadAdmin = true)
+
+        assertFalse(hasHeadAdmin(listOf(legacyHeadAdmin)))
+        assertTrue(requiresAndroidLockForAdminAction(AdminAction.OpenAdmin, listOf(legacyHeadAdmin)))
+        assertFalse(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.OpenAdmin, listOf(legacyHeadAdmin)))
+    }
+
+    @Test
+    fun adminFaceDecisionApprovesOnlyCompatibleHeadAdmin() {
+        val headAdmin = compatibleUser("head", isHeadAdmin = true)
+        val regular = compatibleUser("regular", isHeadAdmin = false)
+        val legacyHeadAdmin = incompatibleUser("legacy", isHeadAdmin = true)
+
+        assertEquals(AdminAuthDecision.Expired, adminAuthDecision(null, headAdmin))
+        assertEquals(AdminAuthDecision.Rejected, adminAuthDecision(AdminAction.OpenAdmin, null))
+        assertEquals(AdminAuthDecision.Rejected, adminAuthDecision(AdminAction.OpenAdmin, regular))
+        assertEquals(AdminAuthDecision.Rejected, adminAuthDecision(AdminAction.OpenAdmin, legacyHeadAdmin))
+        assertEquals(AdminAuthDecision.Approved, adminAuthDecision(AdminAction.OpenAdmin, headAdmin))
+    }
+
+    @Test
+    fun adminAuthMatchesOnlyCompatibleHeadAdminCandidates() {
+        val regular = compatibleUser("regular", isHeadAdmin = false)
+        val headAdmin = compatibleUser("head", isHeadAdmin = true)
+        val legacyHeadAdmin = incompatibleUser("legacy", isHeadAdmin = true)
+        val secondHeadAdmin = compatibleUser("second", isHeadAdmin = true)
+
+        assertEquals(listOf(1, 3), adminAuthCandidateIndices(listOf(regular, headAdmin, legacyHeadAdmin, secondHeadAdmin)))
+    }
+
+    @Test
+    fun multipleHeadAdminsCanAuthorizeAndAreNormalizedOnLoad() {
+        val headAdmin = compatibleUser("head", isHeadAdmin = true)
+        val secondHeadAdmin = compatibleUser("second", isHeadAdmin = true)
+        val legacyHeadAdmin = incompatibleUser("legacy", isHeadAdmin = true)
+        val regular = compatibleUser("regular", isHeadAdmin = false)
+
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.OpenAdmin, listOf(headAdmin, secondHeadAdmin)))
+
+        val normalized = normalizeHeadAdminUsers(listOf(legacyHeadAdmin, headAdmin, secondHeadAdmin, regular))
+        assertFalse(normalized[0].isHeadAdmin)
+        assertTrue(normalized[1].isHeadAdmin)
+        assertTrue(normalized[2].isHeadAdmin)
+        assertFalse(normalized[3].isHeadAdmin)
+    }
+
+    @Test
     fun adminCanUseCameraOnlyForEnrollment() {
         assertFalse(
             shouldUseCameraForScreen(
@@ -467,5 +552,29 @@ class AdminOperationGateTest {
     @Test
     fun removingRegisteredUserRejectsStaleIndex() {
         assertNull(removeRegisteredUserAt(listOf("alice"), 3))
+    }
+
+    private fun compatibleUser(name: String, isHeadAdmin: Boolean): UserTemplate {
+        val embedding = FloatArray(FACE_EMBEDDING_SIZE) { index -> if (index == 0) 1.0f else 0.0f }
+        return UserTemplate(
+            name = name,
+            embedding = embedding,
+            samples = listOf(embedding.copyOf()),
+            engineId = FACE_ENGINE_ID,
+            embeddingSize = FACE_EMBEDDING_SIZE,
+            isHeadAdmin = isHeadAdmin
+        )
+    }
+
+    private fun incompatibleUser(name: String, isHeadAdmin: Boolean): UserTemplate {
+        val embedding = FloatArray(FACE_EMBEDDING_SIZE) { index -> if (index == 0) 1.0f else 0.0f }
+        return UserTemplate(
+            name = name,
+            embedding = embedding,
+            samples = emptyList(),
+            engineId = "legacy.unknown",
+            embeddingSize = FACE_EMBEDDING_SIZE,
+            isHeadAdmin = isHeadAdmin
+        )
     }
 }

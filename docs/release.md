@@ -1,5 +1,17 @@
 # FFacio Android Release Notes
 
+## Android 0.4.2
+
+- Adds the Head Admin permission model for real door-terminal administration.
+- Admin screen entry, new user enrollment, user deletion, relay/token changes, and other normal admin actions are approved with the Head Admin user's face once a Head Admin is configured.
+- Multiple Head Admin users can be configured; any compatible Head Admin face can approve normal admin actions.
+- Head Admin assignment and removal remain protected by Android screen-lock verification.
+- Adds Head Admin badges and set/change/clear controls to the protected user-management list.
+- Restricts Head Admin face approval to compatible Head Admin templates only, so a similar non-admin user cannot accidentally satisfy an admin prompt.
+- Gates relay disable, relay health test, and optional passive liveness mode changes through the same Head Admin face approval path.
+- Shows operation-screen guidance when registered users exist but no Head Admin is configured yet.
+- Keeps initial setup and recovery paths on Android screen-lock when no compatible Head Admin exists.
+
 ## Android 0.4.1
 
 - Shows a clear welcome message with the accepted user's name after successful face authentication.
