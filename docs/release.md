@@ -1,5 +1,10 @@
 # FFacio Android Release Notes
 
+## Android 0.4.5
+
+- Removes the admin guidance card from the real-use operation screen.
+- Updates the operation-screen subtitle to `Door Access System By sampple-korea`.
+
 ## Android 0.4.4
 
 - Makes the face guide ring track the detected face position and size instead of staying fixed in the center.

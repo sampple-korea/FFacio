@@ -1683,7 +1683,7 @@ private fun FFacioApp(
                 title = {
                     Column {
                         Text("FFacio", fontWeight = FontWeight.Bold)
-                        Text(if (appScreen == AppScreen.Operation) "Door Access" else "관리자 설정", fontSize = 12.sp, color = ComposeColor(0xFF6E6E73))
+                        Text(if (appScreen == AppScreen.Operation) "Door Access System By sampple-korea" else "관리자 설정", fontSize = 12.sp, color = ComposeColor(0xFF6E6E73))
                     }
                 },
                 actions = {
@@ -1768,8 +1768,6 @@ private fun FFacioApp(
                     status = status,
                     detail = detail,
                     userCount = users.size,
-                    headAdminConfigured = hasHeadAdmin(users),
-                    doorArmed = doorArmed,
                     accessFeedback = accessFeedback,
                     approvalLogs = approvalLogs,
                     blockedReason = blockedReason(),
@@ -2422,8 +2420,6 @@ private fun OperationPanel(
     status: String,
     detail: String,
     userCount: Int,
-    headAdminConfigured: Boolean,
-    doorArmed: Boolean,
     accessFeedback: AccessFeedback?,
     approvalLogs: List<ApprovalLogEntry>,
     blockedReason: String?,
@@ -2456,32 +2452,6 @@ private fun OperationPanel(
             if (canRetryCamera) {
                 Button(onClick = onRetryCamera, modifier = Modifier.fillMaxWidth()) {
                     Text("카메라 다시 연결")
-                }
-            }
-            Surface(
-                color = ComposeColor(0xFFF5F5F7),
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("안내", color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
-                    Text(
-                        if (userCount == 0) {
-                            "관리 버튼을 눌러 화면잠금 인증 후 첫 사용자를 등록하세요."
-                        } else if (!headAdminConfigured) {
-                            "관리 버튼을 눌러 Android 화면잠금으로 Head Admin을 설정하세요. 이후 관리 작업은 Head Admin 얼굴로 승인됩니다."
-                        } else {
-                            "관리 화면 진입은 Head Admin 얼굴 인증으로 승인됩니다. 관리자 화면 안의 일반 작업은 바로 실행됩니다."
-                        },
-                        color = ComposeColor(0xFF6E6E73),
-                        fontSize = 14.sp
-                    )
-                    Text(
-                        if (doorArmed) "문 열림 릴레이 활성화됨" else "문 열림 릴레이 비활성화",
-                        color = if (doorArmed) ComposeColor(0xFF248A3D) else ComposeColor(0xFF6E6E73),
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
                 }
             }
             accessFeedback?.let { feedback ->
