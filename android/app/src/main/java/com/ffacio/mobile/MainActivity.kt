@@ -185,6 +185,8 @@ private const val CAMERA_ANALYZER_FATAL_STALL_MS = 20_000L
 private const val ANTISPOOF_THRESHOLD = 0.55f
 private const val AUTH_RESULT_HOLD_MS = 3500L
 private const val APPROVAL_LOG_LIMIT = 8
+private const val AUTH_DECISION_LOG_LIMIT = 8
+private const val AUTH_DECISION_LOG_DEDUPE_MS = 2500L
 private const val ADMIN_SESSION_TIMEOUT_MS = 120_000L
 private const val ENROLLMENT_IDLE_TIMEOUT_MS = 60_000L
 
@@ -384,6 +386,9 @@ private fun FFacioApp(
     val enrollSamples = remember { mutableStateListOf<FloatArray>() }
     val enrollPoses = remember { mutableStateListOf<Int>() }
     val approvalLogs = remember { mutableStateListOf<ApprovalLogEntry>() }
+    val authDecisionLogs = remember { mutableStateListOf<AuthDecisionLogEntry>() }
+    var lastAuthDecisionLogKey by remember { mutableStateOf("") }
+    var lastAuthDecisionLogAt by remember { mutableLongStateOf(0L) }
     var accessFeedback by remember { mutableStateOf<AccessFeedback?>(null) }
     val liveness = remember { LivenessChallenge() }
     var guideState by remember { mutableStateOf(FaceGuideState.Searching) }
@@ -615,6 +620,8 @@ private fun FFacioApp(
                             storeError = null
                             appScreen = AppScreen.Admin
                             users.replaceWith(nextUsers)
+                            approvalLogs.removeAll { it.userName == deleteName }
+                            authDecisionLogs.removeAll { it.userName == deleteName }
                             liveCandidate = -1
                             stableUser = -1
                             stableCount = 0
@@ -645,6 +652,10 @@ private fun FFacioApp(
                             mode = AppMode.Auth
                             enrollmentExpiresAt = 0L
                             users.clear()
+                            approvalLogs.clear()
+                            authDecisionLogs.clear()
+                            lastAuthDecisionLogKey = ""
+                            lastAuthDecisionLogAt = 0L
                             liveCandidate = -1
                             stableUser = -1
                             stableCount = 0
@@ -715,6 +726,10 @@ private fun FFacioApp(
                         if (!active.get()) return@launch
                         storageBusy = false
                         users.clear()
+                        approvalLogs.clear()
+                        authDecisionLogs.clear()
+                        lastAuthDecisionLogKey = ""
+                        lastAuthDecisionLogAt = 0L
                         liveCandidate = -1
                         stableUser = -1
                         stableCount = 0
@@ -980,6 +995,27 @@ private fun FFacioApp(
 
     fun recordApproval(userName: String, result: String) {
         addApprovalLog(approvalLogs, ApprovalLogEntry(formatClock(System.currentTimeMillis()), userName, result))
+    }
+
+    fun recordAuthDecision(userName: String, result: String, reason: String, match: Match?) {
+        val now = System.currentTimeMillis()
+        val entry = AuthDecisionLogEntry(
+            time = formatClock(now),
+            userName = userName,
+            result = result,
+            reason = reason,
+            score = match?.score ?: -1.0,
+            secondScore = match?.secondScore ?: -1.0,
+            supportCount = match?.supportCount ?: 0
+        )
+        val key = authDecisionDedupeKey(entry)
+        if (!shouldRecordAuthDecisionLog(key, now, lastAuthDecisionLogKey, lastAuthDecisionLogAt)) return
+        lastAuthDecisionLogKey = key
+        lastAuthDecisionLogAt = now
+        addAuthDecisionLog(
+            authDecisionLogs,
+            entry
+        )
     }
 
     fun persistUsersAsync(nextUsers: List<UserTemplate>, onSaved: () -> Unit) {
@@ -1311,6 +1347,7 @@ private fun FFacioApp(
                 availableSamples = matchedUser.matchSampleCount()
             )
         ) {
+            recordAuthDecision(matchedUser.name, "보류", authDecisionReason(match, matchedUser.matchSampleCount()), match)
             resetTransient()
             guideState = FaceGuideState.Center
             status = "인증 보류"
@@ -1346,6 +1383,7 @@ private fun FFacioApp(
             return
         }
         val user = users[match.index]
+        recordAuthDecision(user.name, "승인", "score/support/liveness/stability 통과", match)
         val shouldOpenDoor = doorArmed
         authResultHoldUntil = System.currentTimeMillis() + AUTH_RESULT_HOLD_MS
         guideState = if (shouldOpenDoor) FaceGuideState.Center else FaceGuideState.Approved
@@ -1406,6 +1444,9 @@ private fun FFacioApp(
                 cameraRetryNonce = cameraRetryNonce,
                 stageMessage = blockedReason() ?: idleReason() ?: "카메라 준비 중",
                 guideState = guideState,
+                isEnrollmentMode = mode == AppMode.Enroll,
+                enrollmentPoses = enrollPoses.toList(),
+                enrollmentCount = enrollSamples.size,
                 engineProvider = engineProvider,
                 analyzerExecutor = analyzerExecutor,
                 processing = processing,
@@ -1470,6 +1511,7 @@ private fun FFacioApp(
                 passiveLivenessEnabled = passiveLivenessEnabled,
                 accessFeedback = accessFeedback,
                 approvalLogs = approvalLogs,
+                authDecisionLogs = authDecisionLogs,
                 users = users,
                 userCount = users.size,
                 enrollCount = enrollSamples.size,
@@ -1650,6 +1692,9 @@ private fun CameraStage(
     cameraRetryNonce: Int,
     stageMessage: String,
     guideState: FaceGuideState,
+    isEnrollmentMode: Boolean,
+    enrollmentPoses: List<Int>,
+    enrollmentCount: Int,
     engineProvider: () -> MobileFaceEngine?,
     analyzerExecutor: ExecutorService,
     processing: AtomicBoolean,
@@ -1763,6 +1808,15 @@ private fun CameraStage(
             state = guideState,
             modifier = Modifier.align(Alignment.Center)
         )
+        if (enabled && isEnrollmentMode) {
+            EnrollmentPoseRibbon(
+                poses = enrollmentPoses,
+                count = enrollmentCount,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 22.dp, vertical = 10.dp)
+            )
+        }
         if (!enabled) {
             Text(
                 stageMessage,
@@ -1834,6 +1888,60 @@ private fun FaceGuideOverlay(state: FaceGuideState, modifier: Modifier = Modifie
             FaceGuideState.Center -> Text("•", color = ComposeColor.White, fontSize = 54.sp, fontWeight = FontWeight.Bold)
             FaceGuideState.Searching -> Text("", color = ComposeColor.White)
         }
+    }
+}
+
+@Composable
+private fun EnrollmentPoseRibbon(
+    poses: List<Int>,
+    count: Int,
+    modifier: Modifier = Modifier
+) {
+    val collected = poses.toSet()
+    Surface(
+        color = ComposeColor.Black.copy(alpha = 0.58f),
+        shape = RoundedCornerShape(18.dp),
+        modifier = modifier.fillMaxWidth(0.92f)
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                EnrollmentPoseDot("정면", collected.contains(0), Modifier.weight(1f))
+                EnrollmentPoseDot("왼쪽", collected.contains(-1), Modifier.weight(1f))
+                EnrollmentPoseDot("오른쪽", collected.contains(1), Modifier.weight(1f))
+            }
+            LinearProgressIndicator(
+                progress = { (count.toFloat() / ENROLL_SAMPLES.toFloat()).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth(),
+                color = ComposeColor(0xFF30D158),
+                trackColor = ComposeColor.White.copy(alpha = 0.22f)
+            )
+            Text(
+                "얼굴을 천천히 좌우로 돌려 주세요 · $count/$ENROLL_SAMPLES",
+                color = ComposeColor.White.copy(alpha = 0.92f),
+                fontSize = 11.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+@Composable
+private fun EnrollmentPoseDot(label: String, collected: Boolean, modifier: Modifier = Modifier) {
+    val fill by animateColorAsState(
+        targetValue = if (collected) ComposeColor(0xFF30D158) else ComposeColor.White.copy(alpha = 0.18f),
+        animationSpec = tween(durationMillis = 220),
+        label = "enrollment-pose-fill"
+    )
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Box(
+            Modifier
+                .size(10.dp)
+                .clip(CircleShape)
+                .background(fill)
+                .border(1.dp, ComposeColor.White.copy(alpha = 0.44f), CircleShape)
+        )
+        Text(label, color = ComposeColor.White, fontSize = 11.sp)
     }
 }
 
@@ -1952,6 +2060,7 @@ private fun ControlPanel(
     passiveLivenessEnabled: Boolean,
     accessFeedback: AccessFeedback?,
     approvalLogs: List<ApprovalLogEntry>,
+    authDecisionLogs: List<AuthDecisionLogEntry>,
     users: List<UserTemplate>,
     userCount: Int,
     enrollCount: Int,
@@ -2057,6 +2166,23 @@ private fun ControlPanel(
                                 Text(entry.time, color = ComposeColor(0xFF6E6E73), fontSize = 12.sp)
                                 Text(entry.userName, color = ComposeColor(0xFF1D1D1F), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                                 Text(entry.result, color = if (approvalResultSucceeded(entry.result)) ComposeColor(0xFF248A3D) else ComposeColor(0xFFD70015), fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+            if (authDecisionLogs.isNotEmpty()) {
+                Surface(color = ComposeColor(0xFFF5F5F7), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("인증 결정 로그", color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
+                        authDecisionLogs.take(4).forEach { entry ->
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.fillMaxWidth()) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                    Text(entry.time, color = ComposeColor(0xFF6E6E73), fontSize = 12.sp)
+                                    Text(entry.userName, color = ComposeColor(0xFF1D1D1F), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                    Text(entry.result, color = if (entry.result == "승인") ComposeColor(0xFF248A3D) else ComposeColor(0xFFD70015), fontSize = 12.sp)
+                                }
+                                Text(authDecisionSummary(entry), color = ComposeColor(0xFF6E6E73), fontSize = 12.sp)
                             }
                         }
                     }
@@ -2663,6 +2789,15 @@ internal data class Match(val index: Int, val score: Double, val secondScore: Do
 internal data class EnrollmentSampleDecision(val accepted: Boolean, val status: String, val detail: String)
 internal data class EnrollmentTemplateQualityDecision(val accepted: Boolean, val status: String, val detail: String)
 internal data class ApprovalLogEntry(val time: String, val userName: String, val result: String)
+internal data class AuthDecisionLogEntry(
+    val time: String,
+    val userName: String,
+    val result: String,
+    val reason: String,
+    val score: Double,
+    val secondScore: Double,
+    val supportCount: Int
+)
 private data class StoreLoadResult(val users: List<UserTemplate>, val error: Throwable?)
 
 private fun MutableList<UserTemplate>.replaceWith(items: List<UserTemplate>) {
@@ -3212,6 +3347,46 @@ internal fun addApprovalLog(
         logs.removeAt(logs.lastIndex)
     }
 }
+
+internal fun addAuthDecisionLog(
+    logs: MutableList<AuthDecisionLogEntry>,
+    entry: AuthDecisionLogEntry,
+    limit: Int = AUTH_DECISION_LOG_LIMIT
+) {
+    logs.add(0, entry)
+    while (logs.size > limit) {
+        logs.removeAt(logs.lastIndex)
+    }
+}
+
+internal fun authDecisionReason(match: Match, availableSamples: Int): String = when {
+    match.score < MATCH_THRESHOLD -> "score below threshold"
+    match.secondScore > 0.0 && match.score - match.secondScore < MATCH_MARGIN -> "ambiguous runner-up"
+    match.supportCount < min(MATCH_MIN_SUPPORTING_SAMPLES, max(1, availableSamples)) -> "not enough sample support"
+    else -> "candidate accepted"
+}
+
+internal fun authDecisionDedupeKey(entry: AuthDecisionLogEntry): String =
+    listOf(
+        entry.userName,
+        entry.result,
+        entry.reason
+    ).joinToString("|")
+
+internal fun shouldRecordAuthDecisionLog(
+    key: String,
+    nowMillis: Long,
+    lastKey: String,
+    lastAtMillis: Long,
+    dedupeMillis: Long = AUTH_DECISION_LOG_DEDUPE_MS
+): Boolean =
+    key != lastKey || lastAtMillis <= 0L || nowMillis - lastAtMillis >= dedupeMillis
+
+internal fun authDecisionSummary(entry: AuthDecisionLogEntry): String =
+    "${entry.reason} · score ${formatScore(entry.score)} · second ${formatScore(entry.secondScore)} · support ${entry.supportCount}"
+
+private fun formatScore(value: Double): String =
+    if (value < 0.0) "-" else String.format(Locale.US, "%.3f", value)
 
 internal fun approvalResultSucceeded(result: String): Boolean =
     !result.contains("실패")

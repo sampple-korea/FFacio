@@ -22,6 +22,98 @@ class ApprovalLogTest {
     }
 
     @Test
+    fun newestAuthDecisionLogIsFirstAndLimitIsEnforced() {
+        val logs = mutableListOf<AuthDecisionLogEntry>()
+
+        for (index in 1..10) {
+            addAuthDecisionLog(
+                logs,
+                AuthDecisionLogEntry(
+                    time = "12:01:${index.toString().padStart(2, '0')}",
+                    userName = "user$index",
+                    result = if (index == 10) "승인" else "보류",
+                    reason = "score below threshold",
+                    score = 0.40 + index / 100.0,
+                    secondScore = 0.20,
+                    supportCount = index
+                ),
+                limit = 8
+            )
+        }
+
+        assertEquals(8, logs.size)
+        assertEquals("user10", logs.first().userName)
+        assertEquals("user3", logs.last().userName)
+    }
+
+    @Test
+    fun authDecisionSummaryIncludesScoresAndSupport() {
+        val summary = authDecisionSummary(
+            AuthDecisionLogEntry(
+                time = "12:10:00",
+                userName = "tester",
+                result = "보류",
+                reason = "ambiguous runner-up",
+                score = 0.61234,
+                secondScore = 0.59012,
+                supportCount = 1
+            )
+        )
+
+        assertEquals("ambiguous runner-up · score 0.612 · second 0.590 · support 1", summary)
+    }
+
+    @Test
+    fun duplicateAuthDecisionIsThrottledByKeyAndTime() {
+        val entry = AuthDecisionLogEntry(
+            time = "12:10:00",
+            userName = "tester",
+            result = "보류",
+            reason = "score below threshold",
+            score = 0.512,
+            secondScore = 0.233,
+            supportCount = 1
+        )
+        val key = authDecisionDedupeKey(entry)
+
+        assertEquals(false, shouldRecordAuthDecisionLog(key, nowMillis = 2_000L, lastKey = key, lastAtMillis = 1_000L))
+        assertEquals(true, shouldRecordAuthDecisionLog(key, nowMillis = 4_000L, lastKey = key, lastAtMillis = 1_000L))
+        assertEquals(true, shouldRecordAuthDecisionLog("$key|changed", nowMillis = 2_000L, lastKey = key, lastAtMillis = 1_000L))
+    }
+
+    @Test
+    fun authDecisionDedupeIgnoresScoreJitterForSameUserAndReason() {
+        val first = AuthDecisionLogEntry(
+            time = "12:10:00",
+            userName = "tester",
+            result = "보류",
+            reason = "score below threshold",
+            score = 0.512,
+            secondScore = 0.233,
+            supportCount = 1
+        )
+        val jittered = first.copy(score = 0.519, secondScore = 0.241, supportCount = 2)
+
+        assertEquals(authDecisionDedupeKey(first), authDecisionDedupeKey(jittered))
+    }
+
+    @Test
+    fun authDecisionReasonNamesTheBlockingGate() {
+        assertEquals(
+            "score below threshold",
+            authDecisionReason(Match(index = 0, score = 0.40, secondScore = 0.10, supportCount = 5), availableSamples = 5)
+        )
+        assertEquals(
+            "ambiguous runner-up",
+            authDecisionReason(Match(index = 0, score = 0.70, secondScore = 0.65, supportCount = 5), availableSamples = 5)
+        )
+        assertEquals(
+            "not enough sample support",
+            authDecisionReason(Match(index = 0, score = 0.70, secondScore = 0.10, supportCount = 1), availableSamples = 5)
+        )
+    }
+
+    @Test
     fun relayFailureIsNotRenderedAsSuccessfulApproval() {
         assertEquals(true, approvalResultSucceeded("승인"))
         assertEquals(true, approvalResultSucceeded("문 열림 요청 완료"))

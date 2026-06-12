@@ -1,5 +1,13 @@
 # FFacio Android Release Notes
 
+## Android 0.3.17
+
+- Adds an admin-only authentication decision log for real-device calibration and false-accept/false-reject investigation.
+- The log records the candidate user, decision result, blocking reason, primary score, runner-up score, and supporting sample count.
+- Deduplicates repeated rejection decisions so one sustained false reject does not flood the admin log.
+- Adds a Face ID-style enrollment pose ribbon over the camera preview to show center/left/right collection progress while registering a user.
+- Keeps the public operation screen privacy-preserving; detailed scores are shown only in the screen-lock-protected admin view.
+
 ## Android 0.3.16
 
 - Switches Android recognition to InsightFace ArcFace `w600k_r50` through ONNX Runtime Android, with OpenCV SFace retained for alignment/fallback.
