@@ -90,12 +90,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -403,6 +403,7 @@ private fun FFacioApp(
     var accessFeedback by remember { mutableStateOf<AccessFeedback?>(null) }
     val liveness = remember { LivenessChallenge() }
     var guideState by remember { mutableStateOf(FaceGuideState.Searching) }
+    var faceBounds by remember { mutableStateOf<FaceBounds?>(null) }
     val enrollmentHold = remember { EnrollmentPoseHold() }
     var enrollmentHoldProgress by remember { mutableStateOf(0.0f) }
     var liveCandidate by remember { mutableIntStateOf(-1) }
@@ -1439,9 +1440,10 @@ private fun FFacioApp(
         if (mode == AppMode.Enroll && appScreen != AppScreen.Admin) return
         if (mode == AppMode.Auth && appScreen != AppScreen.Operation) return
         if (mode == AppMode.Auth && System.currentTimeMillis() < authResultHoldUntil) return
+        faceBounds = obs.faceBounds ?: if (!obs.ok) null else faceBounds
         if (!obs.ok) {
             resetTransient()
-            guideState = FaceGuideState.Searching
+            guideState = if (obs.faceBounds == null) FaceGuideState.Searching else FaceGuideState.Rejected
             status = obs.message
             detail = if (obs.liveScore > 0.0f) {
                 "실제 얼굴 여부를 확인하고 있습니다"
@@ -1583,7 +1585,7 @@ private fun FFacioApp(
         ) {
             recordAuthDecision(matchedUser.name, "보류", authDecisionReason(match, matchedUser.matchSampleCount()), match)
             resetTransient()
-            guideState = FaceGuideState.Center
+            guideState = FaceGuideState.Rejected
             status = "인증 보류"
             detail = "등록된 얼굴과 충분히 일치하지 않습니다. 정면과 거리를 맞춰 다시 시도해 주세요"
             return
@@ -1630,6 +1632,7 @@ private fun FFacioApp(
                 AdminAuthDecision.Rejected -> {
                     recordAuthDecision(user.name, "보류", "not head admin", match)
                     resetTransient()
+                    guideState = FaceGuideState.Rejected
                     status = "Head Admin 얼굴이 아닙니다"
                     detail = "설정된 Head Admin 중 한 명이 카메라를 바라봐 주세요"
                     return
@@ -1719,6 +1722,7 @@ private fun FFacioApp(
                 cameraRetryNonce = cameraRetryNonce,
                 stageMessage = blockedReason() ?: idleReason() ?: "카메라 준비 중",
                 guideState = guideState,
+                faceBounds = faceBounds,
                 isEnrollmentMode = mode == AppMode.Enroll,
                 isAdminAuthMode = mode == AppMode.AdminAuth,
                 enrollmentPoses = enrollPoses.toList(),
@@ -1732,6 +1736,12 @@ private fun FFacioApp(
                 passiveLivenessEnabled = passiveLivenessEnabled,
                 active = active,
                 onObservation = ::onObservation,
+                onCancelAdminAuth = {
+                    cancelAdminAction(
+                        message = "Head Admin 인증이 취소되었습니다",
+                        detailMessage = "관리 버튼을 눌러 다시 시작할 수 있습니다"
+                    )
+                },
                 onCameraUnavailable = {
                     cameraAvailable = false
                     resetTransient()
@@ -1969,6 +1979,7 @@ private fun CameraStage(
     cameraRetryNonce: Int,
     stageMessage: String,
     guideState: FaceGuideState,
+    faceBounds: FaceBounds?,
     isEnrollmentMode: Boolean,
     isAdminAuthMode: Boolean,
     enrollmentPoses: List<Int>,
@@ -1982,10 +1993,12 @@ private fun CameraStage(
     passiveLivenessEnabled: Boolean,
     active: AtomicBoolean,
     onObservation: (Observation) -> Unit,
+    onCancelAdminAuth: () -> Unit,
     onCameraUnavailable: () -> Unit,
     onNoCameraHardware: () -> Unit
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val currentAnalysisEnabled by rememberUpdatedState(analysisEnabled)
     val currentPassiveLivenessEnabled by rememberUpdatedState(passiveLivenessEnabled)
     val previewView = remember {
@@ -2077,42 +2090,64 @@ private fun CameraStage(
             null
         }
         BoxWithConstraints(Modifier.fillMaxSize()) {
-            val ringSize = responsiveFaceGuideSize(maxWidth, maxHeight)
-            AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-            Box(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .size(ringSize)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.radialGradient(
-                            listOf(ComposeColor.Transparent, ComposeColor(0x330A84FF))
-                        )
-                    )
+            val fallbackRingSize = responsiveFaceGuideSize(maxWidth, maxHeight)
+            val containerWidthPx = with(density) { maxWidth.toPx() }
+            val containerHeightPx = with(density) { maxHeight.toPx() }
+            val fallbackRingSizePx = with(density) { fallbackRingSize.toPx() }
+            val guideTarget = faceGuideTarget(faceBounds, containerWidthPx, containerHeightPx, fallbackRingSizePx)
+            val animatedGuideX by animateFloatAsState(
+                targetValue = guideTarget.centerX,
+                animationSpec = tween(durationMillis = 180),
+                label = "face-guide-x"
             )
+            val animatedGuideY by animateFloatAsState(
+                targetValue = guideTarget.centerY,
+                animationSpec = tween(durationMillis = 180),
+                label = "face-guide-y"
+            )
+            val animatedGuideSizePx by animateFloatAsState(
+                targetValue = guideTarget.sizePx,
+                animationSpec = tween(durationMillis = 220),
+                label = "face-guide-size"
+            )
+            val ringSize = with(density) { animatedGuideSizePx.toDp() }
+            AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
             FaceGuideOverlay(
                 state = guideState,
                 enrollmentGuide = enrollmentGuide,
                 isAdminAuthMode = isAdminAuthMode,
                 ringSize = ringSize,
-                modifier = Modifier.align(Alignment.Center)
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .graphicsLayer {
+                        translationX = animatedGuideX - (containerWidthPx / 2.0f)
+                        translationY = animatedGuideY - (containerHeightPx / 2.0f)
+                    }
             )
         }
         if (enabled && isAdminAuthMode) {
-            Surface(
-                color = ComposeColor(0xFF0A84FF).copy(alpha = 0.92f),
-                shape = RoundedCornerShape(999.dp),
+            Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 18.dp)
+                    .padding(top = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(
-                    "Head Admin 인증 중",
-                    color = ComposeColor.White,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
-                )
+                Surface(
+                    color = ComposeColor(0xFF0A84FF).copy(alpha = 0.92f),
+                    shape = RoundedCornerShape(999.dp)
+                ) {
+                    Text(
+                        "Head Admin 인증 중",
+                        color = ComposeColor.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                    )
+                }
+                TextButton(onClick = onCancelAdminAuth) {
+                    Text("취소", color = ComposeColor.White, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
         if (!enabled) {
@@ -2136,29 +2171,35 @@ private fun FaceGuideOverlay(
     ringSize: Dp = 260.dp,
     modifier: Modifier = Modifier
 ) {
-    val baseRingColor = when (state) {
-        FaceGuideState.Approved -> ComposeColor(0xFF30D158)
-        FaceGuideState.TurnLeft, FaceGuideState.TurnRight -> ComposeColor(0xFF0071E3)
-        FaceGuideState.Center -> ComposeColor(0xFFFFFFFF)
-        FaceGuideState.Searching -> ComposeColor(0x99FFFFFF)
-    }
-    val ringColor = when {
-        enrollmentGuide != null -> ComposeColor(0xFF30D158)
+    val targetRingColor = when {
+        state == FaceGuideState.Approved -> ComposeColor(0xFF30D158)
+        state == FaceGuideState.Rejected -> ComposeColor(0xFFFF453A)
+        state == FaceGuideState.TurnLeft || state == FaceGuideState.TurnRight -> ComposeColor(0xFF0A84FF)
         isAdminAuthMode -> ComposeColor(0xFF0A84FF)
-        else -> baseRingColor
+        state == FaceGuideState.Center -> ComposeColor(0xFFFFFFFF)
+        else -> ComposeColor(0x99FFFFFF)
     }
+    val ringColor by animateColorAsState(
+        targetValue = if (enrollmentGuide != null) ComposeColor(0xFF30D158) else targetRingColor,
+        animationSpec = tween(durationMillis = 220),
+        label = "face-guide-color"
+    )
     val progress by animateFloatAsState(
         targetValue = enrollmentGuide?.progress ?: if (state == FaceGuideState.Approved) 1.0f else 0.0f,
         animationSpec = tween(durationMillis = 280),
         label = "face-guide-progress"
     )
     val scale by animateFloatAsState(
-        targetValue = if (state == FaceGuideState.Approved) 1.08f else 1.0f,
+        targetValue = when (state) {
+            FaceGuideState.Approved -> 1.05f
+            FaceGuideState.Rejected -> 0.98f
+            else -> 1.0f
+        },
         animationSpec = tween(durationMillis = 240),
         label = "face-guide-scale"
     )
     val alpha by animateFloatAsState(
-        targetValue = if (state == FaceGuideState.Searching) 0.62f else 0.94f,
+        targetValue = if (state == FaceGuideState.Searching) 0.58f else 0.96f,
         animationSpec = tween(durationMillis = 260),
         label = "face-guide-alpha"
     )
@@ -2185,9 +2226,9 @@ private fun FaceGuideOverlay(
         contentAlignment = Alignment.Center
     ) {
         if (enrollmentGuide != null) {
-            Canvas(modifier = Modifier.fillMaxSize().padding(6.dp)) {
-                val outerStroke = Stroke(width = 7.dp.toPx(), cap = StrokeCap.Round)
-                val poseStroke = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
+            Canvas(modifier = Modifier.fillMaxSize().padding(5.dp)) {
+                val outerStroke = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
+                val poseStroke = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round)
                 drawArc(
                     color = ComposeColor.White.copy(alpha = 0.24f),
                     startAngle = -90f,
@@ -2231,35 +2272,78 @@ private fun FaceGuideOverlay(
                     style = poseStroke
                 )
             }
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(CircleShape)
-                    .background(ComposeColor(0xFF30D158).copy(alpha = 0.06f))
-            )
         } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(CircleShape)
-                    .border(4.dp, ringColor.copy(alpha = 0.72f), CircleShape)
-                    .background(ringColor.copy(alpha = 0.10f))
-            )
+            Canvas(modifier = Modifier.fillMaxSize().padding(5.dp)) {
+                val trackStroke = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
+                val activeStroke = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
+                drawArc(
+                    color = ComposeColor.White.copy(alpha = 0.20f),
+                    startAngle = -90f,
+                    sweepAngle = 360f,
+                    useCenter = false,
+                    style = trackStroke
+                )
+                val sweep = when (state) {
+                    FaceGuideState.Searching -> 58f
+                    FaceGuideState.Center -> 118f
+                    FaceGuideState.TurnLeft, FaceGuideState.TurnRight -> 178f
+                    FaceGuideState.Rejected -> 240f
+                    FaceGuideState.Approved -> 360f
+                }
+                drawArc(
+                    color = ringColor.copy(alpha = 0.94f),
+                    startAngle = -90f,
+                    sweepAngle = sweep,
+                    useCenter = false,
+                    style = activeStroke
+                )
+                if (state != FaceGuideState.Searching && state != FaceGuideState.Approved) {
+                    drawArc(
+                        color = ringColor.copy(alpha = 0.58f),
+                        startAngle = 120f,
+                        sweepAngle = 58f,
+                        useCenter = false,
+                        style = activeStroke
+                    )
+                    drawArc(
+                        color = ringColor.copy(alpha = 0.42f),
+                        startAngle = 250f,
+                        sweepAngle = 42f,
+                        useCenter = false,
+                        style = activeStroke
+                    )
+                }
+            }
         }
         Box(
             modifier = Modifier
                 .size(ringSize - 28.dp)
                 .clip(CircleShape)
-                .border(1.dp, ComposeColor.White.copy(alpha = 0.28f), CircleShape)
+                .border(1.dp, ComposeColor.White.copy(alpha = 0.18f), CircleShape)
                 .background(ComposeColor.Transparent)
         )
         when (symbolState) {
-            FaceGuideState.Approved -> Text("✓", color = ComposeColor.White, fontSize = 76.sp, fontWeight = FontWeight.Bold)
-            FaceGuideState.TurnLeft -> Text("‹", color = ComposeColor.White, fontSize = if (enrollmentGuide == null) 78.sp else 54.sp, fontWeight = FontWeight.Bold, modifier = Modifier.graphicsLayer { translationX = symbolOffset })
-            FaceGuideState.TurnRight -> Text("›", color = ComposeColor.White, fontSize = if (enrollmentGuide == null) 78.sp else 54.sp, fontWeight = FontWeight.Bold, modifier = Modifier.graphicsLayer { translationX = symbolOffset })
-            FaceGuideState.Center -> Text("•", color = ComposeColor.White, fontSize = if (enrollmentGuide == null) 54.sp else 34.sp, fontWeight = FontWeight.Bold)
+            FaceGuideState.Approved -> GuideBadge("✓", ComposeColor(0xFF30D158), Modifier.align(Alignment.BottomCenter))
+            FaceGuideState.Rejected -> GuideBadge("!", ComposeColor(0xFFFF453A), Modifier.align(Alignment.TopCenter))
+            FaceGuideState.TurnLeft -> GuideBadge("‹", ComposeColor(0xFF0A84FF), Modifier.align(Alignment.CenterStart).graphicsLayer { translationX = symbolOffset })
+            FaceGuideState.TurnRight -> GuideBadge("›", ComposeColor(0xFF0A84FF), Modifier.align(Alignment.CenterEnd).graphicsLayer { translationX = symbolOffset })
+            FaceGuideState.Center -> if (enrollmentGuide != null) Text("•", color = ComposeColor.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
             FaceGuideState.Searching -> Text("", color = ComposeColor.White)
         }
+    }
+}
+
+@Composable
+private fun GuideBadge(symbol: String, color: ComposeColor, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(color.copy(alpha = 0.92f))
+            .border(1.dp, ComposeColor.White.copy(alpha = 0.34f), CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(symbol, color = ComposeColor.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -2928,32 +3012,33 @@ private class MobileFaceEngine(detectorModel: File, recognizerModel: File, arcFa
             }
             val row = FloatArray(face.total().toInt())
             face.get(0, 0, row)
-            if ((row.getOrNull(2) ?: 0.0f) < bgr.cols().toFloat() * 0.16f) return Observation.fail("조금 더 가까이 와 주세요")
+            val bounds = faceBoundsFromDetection(row, bgr.cols(), bgr.rows())
+            if ((row.getOrNull(2) ?: 0.0f) < bgr.cols().toFloat() * 0.16f) return Observation.fail("조금 더 가까이 와 주세요", faceBounds = bounds)
             val passiveLiveness = if (passiveLivenessEnabled) {
                 predictPassiveLiveness(bgr, row)
             } else {
                 PassiveLiveness(1.0f, "disabled")
             }
             if (!passiveLiveness.isLive) {
-                return Observation.fail(passiveLiveness.message(), passiveLiveness.liveScore, passiveLiveness.state)
+                return Observation.fail(passiveLiveness.message(), passiveLiveness.liveScore, passiveLiveness.state, bounds)
             }
             runCatching {
                 recognizer.alignCrop(bgr, face, aligned)
                 if (aligned.empty()) error("SFace alignCrop returned an empty aligned face")
             }.getOrElse {
                 Log.e("FFacio", "SFace alignment or feature extraction failed", it)
-                return Observation.fail("얼굴 특징을 추출할 수 없습니다. 정면을 유지하고 다시 시도해 주세요")
+                return Observation.fail("얼굴 특징을 추출할 수 없습니다. 정면을 유지하고 다시 시도해 주세요", faceBounds = bounds)
             }
             val embedding = runCatching {
                 arcFace.feature(aligned)
             }.getOrElse {
                 Log.e("FFacio", "Face embedding extraction failed", it)
-                return Observation.fail("얼굴 특징을 추출할 수 없습니다. 정면을 유지하고 다시 시도해 주세요")
+                return Observation.fail("얼굴 특징을 추출할 수 없습니다. 정면을 유지하고 다시 시도해 주세요", faceBounds = bounds)
             }
             if (embedding.size != FACE_EMBEDDING_SIZE) {
-                return Observation.fail("얼굴 인식 모델 출력이 일치하지 않습니다. 앱을 다시 설치해 주세요")
+                return Observation.fail("얼굴 인식 모델 출력이 일치하지 않습니다. 앱을 다시 설치해 주세요", faceBounds = bounds)
             }
-            return Observation(true, "확인 중", embedding, estimatePose(row), passiveLiveness.liveScore, passiveLiveness.state)
+            return Observation(true, "확인 중", embedding, estimatePose(row), passiveLiveness.liveScore, passiveLiveness.state, bounds)
         } catch (error: Exception) {
             Log.e("FFacio", "Face observation failed", error)
             return Observation.fail("프레임을 분석할 수 없습니다. 카메라와 조명을 확인해 주세요")
@@ -3119,7 +3204,7 @@ private class LivenessChallenge {
 
     fun currentTarget(): Int = if (index >= targets.size) 0 else targets[index]
 
-    fun prompt(): String = if (index >= targets.size) "라이브니스 확인 완료" else "${poseLabel(targets[index])}을 보고 잠시 유지해 주세요"
+    fun prompt(): String = if (index >= targets.size) "라이브니스 확인 완료" else "${poseLabel(targets[index])}으로 살짝 돌려 잠시 유지해 주세요"
 }
 
 internal class EnrollmentPoseHold(private val holdMillis: Long = ENROLL_POSE_HOLD_MS) {
@@ -3169,7 +3254,7 @@ internal enum class AdminAction {
     ClearHeadAdmin
 }
 internal enum class AdminAuthDecision { Approved, Rejected, Expired }
-private enum class FaceGuideState { Searching, Center, TurnLeft, TurnRight, Approved }
+private enum class FaceGuideState { Searching, Center, TurnLeft, TurnRight, Approved, Rejected }
 internal enum class AccessFeedbackKind { AuthOnly, DoorPending, DoorSucceeded, DoorFailed }
 private sealed class ModelLoadState {
     data object Loading : ModelLoadState()
@@ -3235,13 +3320,25 @@ private data class Observation(
     val embedding: FloatArray,
     val pose: Int,
     val liveScore: Float = 0.0f,
-    val liveState: String = "unknown"
+    val liveState: String = "unknown",
+    val faceBounds: FaceBounds? = null
 ) {
     companion object {
-        fun fail(message: String, liveScore: Float = 0.0f, liveState: String = "unknown") =
-            Observation(false, message, FloatArray(0), 0, liveScore, liveState)
+        fun fail(message: String, liveScore: Float = 0.0f, liveState: String = "unknown", faceBounds: FaceBounds? = null) =
+            Observation(false, message, FloatArray(0), 0, liveScore, liveState, faceBounds)
     }
 }
+
+internal data class FaceBounds(
+    val left: Float,
+    val top: Float,
+    val width: Float,
+    val height: Float,
+    val frameWidth: Float,
+    val frameHeight: Float
+)
+
+internal data class FaceGuideTarget(val centerX: Float, val centerY: Float, val sizePx: Float)
 internal data class UserTemplate(
     val name: String,
     val embedding: FloatArray,
@@ -3331,6 +3428,47 @@ internal fun canAuthorizeAdminActionWithHeadAdminFace(action: AdminAction, users
 
 internal fun shouldRunAdminActionImmediatelyInAdminSession(action: AdminAction, isAdminScreen: Boolean): Boolean =
     isAdminScreen && action != AdminAction.SetHeadAdmin && action != AdminAction.ClearHeadAdmin
+
+internal fun faceBoundsFromDetection(row: FloatArray, frameWidth: Int, frameHeight: Int): FaceBounds? {
+    val left = row.getOrNull(0) ?: return null
+    val top = row.getOrNull(1) ?: return null
+    val width = row.getOrNull(2) ?: return null
+    val height = row.getOrNull(3) ?: return null
+    if (frameWidth <= 0 || frameHeight <= 0 || width <= 0.0f || height <= 0.0f) return null
+    return FaceBounds(
+        left = left.coerceIn(0.0f, frameWidth.toFloat()),
+        top = top.coerceIn(0.0f, frameHeight.toFloat()),
+        width = width.coerceAtMost(frameWidth.toFloat()),
+        height = height.coerceAtMost(frameHeight.toFloat()),
+        frameWidth = frameWidth.toFloat(),
+        frameHeight = frameHeight.toFloat()
+    )
+}
+
+internal fun faceGuideTarget(
+    bounds: FaceBounds?,
+    containerWidth: Float,
+    containerHeight: Float,
+    fallbackSize: Float
+): FaceGuideTarget {
+    val fallback = FaceGuideTarget(containerWidth / 2.0f, containerHeight / 2.0f, fallbackSize)
+    if (bounds == null || containerWidth <= 0.0f || containerHeight <= 0.0f || bounds.frameWidth <= 0.0f || bounds.frameHeight <= 0.0f) {
+        return fallback
+    }
+    val scale = max(containerWidth / bounds.frameWidth, containerHeight / bounds.frameHeight)
+    val drawnWidth = bounds.frameWidth * scale
+    val drawnHeight = bounds.frameHeight * scale
+    val offsetX = (containerWidth - drawnWidth) / 2.0f
+    val offsetY = (containerHeight - drawnHeight) / 2.0f
+    val rawSize = max(bounds.width, bounds.height) * scale * 1.62f
+    val maxSize = min(containerWidth, containerHeight) * 0.86f
+    val minSize = fallbackSize * 0.60f
+    val targetSize = rawSize.coerceIn(minSize, maxSize)
+    val half = targetSize / 2.0f
+    val centerX = ((bounds.left + bounds.width / 2.0f) * scale + offsetX).coerceIn(half, containerWidth - half)
+    val centerY = ((bounds.top + bounds.height / 2.0f) * scale + offsetY).coerceIn(half, containerHeight - half)
+    return FaceGuideTarget(centerX, centerY, targetSize)
+}
 
 internal fun adminAuthCandidateIndices(users: List<UserTemplate>): List<Int> =
     users.indices.filter { index -> users[index].isHeadAdmin && users[index].isCompatible() }
@@ -3887,15 +4025,15 @@ internal fun enrollmentGuideState(poses: List<Int>, count: Int, holdProgress: Fl
 }
 
 private fun enrollmentTargetInstruction(targetPose: Int?): String = when (targetPose) {
-    -1 -> "왼쪽으로 천천히 돌려 잠시 유지"
-    1 -> "오른쪽으로 천천히 돌려 잠시 유지"
+    -1 -> "왼쪽으로 살짝 돌려 잠시 유지"
+    1 -> "오른쪽으로 살짝 돌려 잠시 유지"
     0 -> "정면을 바라보고 잠시 유지"
     else -> "얼굴을 천천히 좌우로 움직여 주세요"
 }
 
 private fun enrollmentTargetStatus(targetPose: Int): String = when (targetPose) {
-    -1 -> "왼쪽을 바라봐 주세요"
-    1 -> "오른쪽을 바라봐 주세요"
+    -1 -> "왼쪽으로 살짝 돌려 주세요"
+    1 -> "오른쪽으로 살짝 돌려 주세요"
     else -> "정면을 바라봐 주세요"
 }
 

@@ -120,6 +120,31 @@ class AdminOperationGateTest {
     }
 
     @Test
+    fun faceGuideTargetTracksDetectedFaceWithFillCenterMapping() {
+        val centered = faceGuideTarget(
+            bounds = FaceBounds(left = 270.0f, top = 190.0f, width = 100.0f, height = 100.0f, frameWidth = 640.0f, frameHeight = 480.0f),
+            containerWidth = 640.0f,
+            containerHeight = 480.0f,
+            fallbackSize = 260.0f
+        )
+        assertEquals(320.0f, centered.centerX, 0.01f)
+        assertEquals(240.0f, centered.centerY, 0.01f)
+
+        val left = faceGuideTarget(
+            bounds = FaceBounds(left = 80.0f, top = 170.0f, width = 120.0f, height = 120.0f, frameWidth = 640.0f, frameHeight = 480.0f),
+            containerWidth = 640.0f,
+            containerHeight = 480.0f,
+            fallbackSize = 260.0f
+        )
+        assertTrue(left.centerX < centered.centerX)
+
+        val fallback = faceGuideTarget(null, containerWidth = 640.0f, containerHeight = 480.0f, fallbackSize = 260.0f)
+        assertEquals(320.0f, fallback.centerX, 0.01f)
+        assertEquals(240.0f, fallback.centerY, 0.01f)
+        assertEquals(260.0f, fallback.sizePx, 0.01f)
+    }
+
+    @Test
     fun multipleHeadAdminsCanAuthorizeAndAreNormalizedOnLoad() {
         val headAdmin = compatibleUser("head", isHeadAdmin = true)
         val secondHeadAdmin = compatibleUser("second", isHeadAdmin = true)

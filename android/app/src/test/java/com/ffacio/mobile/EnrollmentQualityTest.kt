@@ -26,7 +26,7 @@ class EnrollmentQualityTest {
         )
 
         assertFalse(result.accepted)
-        assertEquals("왼쪽을 바라봐 주세요", result.status)
+        assertEquals("왼쪽으로 살짝 돌려 주세요", result.status)
     }
 
     @Test

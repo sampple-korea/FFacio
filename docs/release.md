@@ -1,5 +1,13 @@
 # FFacio Android Release Notes
 
+## Android 0.4.4
+
+- Makes the face guide ring track the detected face position and size instead of staying fixed in the center.
+- Redesigns the guide ring to cover less of the face while keeping turn arrows visible as edge badges.
+- Adds smoother status colors: blue while checking, green on approval, red on rejection or failed face checks.
+- Updates left/right liveness prompts to ask for a slight head turn.
+- Adds a cancel button on the Head Admin face-auth screen.
+
 ## Android 0.4.3
 
 - Treats entry into the admin screen as the Head Admin-approved admin session.
