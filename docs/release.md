@@ -1,5 +1,12 @@
 # FFacio Android Release Notes
 
+## Android 0.4.3
+
+- Treats entry into the admin screen as the Head Admin-approved admin session.
+- Runs normal admin-screen actions immediately after entry, including enrollment, user deletion, reset, relay changes, relay test, and passive liveness mode changes.
+- Keeps only Head Admin assignment and removal behind Android screen-lock verification inside the admin screen.
+- Makes the Head Admin face-auth screen visually distinct with a dedicated `Head Admin 인증 중` state and badge over the camera.
+
 ## Android 0.4.2
 
 - Adds the Head Admin permission model for real door-terminal administration.

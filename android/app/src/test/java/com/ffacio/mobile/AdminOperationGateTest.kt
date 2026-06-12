@@ -73,6 +73,21 @@ class AdminOperationGateTest {
     }
 
     @Test
+    fun adminSessionRunsGeneralActionsImmediatelyButKeepsHeadAdminChangesLocked() {
+        assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.StartEnroll, isAdminScreen = true))
+        assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.DeleteUser, isAdminScreen = true))
+        assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.DeleteUsers, isAdminScreen = true))
+        assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.ResetStore, isAdminScreen = true))
+        assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.ArmDoor, isAdminScreen = true))
+        assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.DisarmDoor, isAdminScreen = true))
+        assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.TestDoorRelay, isAdminScreen = true))
+        assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.SetPassiveLiveness, isAdminScreen = true))
+        assertFalse(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.SetHeadAdmin, isAdminScreen = true))
+        assertFalse(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.ClearHeadAdmin, isAdminScreen = true))
+        assertFalse(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.OpenAdmin, isAdminScreen = false))
+    }
+
+    @Test
     fun incompatibleHeadAdminDoesNotAuthorizeAdminActions() {
         val legacyHeadAdmin = incompatibleUser("legacy", isHeadAdmin = true)
 

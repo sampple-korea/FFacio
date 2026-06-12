@@ -1242,8 +1242,8 @@ private fun FFacioApp(
             accessFeedback = null
             resetTransient()
             guideState = FaceGuideState.Searching
-            status = "Head Admin 얼굴 인증"
-            detail = "관리 작업을 승인하려면 Head Admin 사용자가 카메라를 바라봐 주세요"
+            status = "Head Admin 인증 중"
+            detail = "관리 화면을 열려면 설정된 Head Admin 중 한 명이 카메라를 바라봐 주세요"
             return
         }
         val keyguard = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
@@ -1273,6 +1273,14 @@ private fun FFacioApp(
         liveness.reset()
         (context as? Activity)?.window?.let { applyDoorTerminalSystemUi(window = it, immersive = false) }
         adminLauncher.launch(prompt)
+    }
+
+    fun performAdminAction(action: AdminAction) {
+        if (shouldRunAdminActionImmediatelyInAdminSession(action, appScreen == AppScreen.Admin)) {
+            completeAdminAction(action)
+        } else {
+            requestAdmin(action)
+        }
     }
 
     fun blockedReason(): String? = when {
@@ -1712,6 +1720,7 @@ private fun FFacioApp(
                 stageMessage = blockedReason() ?: idleReason() ?: "카메라 준비 중",
                 guideState = guideState,
                 isEnrollmentMode = mode == AppMode.Enroll,
+                isAdminAuthMode = mode == AppMode.AdminAuth,
                 enrollmentPoses = enrollPoses.toList(),
                 enrollmentCount = enrollSamples.size,
                 enrollmentHoldProgress = enrollmentHoldProgress,
@@ -1813,20 +1822,20 @@ private fun FFacioApp(
                         detail = "Bearer 토큰을 사용하는 Android 문 제어는 HTTPS URL만 허용합니다"
                     } else if (it && doorToken.trim().isEmpty()) {
                         doorArmed = false
-                        status = "릴레이 토큰이 필요합니다"
-                        detail = "문 열림을 활성화하려면 Bearer 토큰을 입력하세요"
-                    } else if (it) {
-                        requestAdmin(AdminAction.ArmDoor)
+                    status = "릴레이 토큰이 필요합니다"
+                    detail = "문 열림을 활성화하려면 Bearer 토큰을 입력하세요"
+                } else if (it) {
+                        performAdminAction(AdminAction.ArmDoor)
                     } else {
-                        requestAdmin(AdminAction.DisarmDoor)
+                        performAdminAction(AdminAction.DisarmDoor)
                     }
                 },
                 onTestDoorRelay = {
-                    requestAdmin(AdminAction.TestDoorRelay)
+                    performAdminAction(AdminAction.TestDoorRelay)
                 },
                 onPassiveLivenessEnabled = passiveToggle@{
                     pendingPassiveLivenessEnabled = it
-                    requestAdmin(AdminAction.SetPassiveLiveness)
+                    performAdminAction(AdminAction.SetPassiveLiveness)
                 },
                 onEnroll = enroll@{
                     blockedReason()?.let {
@@ -1840,7 +1849,7 @@ private fun FFacioApp(
                         status = "이름을 입력하세요"
                         detail = "등록할 사용자의 이름이 필요합니다"
                     } else {
-                        requestAdmin(AdminAction.StartEnroll)
+                        performAdminAction(AdminAction.StartEnroll)
                     }
                 },
                 onAuth = auth@{
@@ -1875,13 +1884,13 @@ private fun FFacioApp(
                     requestAdmin(AdminAction.ClearHeadAdmin)
                 },
                 onUnlockStore = {
-                    requestAdmin(AdminAction.UnlockStore)
+                    performAdminAction(AdminAction.UnlockStore)
                 },
                 onResetStore = {
-                    requestAdmin(AdminAction.ResetStore)
+                    performAdminAction(AdminAction.ResetStore)
                 },
                 onUnlockDoor = {
-                    requestAdmin(AdminAction.UnlockDoor)
+                    performAdminAction(AdminAction.UnlockDoor)
                 },
                 onRetry = retry@{
                     if (modelError != null || noCameraHardware) {
@@ -1899,9 +1908,9 @@ private fun FFacioApp(
                     cameraRetryNonce += 1
                     if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
                     if (storeError != null) {
-                        requestAdmin(AdminAction.UnlockStore)
+                        performAdminAction(AdminAction.UnlockStore)
                     } else if (doorConfigError != null) {
-                        requestAdmin(AdminAction.UnlockDoor)
+                        performAdminAction(AdminAction.UnlockDoor)
                     } else {
                         status = "카메라를 다시 확인하는 중입니다"
                         detail = "잠시만 기다려 주세요"
@@ -1921,12 +1930,12 @@ private fun FFacioApp(
             onDismissRequest = { if (!storageBusy) confirmDelete = false },
             title = { Text("등록 사용자를 삭제할까요?") },
             text = {
-                Text("이 기기에 저장된 얼굴 템플릿이 삭제됩니다. Head Admin 얼굴 인증 후 실행되며, 작업은 되돌릴 수 없습니다.")
+                Text("이 기기에 저장된 얼굴 템플릿이 삭제됩니다. 작업은 되돌릴 수 없습니다.")
             },
             confirmButton = {
                 TextButton(
                     enabled = !storageBusy,
-                    onClick = { requestAdmin(AdminAction.DeleteUsers) }
+                    onClick = { performAdminAction(AdminAction.DeleteUsers) }
                 ) { Text("삭제") }
             },
             dismissButton = {
@@ -1938,11 +1947,11 @@ private fun FFacioApp(
         AlertDialog(
             onDismissRequest = { if (!storageBusy) pendingDeleteUserIndex = -1 },
             title = { Text("${deleteUser.name} 사용자를 삭제할까요?") },
-            text = { Text("이 사용자의 로컬 얼굴 템플릿을 삭제합니다. 확인 후 Head Admin 얼굴 인증이 필요합니다.") },
+            text = { Text("이 사용자의 로컬 얼굴 템플릿을 삭제합니다.") },
             confirmButton = {
                 TextButton(
                     enabled = !storageBusy,
-                    onClick = { requestAdmin(AdminAction.DeleteUser) }
+                    onClick = { performAdminAction(AdminAction.DeleteUser) }
                 ) { Text("삭제") }
             },
             dismissButton = {
@@ -1961,6 +1970,7 @@ private fun CameraStage(
     stageMessage: String,
     guideState: FaceGuideState,
     isEnrollmentMode: Boolean,
+    isAdminAuthMode: Boolean,
     enrollmentPoses: List<Int>,
     enrollmentCount: Int,
     enrollmentHoldProgress: Float,
@@ -2083,9 +2093,27 @@ private fun CameraStage(
             FaceGuideOverlay(
                 state = guideState,
                 enrollmentGuide = enrollmentGuide,
+                isAdminAuthMode = isAdminAuthMode,
                 ringSize = ringSize,
                 modifier = Modifier.align(Alignment.Center)
             )
+        }
+        if (enabled && isAdminAuthMode) {
+            Surface(
+                color = ComposeColor(0xFF0A84FF).copy(alpha = 0.92f),
+                shape = RoundedCornerShape(999.dp),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 18.dp)
+            ) {
+                Text(
+                    "Head Admin 인증 중",
+                    color = ComposeColor.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                )
+            }
         }
         if (!enabled) {
             Text(
@@ -2104,6 +2132,7 @@ private fun CameraStage(
 private fun FaceGuideOverlay(
     state: FaceGuideState,
     enrollmentGuide: EnrollmentGuideState? = null,
+    isAdminAuthMode: Boolean = false,
     ringSize: Dp = 260.dp,
     modifier: Modifier = Modifier
 ) {
@@ -2113,7 +2142,11 @@ private fun FaceGuideOverlay(
         FaceGuideState.Center -> ComposeColor(0xFFFFFFFF)
         FaceGuideState.Searching -> ComposeColor(0x99FFFFFF)
     }
-    val ringColor = if (enrollmentGuide != null) ComposeColor(0xFF30D158) else baseRingColor
+    val ringColor = when {
+        enrollmentGuide != null -> ComposeColor(0xFF30D158)
+        isAdminAuthMode -> ComposeColor(0xFF0A84FF)
+        else -> baseRingColor
+    }
     val progress by animateFloatAsState(
         targetValue = enrollmentGuide?.progress ?: if (state == FaceGuideState.Approved) 1.0f else 0.0f,
         animationSpec = tween(durationMillis = 280),
@@ -2354,7 +2387,7 @@ private fun OperationPanel(
                         } else if (!headAdminConfigured) {
                             "관리 버튼을 눌러 Android 화면잠금으로 Head Admin을 설정하세요. 이후 관리 작업은 Head Admin 얼굴로 승인됩니다."
                         } else {
-                            "관리 화면 진입과 새 얼굴 등록은 Head Admin 얼굴 인증으로 승인됩니다."
+                            "관리 화면 진입은 Head Admin 얼굴 인증으로 승인됩니다. 관리자 화면 안의 일반 작업은 바로 실행됩니다."
                         },
                         color = ComposeColor(0xFF6E6E73),
                         fontSize = 14.sp
@@ -2625,7 +2658,7 @@ private fun ControlPanel(
                         if (!headAdminConfigured) {
                             Surface(color = ComposeColor(0xFFFFF4E5), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                                 Text(
-                                    "Head Admin을 1명 이상 설정하세요. 이후 관리자 진입과 등록 승인은 Head Admin 얼굴로 진행됩니다.",
+                                    "Head Admin을 1명 이상 설정하세요. 이후 관리자 화면 진입은 Head Admin 얼굴로 진행됩니다.",
                                     color = ComposeColor(0xFF8A4B00),
                                     fontSize = 13.sp,
                                     modifier = Modifier.padding(12.dp)
@@ -3295,6 +3328,9 @@ internal fun requiresAndroidLockForAdminAction(action: AdminAction, users: List<
 
 internal fun canAuthorizeAdminActionWithHeadAdminFace(action: AdminAction, users: List<UserTemplate>): Boolean =
     hasHeadAdmin(users) && !requiresAndroidLockForAdminAction(action, users)
+
+internal fun shouldRunAdminActionImmediatelyInAdminSession(action: AdminAction, isAdminScreen: Boolean): Boolean =
+    isAdminScreen && action != AdminAction.SetHeadAdmin && action != AdminAction.ClearHeadAdmin
 
 internal fun adminAuthCandidateIndices(users: List<UserTemplate>): List<Int> =
     users.indices.filter { index -> users[index].isHeadAdmin && users[index].isCompatible() }
