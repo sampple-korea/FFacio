@@ -1,5 +1,12 @@
 # FFacio Release Notes
 
+## Android 0.3.13
+
+- Hardens door relay execution with a process-wide single-flight gate and cooldown so an accepted face cannot trigger duplicate relay POSTs across rapid UI recomposition or Activity recreation.
+- Removes recognized user names from outbound Android relay JSON. Identity details stay local to the protected approval log; relay receivers get only the accepted event source.
+- Adds unit coverage for the relay gate and privacy-preserving relay payload.
+- Signing note: production signing still requires `FFACIO_ANDROID_KEYSTORE_*` environment variables. Builds made with `-AllowGeneratedSigningKey` are for sideload testing and are not production upgrade-compatible.
+
 ## Android 0.3.12
 
 - Adds operation-view immersive terminal mode with Android system bars hidden by default and transient swipe reveal.

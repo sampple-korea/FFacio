@@ -51,5 +51,7 @@ Output:
 - Enrollment rejects near-duplicate samples, requires pose diversity before the final template is saved, and blocks faces that already match an enrolled user.
 - The admin view supports selecting and deleting individual registered users, plus a separate all-users reset path for destructive maintenance.
 - Individual user deletion requires a name-specific confirmation dialog and then Android screen-lock verification. Relay activation is stored as an admin setting and remains enabled across normal app lifecycle changes until an admin disables it or the encrypted relay token cannot be opened.
+- Door relay requests are single-flight with a short cooldown, so repeated accepted frames while one relay request is pending do not send additional open requests.
+- Android relay requests do not include the recognized user's name in the outbound JSON payload; detailed identity remains local to the protected approval log.
 - Real device camera/liveness testing is still required on actual phones.
 - Full Android lock-task kiosk enforcement still requires device-owner / managed-device setup outside the app. The app's immersive operation view is an ergonomic guard, not a replacement for MDM/device-owner lock task mode.

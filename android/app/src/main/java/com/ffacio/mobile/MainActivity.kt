@@ -365,7 +365,6 @@ private fun FFacioApp(
     var liveCandidate by remember { mutableIntStateOf(-1) }
     var stableUser by remember { mutableIntStateOf(-1) }
     var stableCount by remember { mutableIntStateOf(0) }
-    var lastOpenAt by remember { mutableLongStateOf(0L) }
     var authResultHoldUntil by remember { mutableLongStateOf(0L) }
     var adminSessionExpiresAt by remember { mutableLongStateOf(0L) }
     var enrollmentExpiresAt by remember { mutableLongStateOf(0L) }
@@ -1001,9 +1000,8 @@ private fun FFacioApp(
     )
 
     fun openDoor(user: UserTemplate) {
-        val now = System.currentTimeMillis()
         if (adminPromptInFlight || appScreen != AppScreen.Operation) return
-        if (!doorArmed || now - lastOpenAt < 3500L) return
+        if (doorExecutor.isShutdown) return
         val relayUrl = doorUrl.trim()
         val relayToken = doorToken.trim()
         if (relayUrl.isEmpty() || relayToken.isEmpty()) {
@@ -1013,22 +1011,30 @@ private fun FFacioApp(
             detail = "릴레이 URL과 토큰을 저장한 뒤 다시 활성화하세요"
             return
         }
-        lastOpenAt = now
+        if (!processDoorRequestGate.tryStart(doorArmed = doorArmed, nowMillis = SystemClock.elapsedRealtime())) return
         accessFeedback = AccessFeedback(AccessFeedbackKind.DoorPending, user.name)
         status = "인증 완료 · 문 열림 요청"
-        detail = "${user.name}님 승인 · 릴레이 응답을 기다리고 있습니다"
-        if (doorExecutor.isShutdown) return
-        doorExecutor.execute {
-            val ok = postDoor(relayUrl, relayToken, user.name)
-            ContextCompat.getMainExecutor(context).execute {
-                if (!active.get()) return@execute
-                authResultHoldUntil = System.currentTimeMillis() + AUTH_RESULT_HOLD_MS
-                guideState = if (ok) FaceGuideState.Approved else FaceGuideState.Searching
-                accessFeedback = AccessFeedback(if (ok) AccessFeedbackKind.DoorSucceeded else AccessFeedbackKind.DoorFailed, user.name)
-                recordApproval(user.name, if (ok) "문 열림 요청 완료" else "문 제어 실패")
-                status = if (ok) "문 열림 요청 완료" else "문 제어 실패"
-                detail = if (ok) "릴레이가 요청을 수락했습니다" else "URL, 토큰, 네트워크를 확인해 주세요"
+        detail = "인증 승인 · 릴레이 응답을 기다리고 있습니다"
+        try {
+            doorExecutor.execute {
+                val ok = postDoor(relayUrl, relayToken)
+                processDoorRequestGate.finish()
+                ContextCompat.getMainExecutor(context).execute {
+                    if (!active.get()) return@execute
+                    authResultHoldUntil = System.currentTimeMillis() + AUTH_RESULT_HOLD_MS
+                    guideState = if (ok) FaceGuideState.Approved else FaceGuideState.Searching
+                    accessFeedback = AccessFeedback(if (ok) AccessFeedbackKind.DoorSucceeded else AccessFeedbackKind.DoorFailed, user.name)
+                    recordApproval(user.name, if (ok) "문 열림 요청 완료" else "문 제어 실패")
+                    status = if (ok) "문 열림 요청 완료" else "문 제어 실패"
+                    detail = if (ok) "릴레이가 요청을 수락했습니다" else "URL, 토큰, 네트워크를 확인해 주세요"
+                }
             }
+        } catch (_: Throwable) {
+            processDoorRequestGate.finish()
+            accessFeedback = AccessFeedback(AccessFeedbackKind.DoorFailed, user.name)
+            recordApproval(user.name, "문 제어 실패")
+            status = "문 제어 실패"
+            detail = "릴레이 요청을 시작할 수 없습니다"
         }
     }
 
@@ -2415,6 +2421,30 @@ internal fun shouldUseDoorTerminalImmersive(
     touchExplorationEnabled: Boolean
 ): Boolean = isOperationScreen && !adminPromptInFlight && !touchExplorationEnabled
 
+internal class DoorRequestGate {
+    private var requestInFlight = false
+    private var lastOpenAtMillis = 0L
+
+    @Synchronized
+    fun tryStart(
+        doorArmed: Boolean,
+        nowMillis: Long,
+        cooldownMillis: Long = 3500L
+    ): Boolean {
+        if (!doorArmed || requestInFlight || nowMillis - lastOpenAtMillis < cooldownMillis) return false
+        requestInFlight = true
+        lastOpenAtMillis = nowMillis
+        return true
+    }
+
+    @Synchronized
+    fun finish() {
+        requestInFlight = false
+    }
+}
+
+private val processDoorRequestGate = DoorRequestGate()
+
 private fun applyDoorTerminalSystemUi(window: Window, immersive: Boolean) {
     WindowCompat.setDecorFitsSystemWindows(window, !immersive)
     val controller = WindowInsetsControllerCompat(window, window.decorView)
@@ -2764,7 +2794,10 @@ internal fun approvalPublicSummary(entry: ApprovalLogEntry): String =
 private fun formatClock(timeMillis: Long): String =
     SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timeMillis))
 
-private fun postDoor(url: String, token: String, user: String): Boolean = runCatching {
+internal fun doorRelayPayloadJson(): String =
+    """{"event":"accepted","source":"ffacio-android"}"""
+
+private fun postDoor(url: String, token: String): Boolean = runCatching {
     val endpoint = URL(url)
     if (endpoint.protocol.lowercase() != "https") return@runCatching false
     val conn = (endpoint.openConnection() as HttpURLConnection).apply {
@@ -2777,7 +2810,7 @@ private fun postDoor(url: String, token: String, user: String): Boolean = runCat
         if (token.isNotBlank()) setRequestProperty("Authorization", "Bearer $token")
     }
     try {
-        val body = JSONObject().put("user", user).toString().toByteArray(Charsets.UTF_8)
+        val body = doorRelayPayloadJson().toByteArray(Charsets.UTF_8)
         conn.outputStream.use { it.write(body) }
         conn.responseCode in 200..299
     } finally {
