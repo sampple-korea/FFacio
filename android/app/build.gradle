@@ -30,8 +30,8 @@ android {
         applicationId "com.ffacio.mobile"
         minSdk 26
         targetSdk 36
-        versionCode 30
-        versionName "0.6.0-runtime"
+        versionCode 32
+        versionName "0.6.2-runtime-demo-aligned-final"
         ndk {
             // FFacio Runtime currently exposes these ABIs. Keeping the client aligned avoids unsupported installs.
             abiFilters "arm64-v8a", "armeabi-v7a"

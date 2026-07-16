@@ -133,6 +133,7 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -140,10 +141,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.random.Random
 
 private const val PREFS = "ffacio_store"
 private const val USERS_KEY = "users"
+private const val USER_STORE_POLICY_KEY = "user_store_policy_version"
+internal const val USER_STORE_POLICY_VERSION = 5
 private const val DOOR_URL_KEY = "door_url"
 private const val DOOR_TOKEN_KEY = "door_token"
 private const val DOOR_ENABLED_KEY = "door_enabled"
@@ -162,17 +164,8 @@ private const val LEGACY_SECURE_SUFFIX = "_enc_v2"
 private const val OLDER_SECURE_SUFFIX = "_enc"
 private const val STORE_PREFLIGHT_KEY = "__store_preflight"
 private const val MATCH_THRESHOLD = 0.80
-private const val MATCH_SAMPLE_THRESHOLD = 0.75
 private const val MATCH_MARGIN = 0.03
-private const val MATCH_MIN_SUPPORTING_SAMPLES = 2
-private const val ENROLL_SAMPLES = 5
-private const val ENROLL_POSE_HOLD_MS = 420L
-private const val ENROLL_REPEAT_THRESHOLD = 0.995
-private const val ENROLL_DUPLICATE_THRESHOLD = 0.88
-private const val ENROLL_MIN_DISTINCT_POSES = 3
-private const val ENROLL_TEMPLATE_MIN_SAMPLE_SCORE = 0.62
-private const val ENROLL_TEMPLATE_AVG_SAMPLE_SCORE = 0.75
-private const val ENROLL_TEMPLATE_MIN_PAIR_SCORE = 0.62
+private const val ENROLL_DUPLICATE_THRESHOLD = 0.80
 private const val ANALYSIS_INTERVAL_MS = 180L
 private const val CAMERA_ANALYSIS_STALL_MS = 6500L
 private const val CAMERA_WATCHDOG_RETRY_COOLDOWN_MS = 6000L
@@ -185,8 +178,16 @@ private const val RUNTIME_QUALITY_THRESHOLD = 0.50f
 private const val RUNTIME_EYE_CLOSED_THRESHOLD = 0.80f
 private const val RUNTIME_OCCLUSION_THRESHOLD = 0.50f
 private const val RUNTIME_MOUTH_OPEN_THRESHOLD = 0.50f
-private const val RUNTIME_MAX_PITCH = 20.0f
-private const val RUNTIME_MAX_ROLL = 20.0f
+private const val RUNTIME_MAX_YAW = 10.0f
+private const val RUNTIME_MAX_PITCH = 10.0f
+private const val RUNTIME_MAX_ROLL = 10.0f
+private const val RUNTIME_LUMINANCE_MIN = 0.0f
+private const val RUNTIME_LUMINANCE_MAX = 255.0f
+private const val RUNTIME_MIN_FACE_SIZE = 80
+private const val RUNTIME_MAX_FACE_SIZE = 1200
+private const val RUNTIME_MIN_FACE_AREA_RATIO = 0.03
+private const val ENROLL_AUTO_CAPTURE_STABLE_MS = 1200L
+internal const val AUTH_STABLE_FRAMES = 1
 private const val RUNTIME_LANDMARK_VALUE_COUNT = 136
 private const val AUTH_RESULT_HOLD_MS = 3500L
 private const val APPROVAL_LOG_LIMIT = 8
@@ -195,7 +196,7 @@ private const val AUTH_DECISION_LOG_DEDUPE_MS = 2500L
 private const val ADMIN_SESSION_TIMEOUT_MS = 120_000L
 private const val ADMIN_FACE_AUTH_TIMEOUT_MS = 30_000L
 private const val ENROLLMENT_IDLE_TIMEOUT_MS = 60_000L
-private const val USER_STORE_SCHEMA_VERSION = 3
+private const val USER_STORE_SCHEMA_VERSION = 5
 
 class MainActivity : ComponentActivity() {
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
@@ -353,11 +354,20 @@ private fun FFacioApp(
     var doorArmed by remember { mutableStateOf(prefs.getBoolean(DOOR_ENABLED_KEY, false)) }
     var doorTestInFlight by remember { mutableStateOf(false) }
     var doorTestRequestId by remember { mutableLongStateOf(0L) }
-    var passiveLivenessEnabled by remember { mutableStateOf(prefs.getBoolean(PASSIVE_LIVENESS_ENABLED_KEY, false)) }
+    val startsWithLegacyUserStore = remember {
+        needsUserStorePolicyReset(prefs.getInt(USER_STORE_POLICY_KEY, 0))
+    }
+    var passiveLivenessEnabled by remember {
+        mutableStateOf(if (startsWithLegacyUserStore) true else prefs.getBoolean(PASSIVE_LIVENESS_ENABLED_KEY, true))
+    }
     var pendingPassiveLivenessEnabled by remember { mutableStateOf<Boolean?>(null) }
-    var runtimeLivenessLevel by remember { mutableIntStateOf(sanitizeRuntimeLivenessLevel(prefs.getInt(RUNTIME_LIVENESS_LEVEL_KEY, 0))) }
+    var runtimeLivenessLevel by remember {
+        mutableIntStateOf(if (startsWithLegacyUserStore) 0 else sanitizeRuntimeLivenessLevel(prefs.getInt(RUNTIME_LIVENESS_LEVEL_KEY, 0)))
+    }
     var pendingRuntimeLivenessLevel by remember { mutableStateOf<Int?>(null) }
-    var occlusionCheckEnabled by remember { mutableStateOf(prefs.getBoolean(OCCLUSION_CHECK_ENABLED_KEY, true)) }
+    var occlusionCheckEnabled by remember {
+        mutableStateOf(if (startsWithLegacyUserStore) false else prefs.getBoolean(OCCLUSION_CHECK_ENABLED_KEY, false))
+    }
     var pendingOcclusionCheckEnabled by remember { mutableStateOf<Boolean?>(null) }
     var runtimeSnapshot by remember { mutableStateOf(FaceSDK.getConnectionSnapshot()) }
     var runtimePackageStatus by remember { mutableStateOf(queryRuntimePackageStatus(context)) }
@@ -376,21 +386,15 @@ private fun FFacioApp(
     var pendingHeadAdminUserIndex by remember { mutableIntStateOf(-1) }
     var pendingAdminAction by remember { mutableStateOf<AdminAction?>(null) }
     var adminFaceAuthExpiresAt by remember { mutableLongStateOf(0L) }
-    val enrollSamples = remember { mutableStateListOf<ByteArray>() }
-    val enrollPoses = remember { mutableStateListOf<Int>() }
     val approvalLogs = remember { mutableStateListOf<ApprovalLogEntry>() }
     val authDecisionLogs = remember { mutableStateListOf<AuthDecisionLogEntry>() }
     var lastAuthDecisionLogKey by remember { mutableStateOf("") }
     var lastAuthDecisionLogAt by remember { mutableLongStateOf(0L) }
     var accessFeedback by remember { mutableStateOf<AccessFeedback?>(null) }
-    val liveness = remember { LivenessChallenge() }
     var guideState by remember { mutableStateOf(FaceGuideState.Searching) }
     var faceBounds by remember { mutableStateOf<FaceBounds?>(null) }
-    val enrollmentHold = remember { EnrollmentPoseHold() }
+    val enrollmentStability = remember { EnrollmentStabilityTracker(ENROLL_AUTO_CAPTURE_STABLE_MS) }
     var enrollmentHoldProgress by remember { mutableStateOf(0.0f) }
-    var liveCandidate by remember { mutableIntStateOf(-1) }
-    var stableUser by remember { mutableIntStateOf(-1) }
-    var stableCount by remember { mutableIntStateOf(0) }
     var authResultHoldUntil by remember { mutableLongStateOf(0L) }
     val runtimeDecisionInFlight = remember { AtomicBoolean(false) }
     val runtimeDecisionGeneration = remember { AtomicLong(0L) }
@@ -403,6 +407,18 @@ private fun FFacioApp(
     }
     val currentAppScreen by rememberUpdatedState(appScreen)
     val currentAdminPromptInFlight by rememberUpdatedState(adminPromptInFlight)
+
+    DisposableEffect(Unit) {
+        onDispose {
+            runtimeDecisionGeneration.incrementAndGet()
+            runtimeDecisionToken.incrementAndGet()
+            runtimeDecisionStartedAt.set(0L)
+            runtimeDecisionInFlight.set(false)
+            enrollmentStability.reset()
+            users.forEach { it.wipe() }
+            users.clear()
+        }
+    }
 
     fun invalidateDoorRelayTest() {
         doorTestInFlight = false
@@ -441,10 +457,10 @@ private fun FFacioApp(
         }
     }
     LaunchedEffect(authResultHoldUntil) {
-        val remaining = authResultHoldUntil - System.currentTimeMillis()
+        val remaining = authResultHoldUntil - SystemClock.elapsedRealtime()
         if (remaining > 0L) {
             delay(remaining)
-            if (System.currentTimeMillis() >= authResultHoldUntil) {
+            if (SystemClock.elapsedRealtime() >= authResultHoldUntil) {
                 authResultHoldUntil = 0L
                 accessFeedback = null
                 if (mode == AppMode.Auth) {
@@ -468,12 +484,7 @@ private fun FFacioApp(
             ) {
                 val reset = applyAdminAutoLockReset(AdminAutoLockState(
                     enrollmentName = enrollmentName,
-                    enrollSampleCount = enrollSamples.size,
-                    enrollPoseCount = enrollPoses.size,
-                    pendingDeleteUserIndex = pendingDeleteUserIndex,
-                    liveCandidate = liveCandidate,
-                    stableUser = stableUser,
-                    stableCount = stableCount
+                    pendingDeleteUserIndex = pendingDeleteUserIndex
                 ))
                 invalidateDoorRelayTest()
                 appScreen = AppScreen.Operation
@@ -483,14 +494,8 @@ private fun FFacioApp(
                 confirmDelete = reset.confirmDelete
                 pendingDeleteUserIndex = reset.pendingDeleteUserIndex
                 enrollmentName = reset.enrollmentName
-                enrollSamples.clearSecurely()
-                enrollPoses.clear()
                 authResultHoldUntil = 0L
                 accessFeedback = null
-                liveCandidate = reset.liveCandidate
-                stableUser = reset.stableUser
-                stableCount = reset.stableCount
-                liveness.reset()
                 status = "관리자 화면 잠금"
                 detail = "보안을 위해 운영 화면으로 돌아왔습니다"
             }
@@ -511,12 +516,7 @@ private fun FFacioApp(
             ) {
                 val reset = applyAdminAutoLockReset(AdminAutoLockState(
                     enrollmentName = enrollmentName,
-                    enrollSampleCount = enrollSamples.size,
-                    enrollPoseCount = enrollPoses.size,
-                    pendingDeleteUserIndex = pendingDeleteUserIndex,
-                    liveCandidate = liveCandidate,
-                    stableUser = stableUser,
-                    stableCount = stableCount
+                    pendingDeleteUserIndex = pendingDeleteUserIndex
                 ))
                 invalidateDoorRelayTest()
                 appScreen = AppScreen.Operation
@@ -526,14 +526,8 @@ private fun FFacioApp(
                 confirmDelete = reset.confirmDelete
                 pendingDeleteUserIndex = reset.pendingDeleteUserIndex
                 enrollmentName = reset.enrollmentName
-                enrollSamples.clearSecurely()
-                enrollPoses.clear()
                 authResultHoldUntil = 0L
                 accessFeedback = null
-                liveCandidate = reset.liveCandidate
-                stableUser = reset.stableUser
-                stableCount = reset.stableCount
-                liveness.reset()
                 status = "등록 세션 만료"
                 detail = "보안을 위해 등록을 취소하고 운영 화면으로 돌아왔습니다"
             }
@@ -553,12 +547,8 @@ private fun FFacioApp(
                 adminSessionExpiresAt = 0L
                 enrollmentExpiresAt = 0L
                 authResultHoldUntil = 0L
-                liveCandidate = -1
-                stableUser = -1
-                stableCount = 0
                 pendingDeleteUserIndex = -1
                 pendingHeadAdminUserIndex = -1
-                liveness.reset()
                 status = "Head Admin 확인 시간이 초과되었습니다"
                 detail = "관리 버튼을 다시 눌러 Head Admin 얼굴 인증을 시작해 주세요"
             }
@@ -575,7 +565,7 @@ private fun FFacioApp(
 
     fun completeAdminAction(action: AdminAction) {
         adminSessionExpiresAt = SystemClock.elapsedRealtime() + ADMIN_SESSION_TIMEOUT_MS
-            when (action) {
+        when (action) {
                 AdminAction.OpenAdmin -> {
                     appScreen = AppScreen.Admin
                     authResultHoldUntil = 0L
@@ -598,22 +588,12 @@ private fun FFacioApp(
                             mode = AppMode.Enroll
                             enrollmentExpiresAt = SystemClock.elapsedRealtime() + ENROLLMENT_IDLE_TIMEOUT_MS
                             enrollmentName = name.trim()
-                            enrollSamples.clearSecurely()
-                            enrollPoses.clear()
                             authResultHoldUntil = 0L
                             guideState = FaceGuideState.Center
-                            liveCandidate = -1
-                            stableUser = -1
-                            stableCount = 0
-                            liveness.reset()
                             status = "얼굴을 중앙에 맞춰주세요"
                             detail = "FFacio가 안정적인 얼굴 템플릿을 수집하고 있습니다"
                         }.onFailure {
                             storeError = it
-                            liveCandidate = -1
-                            stableUser = -1
-                            stableCount = 0
-                            liveness.reset()
                             status = "로컬 생체 저장소를 사용할 수 없습니다"
                             detail = "얼굴 등록 전에 암호화 저장소 확인에 실패했습니다"
                         }
@@ -637,9 +617,14 @@ private fun FFacioApp(
                     storageBusy = true
                     status = "등록 사용자 삭제 중"
                     detail = "$deleteName 템플릿을 로컬 저장소에서 제거하고 있습니다"
-                    appScope.launch {
-                        val deleted = withContext(Dispatchers.IO) {
-                            runCatching { saveUsers(context, prefs, nextUsers) }
+                    val persistenceSnapshot = nextUsers.map { it.copyForRuntimeDecision() }
+                    appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                        val deleted = try {
+                            withContext(Dispatchers.IO) {
+                                runCatching { saveUsers(context, prefs, persistenceSnapshot) }
+                            }
+                        } finally {
+                            persistenceSnapshot.wipeTemplates()
                         }
                         if (!active.get()) return@launch
                         storageBusy = false
@@ -654,10 +639,6 @@ private fun FFacioApp(
                             users.replaceWith(nextUsers)
                             approvalLogs.removeAll { it.userName == deleteName }
                             authDecisionLogs.removeAll { it.userName == deleteName }
-                            liveCandidate = -1
-                            stableUser = -1
-                            stableCount = 0
-                            liveness.reset()
                             status = "등록 사용자 삭제 완료"
                             detail = "$deleteName 사용자를 삭제했습니다"
                         }
@@ -689,10 +670,6 @@ private fun FFacioApp(
                             authDecisionLogs.clear()
                             lastAuthDecisionLogKey = ""
                             lastAuthDecisionLogAt = 0L
-                            liveCandidate = -1
-                            stableUser = -1
-                            stableCount = 0
-                            liveness.reset()
                             confirmDelete = false
                             status = "등록 사용자를 삭제했습니다"
                             detail = "새 사용자 등록을 시작할 수 있습니다"
@@ -717,8 +694,13 @@ private fun FFacioApp(
                     storageBusy = true
                     status = "Head Admin 설정 중"
                     detail = "$targetName 사용자에게 관리자 권한을 저장하고 있습니다"
-                    appScope.launch {
-                        val saved = withContext(Dispatchers.IO) { runCatching { saveUsers(context, prefs, nextUsers) } }
+                    val persistenceSnapshot = nextUsers.map { it.copyForRuntimeDecision() }
+                    appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                        val saved = try {
+                            withContext(Dispatchers.IO) { runCatching { saveUsers(context, prefs, persistenceSnapshot) } }
+                        } finally {
+                            persistenceSnapshot.wipeTemplates()
+                        }
                         if (!active.get()) return@launch
                         storageBusy = false
                         saved.onSuccess {
@@ -747,8 +729,13 @@ private fun FFacioApp(
                     storageBusy = true
                     status = "Head Admin 해제 중"
                     detail = "$targetName 사용자의 관리자 권한을 해제하고 있습니다"
-                    appScope.launch {
-                        val saved = withContext(Dispatchers.IO) { runCatching { saveUsers(context, prefs, nextUsers) } }
+                    val persistenceSnapshot = nextUsers.map { it.copyForRuntimeDecision() }
+                    appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                        val saved = try {
+                            withContext(Dispatchers.IO) { runCatching { saveUsers(context, prefs, persistenceSnapshot) } }
+                        } finally {
+                            persistenceSnapshot.wipeTemplates()
+                        }
                         if (!active.get()) return@launch
                         storageBusy = false
                         saved.onSuccess {
@@ -779,16 +766,11 @@ private fun FFacioApp(
                         storeError = loaded.error
                         if (loaded.error == null) {
                             appScreen = AppScreen.Admin
+                            users.forEach { it.wipe() }
                             users.replaceWith(loaded.users)
                             mode = AppMode.Auth
                             enrollmentExpiresAt = 0L
                             enrollmentName = ""
-                            enrollSamples.clearSecurely()
-                            enrollPoses.clear()
-                            liveCandidate = -1
-                            stableUser = -1
-                            stableCount = 0
-                            liveness.reset()
                             status = if (users.isEmpty()) "첫 사용자를 등록하세요" else "로컬 템플릿 잠금 해제 완료"
                             detail = if (users.isEmpty()) "기기에 저장된 얼굴 템플릿이 없습니다" else "등록 사용자 ${users.size}명"
                         } else {
@@ -809,6 +791,7 @@ private fun FFacioApp(
                                     .remove("$USERS_KEY$SECURE_SUFFIX")
                                     .remove("$USERS_KEY$LEGACY_SECURE_SUFFIX")
                                     .remove("$USERS_KEY$OLDER_SECURE_SUFFIX")
+                                    .putInt(USER_STORE_POLICY_KEY, USER_STORE_POLICY_VERSION)
                                     .remove(DOOR_URL_KEY)
                                     .remove(DOOR_TOKEN_KEY)
                                     .remove(DOOR_ENABLED_KEY)
@@ -839,10 +822,6 @@ private fun FFacioApp(
                         authDecisionLogs.clear()
                         lastAuthDecisionLogKey = ""
                         lastAuthDecisionLogAt = 0L
-                        liveCandidate = -1
-                        stableUser = -1
-                        stableCount = 0
-                        liveness.reset()
                         confirmDelete = false
                         doorUrl = ""
                         doorToken = ""
@@ -895,10 +874,6 @@ private fun FFacioApp(
                             } else {
                                 "릴레이 저장에 실패했고 비활성화 상태 저장도 확인하지 못했습니다. 앱을 재시작해 설정 상태를 확인해 주세요"
                             }
-                            liveCandidate = -1
-                            stableUser = -1
-                            stableCount = 0
-                            liveness.reset()
                         }
                     }
                 }
@@ -957,13 +932,9 @@ private fun FFacioApp(
                     if (nextEnabled && engineProvider()?.hasPassiveLiveness() != true) {
                         val saved = prefs.edit().putBoolean(PASSIVE_LIVENESS_ENABLED_KEY, false).commit()
                         passiveLivenessEnabled = false
-                        liveCandidate = -1
-                        stableUser = -1
-                        stableCount = 0
-                        liveness.reset()
-                        status = if (saved) "좌우 얼굴 돌리기 모드" else "실제 얼굴 체크 설정을 저장할 수 없습니다"
+                        status = if (saved) "Runtime 라이브니스 꺼짐" else "실제 얼굴 체크 설정을 저장할 수 없습니다"
                         detail = if (saved) {
-                            "Runtime 라이브니스 값을 사용할 수 없어 기본 챌린지로 계속합니다"
+                            "라이브니스 검사를 건너뛰고 Runtime 품질과 유사도 기준만 사용합니다"
                         } else {
                             "Runtime 라이브니스 설정을 저장하지 못했습니다. 앱을 재시작해 상태를 확인해 주세요"
                         }
@@ -975,13 +946,13 @@ private fun FFacioApp(
                         return
                     }
                     passiveLivenessEnabled = nextEnabled
-                    liveCandidate = -1
-                    stableUser = -1
-                    stableCount = 0
-                    liveness.reset()
                     appScreen = AppScreen.Admin
-                    status = if (nextEnabled) "Runtime 라이브니스 켜짐" else "좌우 얼굴 돌리기 모드"
-                    detail = if (nextEnabled) "Runtime 라이브니스 검사와 좌우 얼굴 돌리기를 함께 사용합니다" else "기본 실제 얼굴 확인은 좌우 얼굴 돌리기 챌린지로 진행합니다"
+                    status = if (nextEnabled) "Runtime 라이브니스 켜짐" else "Runtime 라이브니스 꺼짐"
+                    detail = if (nextEnabled) {
+                        "Runtime 라이브니스와 품질·유사도 기준을 사용합니다"
+                    } else {
+                        "라이브니스 검사를 건너뛰고 Runtime 품질과 유사도 기준만 사용합니다"
+                    }
                 }
                 AdminAction.SetRuntimeLivenessLevel -> {
                     val nextLevel = pendingRuntimeLivenessLevel
@@ -998,10 +969,6 @@ private fun FFacioApp(
                         return
                     }
                     runtimeLivenessLevel = sanitized
-                    liveCandidate = -1
-                    stableUser = -1
-                    stableCount = 0
-                    liveness.reset()
                     appScreen = AppScreen.Admin
                     status = "라이브니스 검사 레벨 $sanitized"
                     detail = "다음 카메라 분석부터 Runtime 검출 요청에 그대로 전달됩니다"
@@ -1020,10 +987,6 @@ private fun FFacioApp(
                         return
                     }
                     occlusionCheckEnabled = nextEnabled
-                    liveCandidate = -1
-                    stableUser = -1
-                    stableCount = 0
-                    liveness.reset()
                     appScreen = AppScreen.Admin
                     status = if (nextEnabled) "얼굴 가림 검사 켜짐" else "얼굴 가림 검사 꺼짐"
                     detail = if (nextEnabled) {
@@ -1032,7 +995,7 @@ private fun FFacioApp(
                         "다음 요청부터 Runtime 검출 옵션에서 가림 검사를 제외하고 통과 조건에도 쓰지 않습니다"
                     }
                 }
-            }
+        }
     }
 
     fun cancelAdminAction(message: String = "Head Admin 확인이 취소되었습니다", detailMessage: String = "관리 작업에는 Head Admin 얼굴 인증이 필요합니다") {
@@ -1045,15 +1008,11 @@ private fun FFacioApp(
         adminSessionExpiresAt = 0L
         enrollmentExpiresAt = 0L
         authResultHoldUntil = 0L
-        liveCandidate = -1
-        stableUser = -1
-        stableCount = 0
         pendingDeleteUserIndex = -1
         pendingHeadAdminUserIndex = -1
         pendingPassiveLivenessEnabled = null
         pendingRuntimeLivenessLevel = null
         pendingOcclusionCheckEnabled = null
-        liveness.reset()
         status = message
         detail = detailMessage
     }
@@ -1103,10 +1062,6 @@ private fun FFacioApp(
                             detail = if (users.isEmpty()) "카메라 권한이 허용되었습니다. 얼굴 등록을 시작하세요" else "카메라를 바라봐 주세요"
                         }
                     } else {
-                        liveCandidate = -1
-                        stableUser = -1
-                        stableCount = 0
-                        liveness.reset()
                         status = "카메라 권한이 필요합니다"
                         detail = "앱 설정에서 카메라 권한을 허용해 주세요"
                     }
@@ -1128,14 +1083,8 @@ private fun FFacioApp(
                     adminSessionExpiresAt = 0L
                     enrollmentExpiresAt = 0L
                     enrollmentName = ""
-                    enrollSamples.clearSecurely()
-                    enrollPoses.clear()
                     authResultHoldUntil = 0L
                 }
-                liveCandidate = -1
-                stableUser = -1
-                stableCount = 0
-                liveness.reset()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -1143,7 +1092,17 @@ private fun FFacioApp(
     }
 
     LaunchedEffect(Unit) {
-        val loaded = withContext(Dispatchers.IO) { loadUsers(context, prefs) }
+        val loaded = withContext(Dispatchers.IO) {
+            resetLegacyUserStoreForSingleTemplatePolicy(prefs).fold(
+                onSuccess = { loadUsers(context, prefs) },
+                onFailure = { StoreLoadResult(emptyList(), it) }
+            )
+        }
+        if (startsWithLegacyUserStore && loaded.error == null) {
+            passiveLivenessEnabled = true
+            runtimeLivenessLevel = 0
+            occlusionCheckEnabled = false
+        }
         val tokenLoad = withContext(Dispatchers.IO) {
             runCatching { secureGetString(context, prefs, DOOR_TOKEN_KEY, "", failClosed = true) }
         }
@@ -1227,14 +1186,14 @@ private fun FFacioApp(
         }
     }
 
+    fun resetEnrollmentCapture() {
+        enrollmentStability.reset()
+        enrollmentHoldProgress = 0.0f
+    }
+
     fun resetTransient(invalidatePendingDecision: Boolean = true) {
         if (invalidatePendingDecision) runtimeDecisionGeneration.incrementAndGet()
-        liveCandidate = -1
-        stableUser = -1
-        stableCount = 0
-        liveness.reset()
-        enrollmentHold.reset()
-        enrollmentHoldProgress = 0.0f
+        resetEnrollmentCapture()
     }
 
     fun <T> runRuntimeDecision(
@@ -1290,8 +1249,7 @@ private fun FFacioApp(
             result = result,
             reason = reason,
             score = match?.score ?: -1.0,
-            secondScore = match?.secondScore ?: -1.0,
-            supportCount = match?.supportCount ?: 0
+            secondScore = match?.secondScore ?: -1.0
         )
         val key = authDecisionDedupeKey(entry)
         if (!shouldRecordAuthDecisionLog(key, now, lastAuthDecisionLogKey, lastAuthDecisionLogAt)) return
@@ -1303,29 +1261,39 @@ private fun FFacioApp(
         )
     }
 
-    fun persistUsersAsync(nextUsers: List<UserTemplate>, onSaved: () -> Unit) {
+    fun persistUsersAsync(
+        nextUsers: List<UserTemplate>,
+        ownedTemplates: List<ByteArray> = emptyList(),
+        onSaved: () -> Unit
+    ) {
         storageBusy = true
         status = "얼굴 템플릿 저장 중"
         detail = "암호화된 로컬 저장소에 저장하고 있습니다"
-        appScope.launch {
-            val saved = withContext(Dispatchers.IO) {
-                runCatching { saveUsers(context, prefs, nextUsers) }
-            }
-            if (!active.get()) return@launch
-            storageBusy = false
-            saved.onSuccess {
-                storeError = null
-                onSaved()
-            }.onFailure {
-                storeError = it
-                mode = AppMode.Auth
-                enrollmentExpiresAt = 0L
-                enrollmentName = ""
-                enrollSamples.clearSecurely()
-                enrollPoses.clear()
-                resetTransient()
-                status = "로컬 생체 저장소를 사용할 수 없습니다"
-                detail = "암호화된 얼굴 템플릿 저장에 실패해 인증을 차단했습니다"
+        val persistenceSnapshot = nextUsers.map { it.copyForRuntimeDecision() }
+        appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            var adoptedOwnedTemplates = false
+            try {
+                val saved = withContext(Dispatchers.IO) {
+                    runCatching { saveUsers(context, prefs, persistenceSnapshot) }
+                }
+                if (!active.get()) return@launch
+                storageBusy = false
+                saved.onSuccess {
+                    storeError = null
+                    onSaved()
+                    adoptedOwnedTemplates = true
+                }.onFailure {
+                    storeError = it
+                    mode = AppMode.Auth
+                    enrollmentExpiresAt = 0L
+                    enrollmentName = ""
+                    resetTransient()
+                    status = "로컬 생체 저장소를 사용할 수 없습니다"
+                    detail = "암호화된 얼굴 템플릿 저장에 실패해 인증을 차단했습니다"
+                }
+            } finally {
+                persistenceSnapshot.wipeTemplates()
+                if (!adoptedOwnedTemplates) ownedTemplates.forEach { it.fill(0) }
             }
         }
     }
@@ -1367,10 +1335,6 @@ private fun FFacioApp(
         adminFaceAuthExpiresAt = 0L
         adminPromptInFlight = true
         authResultHoldUntil = 0L
-        liveCandidate = -1
-        stableUser = -1
-        stableCount = 0
-        liveness.reset()
         (context as? Activity)?.window?.let { applyDoorTerminalSystemUi(window = it, immersive = false) }
         adminLauncher.launch(prompt)
     }
@@ -1441,11 +1405,11 @@ private fun FFacioApp(
             return@LaunchedEffect
         }
         if (cameraAnalysisWatchStartedAt <= 0L) {
-            cameraAnalysisWatchStartedAt = System.currentTimeMillis()
+            cameraAnalysisWatchStartedAt = SystemClock.elapsedRealtime()
         }
         while (cameraLifecycleActive && cameraCanAnalyze()) {
             delay(1000L)
-            val now = System.currentTimeMillis()
+            val now = SystemClock.elapsedRealtime()
             if (runtimeDecisionInFlight.get()) {
                 val decisionNow = SystemClock.elapsedRealtime()
                 val decisionStartedAt = runtimeDecisionStartedAt.get()
@@ -1541,7 +1505,7 @@ private fun FFacioApp(
                 processDoorRequestGate.finish()
                 ContextCompat.getMainExecutor(context).execute {
                     if (!active.get()) return@execute
-                    authResultHoldUntil = System.currentTimeMillis() + AUTH_RESULT_HOLD_MS
+                    authResultHoldUntil = SystemClock.elapsedRealtime() + AUTH_RESULT_HOLD_MS
                     guideState = if (ok) FaceGuideState.Approved else FaceGuideState.Searching
                     accessFeedback = AccessFeedback(if (ok) AccessFeedbackKind.DoorSucceeded else AccessFeedbackKind.DoorFailed, user.name)
                     recordApproval(user.name, if (ok) "문 열림 요청 완료" else "문 제어 실패")
@@ -1592,46 +1556,18 @@ private fun FFacioApp(
         }
         if (!acceptsAuthenticationCandidate(
                 score = match.score,
-                secondScore = match.secondScore,
-                supportCount = match.supportCount,
-                availableSamples = matchedUser.matchSampleCount()
+                secondScore = match.secondScore
             )
         ) {
-            recordAuthDecision(matchedUser.name, "보류", authDecisionReason(match, matchedUser.matchSampleCount()), match)
+            recordAuthDecision(matchedUser.name, "보류", authDecisionReason(match), match)
             resetTransient()
             guideState = FaceGuideState.Rejected
             status = "인증 보류"
             detail = "등록된 얼굴과 충분히 일치하지 않습니다. 정면과 거리를 맞춰 다시 시도해 주세요"
             return
         }
-        if (liveCandidate != matchedUserIndex) {
-            liveCandidate = matchedUserIndex
-            stableUser = -1
-            stableCount = 0
-            liveness.reset()
-        }
-        if (!liveness.update(obs.pose)) {
-            stableUser = -1
-            stableCount = 0
-            guideState = when (liveness.currentTarget()) {
-                -1 -> FaceGuideState.TurnLeft
-                1 -> FaceGuideState.TurnRight
-                else -> FaceGuideState.Center
-            }
-            status = liveness.prompt()
-            detail = "등록된 얼굴 후보의 실제 얼굴 여부를 확인합니다"
-            return
-        }
-        if (stableUser == matchedUserIndex) stableCount += 1 else {
-            stableUser = matchedUserIndex
-            stableCount = 1
-        }
-        if (stableCount < 3) {
-            guideState = FaceGuideState.Center
-            status = "안정적으로 확인 중입니다"
-            detail = "잠시 그대로 유지해 주세요 · " + runtimeObservationSummary(obs, includeDemographics = false)
-            return
-        }
+        // Runtime demo authentication policy: passive liveness + quality + similarity.
+        // No head-turn challenge; one accepted frame is sufficient.
         val user = users.getOrNull(matchedUserIndex) ?: return
         if (mode == AppMode.AdminAuth) {
             val action = pendingAdminAction
@@ -1666,14 +1602,14 @@ private fun FFacioApp(
             completeAdminAction(approvedAction)
             return
         }
-        recordAuthDecision(user.name, "승인", "score/support/liveness/stability 통과", match)
+        recordAuthDecision(user.name, "승인", "score/liveness 통과", match)
         val doorConfigured = doorRelayConfigured(doorUrl, doorToken)
         if (doorArmed && !doorConfigured) {
             doorArmed = false
             prefs.edit().putBoolean(DOOR_ENABLED_KEY, false).apply()
         }
         val shouldOpenDoor = doorArmed && doorConfigured
-        authResultHoldUntil = System.currentTimeMillis() + AUTH_RESULT_HOLD_MS
+        authResultHoldUntil = SystemClock.elapsedRealtime() + AUTH_RESULT_HOLD_MS
         guideState = if (shouldOpenDoor) FaceGuideState.Center else FaceGuideState.Approved
         accessFeedback = if (shouldOpenDoor) {
             AccessFeedback(AccessFeedbackKind.DoorPending, user.name)
@@ -1700,7 +1636,7 @@ private fun FFacioApp(
         if (adminPromptInFlight) return
         if (mode == AppMode.Enroll && appScreen != AppScreen.Admin) return
         if (mode == AppMode.Auth && appScreen != AppScreen.Operation) return
-        if (mode == AppMode.Auth && System.currentTimeMillis() < authResultHoldUntil) return
+        if (mode == AppMode.Auth && SystemClock.elapsedRealtime() < authResultHoldUntil) return
         faceBounds = obs.faceBounds ?: if (!obs.ok) null else faceBounds
         if (runtimeDecisionInFlight.get()) return
         if (!obs.ok) {
@@ -1717,115 +1653,60 @@ private fun FFacioApp(
             return
         }
         if (mode == AppMode.Enroll) {
-            val targetPose = enrollmentTargetPose(enrollSamples.size, enrollPoses)
-            guideState = faceGuideStateForPose(targetPose ?: obs.pose)
-            if (!enrollmentHold.update(targetPose ?: obs.pose, obs.pose)) {
-                enrollmentHoldProgress = enrollmentHold.progress()
-                status = enrollmentTargetStatus(targetPose ?: obs.pose)
-                detail = "${enrollSamples.size}/$ENROLL_SAMPLES · ${enrollmentTargetInstruction(targetPose)}"
+            val cleanName = enrollmentName.ifBlank { name.trim() }
+            if (cleanName.isBlank()) {
+                resetEnrollmentCapture()
+                guideState = FaceGuideState.Rejected
+                status = "이름을 입력해 주세요"
+                detail = "사용자 이름을 입력한 뒤 다시 등록해 주세요"
                 return
             }
-            enrollmentHoldProgress = 1.0f
-            val enrollmentTemplate = obs.template.copyOf()
-            val sampleSnapshot = enrollSamples.map { it.copyOf() }
-            val poseSnapshot = enrollPoses.toList()
-            val userSnapshot = users.map { it.copyForRuntimeDecision() }
-            val cleanName = enrollmentName.ifBlank { name.trim() }
-            enrollmentHold.reset()
+            guideState = FaceGuideState.Center
+            val enrollmentNow = SystemClock.elapsedRealtime()
+            val ready = enrollmentStability.update(obs, enrollmentNow)
+            enrollmentHoldProgress = enrollmentStability.progress(enrollmentNow)
+            if (!ready) {
+                status = "얼굴을 안정적으로 확인 중입니다"
+                detail = "정면을 바라보고 잠시 유지해 주세요 · ${(enrollmentHoldProgress * 100).toInt()}% · " +
+                    runtimeObservationSummary(obs)
+                return
+            }
+            val enrollmentTemplate = enrollmentStability.takeTemplate() ?: obs.template.copyOf()
             enrollmentHoldProgress = 0.0f
-            status = "Runtime 등록 품질 확인 중"
-            detail = "수집한 얼굴 특징의 중복과 일관성을 확인하고 있습니다"
+            val userSnapshot = users.map { it.copyForRuntimeDecision() }
+            status = "Runtime 등록 확인 중"
+            detail = "현재 얼굴 템플릿을 등록 사용자와 확인하고 있습니다"
             val started = runRuntimeDecision(
                 computation = {
                     try {
-                        val sampleDecision = enrollmentSampleDecision(
-                        enrollmentTemplate,
-                        obs.pose,
-                        sampleSnapshot,
-                        poseSnapshot
-                    )
-                    if (!sampleDecision.accepted) {
-                        enrollmentTemplate.fill(0)
-                        sampleSnapshot.wipeCopies()
-                        return@runRuntimeDecision EnrollmentRuntimeDecision.Rejected(sampleDecision)
-                    }
-                    duplicateUserForEnrollment(enrollmentTemplate, userSnapshot)?.let { duplicate ->
-                        enrollmentTemplate.fill(0)
-                        sampleSnapshot.wipeCopies()
-                        return@runRuntimeDecision EnrollmentRuntimeDecision.Duplicate(duplicate.name)
-                    }
-                    if (sampleSnapshot.size + 1 < ENROLL_SAMPLES) {
-                        sampleSnapshot.wipeCopies()
-                        return@runRuntimeDecision EnrollmentRuntimeDecision.SampleAccepted(enrollmentTemplate, obs.pose)
-                    }
-                    val allSamples = sampleSnapshot + enrollmentTemplate
-                    val allPoses = poseSnapshot + obs.pose
-                    if (cleanName.isBlank()) {
-                        allSamples.wipeCopies()
-                        return@runRuntimeDecision EnrollmentRuntimeDecision.Rejected(
-                            EnrollmentSampleDecision(false, "이름을 입력해 주세요", "사용자 이름을 입력한 뒤 다시 등록해 주세요")
+                        if (!isUsableRuntimeTemplate(enrollmentTemplate)) {
+                            return@runRuntimeDecision EnrollmentRuntimeDecision.Rejected(
+                                EnrollmentFailure("얼굴 특징을 다시 추출해 주세요", "Runtime 템플릿이 비어 있거나 손상되었습니다")
+                            )
+                        }
+                        val duplicateSearch = findBestEnrollmentDuplicate(enrollmentTemplate, userSnapshot)
+                        EnrollmentRuntimeDecision.Ready(
+                            name = cleanName,
+                            template = enrollmentTemplate.copyOf(),
+                            duplicateName = duplicateSearch.userName,
+                            duplicateScore = duplicateSearch.score,
+                            failedComparisons = duplicateSearch.failedComparisons
                         )
-                    }
-                    val representative = selectRepresentativeTemplate(allSamples)
-                    val templateQuality = enrollmentTemplateQuality(representative, allSamples, allPoses)
-                    if (!templateQuality.accepted) {
-                        representative.fill(0)
-                        allSamples.wipeCopies()
-                        return@runRuntimeDecision EnrollmentRuntimeDecision.TemplateRejected(templateQuality)
-                    }
-                    duplicateUserForEnrollment(representative, userSnapshot)?.let { duplicate ->
-                        representative.fill(0)
-                        allSamples.wipeCopies()
-                        return@runRuntimeDecision EnrollmentRuntimeDecision.Duplicate(duplicate.name)
-                    }
-                    val auxiliary = allSamples
-                        .filterNot { it.contentEquals(representative) }
-                        .map { it.copyOf() }
-                    val ready = EnrollmentRuntimeDecision.Ready(cleanName, representative.copyOf(), auxiliary)
-                        representative.fill(0)
-                        allSamples.wipeCopies()
-                        ready
                     } finally {
+                        enrollmentTemplate.fill(0)
                         userSnapshot.wipeTemplates()
                     }
                 },
                 discardResult = { decision -> decision.wipe() },
                 applyResult = { result ->
                     result.onFailure { error ->
-                        enrollmentTemplate.fill(0)
-                        sampleSnapshot.wipeCopies()
+                        resetEnrollmentCapture()
                         status = "Runtime 비교 오류"
                         detail = runtimeCallFailureMessage(error)
                     }.onSuccess { decision ->
                         when (decision) {
                             is EnrollmentRuntimeDecision.Rejected -> {
-                                status = decision.decision.status
-                                detail = decision.decision.detail
-                            }
-                            is EnrollmentRuntimeDecision.Duplicate -> {
-                                mode = AppMode.Auth
-                                enrollmentExpiresAt = 0L
-                                enrollmentName = ""
-                                enrollSamples.clearSecurely()
-                                enrollPoses.clear()
-                                resetTransient()
-                                status = "이미 등록된 얼굴입니다"
-                                detail = "${decision.userName} 사용자와 너무 비슷합니다. 기존 사용자로 인증하거나 다른 사람을 등록해 주세요"
-                            }
-                            is EnrollmentRuntimeDecision.SampleAccepted -> {
-                                enrollSamples.add(decision.template)
-                                enrollPoses.add(decision.pose)
-                                enrollmentExpiresAt = SystemClock.elapsedRealtime() + ENROLLMENT_IDLE_TIMEOUT_MS
-                                val nextTargetPose = enrollmentTargetPose(enrollSamples.size, enrollPoses)
-                                guideState = faceGuideStateForPose(nextTargetPose ?: obs.pose)
-                                status = "샘플 수집 중"
-                                detail = enrollmentProgressDetail(enrollSamples.size, obs.pose, nextTargetPose) + " · " + runtimeObservationSummary(obs, includeDemographics = true)
-                            }
-                            is EnrollmentRuntimeDecision.TemplateRejected -> {
-                                enrollSamples.clearSecurely()
-                                enrollPoses.clear()
-                                enrollmentExpiresAt = SystemClock.elapsedRealtime() + ENROLLMENT_IDLE_TIMEOUT_MS
-                                resetTransient()
+                                resetEnrollmentCapture()
                                 status = decision.decision.status
                                 detail = decision.decision.detail
                             }
@@ -1833,20 +1714,26 @@ private fun FFacioApp(
                                 val nextUsers = users.toList() + UserTemplate(
                                     name = decision.name,
                                     template = decision.template,
-                                    samples = decision.samples,
                                     engineId = FACE_ENGINE_ID,
                                     templateSize = decision.template.size
                                 )
-                                persistUsersAsync(nextUsers) {
+                                persistUsersAsync(nextUsers, ownedTemplates = listOf(decision.template)) {
                                     users.replaceWith(nextUsers)
                                     mode = AppMode.Auth
                                     enrollmentExpiresAt = 0L
                                     enrollmentName = ""
-                                    enrollSamples.clearSecurely()
-                                    enrollPoses.clear()
+                                    resetEnrollmentCapture()
                                     resetTransient()
                                     status = "얼굴 등록이 완료되었습니다"
-                                    detail = "${decision.name} · 등록 사용자 ${users.size}명"
+                                    val duplicateWarning = decision.duplicateName?.let { duplicateName ->
+                                        " · ${duplicateName} 사용자와 유사도 %.3f(별도 등록 허용)".format(Locale.US, decision.duplicateScore)
+                                    }.orEmpty()
+                                    val partialWarning = if (decision.failedComparisons > 0) {
+                                        " · 비교 실패 ${decision.failedComparisons}건 제외"
+                                    } else {
+                                        ""
+                                    }
+                                    detail = "${decision.name} · 단일 Runtime 템플릿 등록 · 등록 사용자 ${users.size}명$duplicateWarning$partialWarning"
                                 }
                             }
                         }
@@ -1855,8 +1742,8 @@ private fun FFacioApp(
             )
             if (!started) {
                 enrollmentTemplate.fill(0)
-                sampleSnapshot.wipeCopies()
                 userSnapshot.wipeTemplates()
+                resetEnrollmentCapture()
             }
             return
         }
@@ -1874,8 +1761,12 @@ private fun FFacioApp(
             detail = "이전 자체 엔진 템플릿은 FFacio Runtime 형식과 호환되지 않습니다. 관리자 화면에서 삭제 후 다시 등록해 주세요"
             return
         }
-        val eligibleCandidateIndices = if (mode == AppMode.AdminAuth) adminAuthCandidateIndices(users) else users.indices.toList()
-        val candidateIndices = if (liveCandidate in eligibleCandidateIndices) listOf(liveCandidate) else eligibleCandidateIndices
+        val eligibleCandidateIndices = if (mode == AppMode.AdminAuth) {
+            adminAuthCandidateIndices(users)
+        } else {
+            users.indices.filter { index -> users[index].isCompatible() }
+        }
+        val candidateIndices = eligibleCandidateIndices
         if (candidateIndices.isEmpty()) {
             resetTransient()
             guideState = FaceGuideState.Searching
@@ -1935,7 +1826,7 @@ private fun FFacioApp(
                             clearAuthResultHold()
                             resetTransient()
                             status = if (users.isEmpty()) "등록된 사용자가 없습니다" else "출입 인증 대기 중"
-                            detail = if (users.isEmpty()) "관리자 인증 후 첫 사용자를 등록하세요" else "카메라를 바라보고 안내에 따라 얼굴을 돌려 주세요"
+                            detail = if (users.isEmpty()) "관리자 인증 후 첫 사용자를 등록하세요" else "카메라를 정면으로 바라봐 주세요"
                         }) { Text("운영 화면") }
                     }
                 },
@@ -1961,8 +1852,6 @@ private fun FFacioApp(
                 faceBounds = faceBounds,
                 isEnrollmentMode = mode == AppMode.Enroll,
                 isAdminAuthMode = mode == AppMode.AdminAuth,
-                enrollmentPoses = enrollPoses.toList(),
-                enrollmentCount = enrollSamples.size,
                 enrollmentHoldProgress = enrollmentHoldProgress,
                 engineProvider = engineProvider,
                 analyzerExecutor = analyzerExecutor,
@@ -2021,186 +1910,183 @@ private fun FFacioApp(
                 )
             } else {
                 ControlPanel(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                status = status,
-                detail = detail,
-                mode = mode,
-                blockedReason = blockedReason(),
-                name = name,
-                doorUrl = doorUrl,
-                doorToken = doorToken,
-                doorArmed = doorArmed,
-                doorTestInFlight = doorTestInFlight,
-                passiveLivenessEnabled = passiveLivenessEnabled,
-                runtimeLivenessLevel = runtimeLivenessLevel,
-                occlusionCheckEnabled = occlusionCheckEnabled,
-                runtimeStateLabel = runtimeConnectionStateLabel(runtimeSnapshot.connected, runtimeSnapshot.connecting, runtimeSnapshot.ready),
-                runtimeDisconnectLabel = runtimeDisconnectReasonLabel(runtimeSnapshot.disconnectReason),
-                runtimeInitLabel = runtimeInitializationLabel(runtimeSnapshot.initializationResult),
-                runtimeReconnectAttempt = runtimeSnapshot.reconnectAttempt,
-                runtimePackageLabel = runtimePackageLabel(runtimePackageStatus),
-                runtimeTimingSummary = runtimeTimingSummary(lastRuntimeTimings),
-                accessFeedback = accessFeedback,
-                approvalLogs = approvalLogs,
-                authDecisionLogs = authDecisionLogs,
-                users = users,
-                userCount = users.size,
-                enrollCount = enrollSamples.size,
-                canResetStore = storeError != null,
-                canUnlockDoor = doorConfigError != null,
-                canRetryBlocked = blockedReason() != null && !modelLoading && modelError == null && !storageBusy,
-                canMutate = !storageBusy,
-                onName = { if (mode != AppMode.Enroll) name = it },
-                onDoorUrl = {
-                    invalidateDoorRelayTest()
-                    doorUrl = it
-                },
-                onDoorToken = {
-                    invalidateDoorRelayTest()
-                    doorToken = it
-                },
-                onDoorArmed = onDoorArmed@{
-                    if (doorTestInFlight) {
-                        status = "릴레이 확인 중입니다"
-                        detail = "연결 테스트가 끝난 뒤 문 열림 릴레이를 변경하세요"
-                        return@onDoorArmed
-                    }
-                    if (it && doorUrl.trim().isEmpty()) {
-                        doorArmed = false
-                        status = "릴레이 URL이 필요합니다"
-                        detail = "문 열림을 활성화하려면 HTTPS 릴레이 URL을 먼저 입력하세요"
-                    } else if (it && doorToken.trim().isEmpty()) {
-                        doorArmed = false
-                        status = "릴레이 토큰이 필요합니다"
-                        detail = "문 열림을 활성화하려면 Bearer 토큰을 입력하세요"
-                    } else if (it && !doorRelayConfigured(doorUrl, doorToken)) {
-                        doorArmed = false
-                        status = "올바른 HTTPS 릴레이가 필요합니다"
-                        detail = "host가 포함된 HTTPS URL과 Bearer 토큰을 확인하세요"
-                    } else if (it) {
-                        performAdminAction(AdminAction.ArmDoor)
-                    } else {
-                        performAdminAction(AdminAction.DisarmDoor)
-                    }
-                },
-                onTestDoorRelay = {
-                    performAdminAction(AdminAction.TestDoorRelay)
-                },
-                onPassiveLivenessEnabled = passiveToggle@{
-                    pendingPassiveLivenessEnabled = it
-                    performAdminAction(AdminAction.SetPassiveLiveness)
-                },
-                onRuntimeLivenessLevel = { level ->
-                    pendingRuntimeLivenessLevel = level
-                    performAdminAction(AdminAction.SetRuntimeLivenessLevel)
-                },
-                onOcclusionCheckEnabled = { enabled ->
-                    pendingOcclusionCheckEnabled = enabled
-                    performAdminAction(AdminAction.SetOcclusionCheck)
-                },
-                onReconnectRuntime = {
-                    status = "FFacio Runtime을 다시 연결하는 중입니다"
-                    detail = "Binder 세션을 해제하고 다시 바인딩합니다"
-                    retryRuntime()
-                },
-                onEnroll = enroll@{
-                    blockedReason()?.let {
-                        status = it
-                        detail = "상태를 해결한 뒤 다시 시도해 주세요"
-                        return@enroll
-                    }
-                    clearAuthResultHold()
-                    guideState = FaceGuideState.Center
-                    if (name.trim().isEmpty()) {
-                        status = "이름을 입력하세요"
-                        detail = "등록할 사용자의 이름이 필요합니다"
-                    } else {
-                        performAdminAction(AdminAction.StartEnroll)
-                    }
-                },
-                onAuth = auth@{
-                    blockedReason()?.let {
-                        status = it
-                        detail = "상태를 해결한 뒤 다시 시도해 주세요"
-                        return@auth
-                    }
-                    mode = AppMode.Auth
-                    enrollmentExpiresAt = 0L
-                    enrollmentName = ""
-                    enrollSamples.clearSecurely()
-                    enrollPoses.clear()
-                    clearAuthResultHold()
-                    guideState = FaceGuideState.Searching
-                    resetTransient()
-                    status = if (users.isEmpty()) "먼저 얼굴을 등록하세요" else "인증 모드"
-                    detail = if (users.isEmpty()) "등록 사용자 0명" else "카메라를 바라봐 주세요"
-                },
-                onDelete = {
-                    confirmDelete = true
-                },
-                onDeleteUser = { index ->
-                    pendingDeleteUserIndex = index
-                },
-                onSetHeadAdmin = { index ->
-                    pendingHeadAdminUserIndex = index
-                    requestAdmin(AdminAction.SetHeadAdmin)
-                },
-                onClearHeadAdmin = { index ->
-                    pendingHeadAdminUserIndex = index
-                    requestAdmin(AdminAction.ClearHeadAdmin)
-                },
-                onUnlockStore = {
-                    performAdminAction(AdminAction.UnlockStore)
-                },
-                onResetStore = {
-                    performAdminAction(AdminAction.ResetStore)
-                },
-                onUnlockDoor = {
-                    performAdminAction(AdminAction.UnlockDoor)
-                },
-                onRetry = retry@{
-                    if (modelError != null) {
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    status = status,
+                    detail = detail,
+                    mode = mode,
+                    blockedReason = blockedReason(),
+                    name = name,
+                    doorUrl = doorUrl,
+                    doorToken = doorToken,
+                    doorArmed = doorArmed,
+                    doorTestInFlight = doorTestInFlight,
+                    passiveLivenessEnabled = passiveLivenessEnabled,
+                    runtimeLivenessLevel = runtimeLivenessLevel,
+                    occlusionCheckEnabled = occlusionCheckEnabled,
+                    runtimeStateLabel = runtimeConnectionStateLabel(runtimeSnapshot.connected, runtimeSnapshot.connecting, runtimeSnapshot.ready),
+                    runtimeDisconnectLabel = runtimeDisconnectReasonLabel(runtimeSnapshot.disconnectReason),
+                    runtimeInitLabel = runtimeInitializationLabel(runtimeSnapshot.initializationResult),
+                    runtimeReconnectAttempt = runtimeSnapshot.reconnectAttempt,
+                    runtimePackageLabel = runtimePackageLabel(runtimePackageStatus),
+                    runtimeTimingSummary = runtimeTimingSummary(lastRuntimeTimings),
+                    accessFeedback = accessFeedback,
+                    approvalLogs = approvalLogs,
+                    authDecisionLogs = authDecisionLogs,
+                    users = users,
+                    userCount = users.size,
+                    canResetStore = storeError != null,
+                    canUnlockDoor = doorConfigError != null,
+                    canRetryBlocked = blockedReason() != null && !modelLoading && modelError == null && !storageBusy,
+                    canMutate = !storageBusy,
+                    onName = { if (mode != AppMode.Enroll) name = it },
+                    onDoorUrl = {
+                        invalidateDoorRelayTest()
+                        doorUrl = it
+                    },
+                    onDoorToken = {
+                        invalidateDoorRelayTest()
+                        doorToken = it
+                    },
+                    onDoorArmed = onDoorArmed@{
+                        if (doorTestInFlight) {
+                            status = "릴레이 확인 중입니다"
+                            detail = "연결 테스트가 끝난 뒤 문 열림 릴레이를 변경하세요"
+                            return@onDoorArmed
+                        }
+                        if (it && doorUrl.trim().isEmpty()) {
+                            doorArmed = false
+                            status = "릴레이 URL이 필요합니다"
+                            detail = "문 열림을 활성화하려면 HTTPS 릴레이 URL을 먼저 입력하세요"
+                        } else if (it && doorToken.trim().isEmpty()) {
+                            doorArmed = false
+                            status = "릴레이 토큰이 필요합니다"
+                            detail = "문 열림을 활성화하려면 Bearer 토큰을 입력하세요"
+                        } else if (it && !doorRelayConfigured(doorUrl, doorToken)) {
+                            doorArmed = false
+                            status = "올바른 HTTPS 릴레이가 필요합니다"
+                            detail = "host가 포함된 HTTPS URL과 Bearer 토큰을 확인하세요"
+                        } else if (it) {
+                            performAdminAction(AdminAction.ArmDoor)
+                        } else {
+                            performAdminAction(AdminAction.DisarmDoor)
+                        }
+                    },
+                    onTestDoorRelay = {
+                        performAdminAction(AdminAction.TestDoorRelay)
+                    },
+                    onPassiveLivenessEnabled = passiveToggle@{
+                        pendingPassiveLivenessEnabled = it
+                        performAdminAction(AdminAction.SetPassiveLiveness)
+                    },
+                    onRuntimeLivenessLevel = { level ->
+                        pendingRuntimeLivenessLevel = level
+                        performAdminAction(AdminAction.SetRuntimeLivenessLevel)
+                    },
+                    onOcclusionCheckEnabled = { enabled ->
+                        pendingOcclusionCheckEnabled = enabled
+                        performAdminAction(AdminAction.SetOcclusionCheck)
+                    },
+                    onReconnectRuntime = {
                         status = "FFacio Runtime을 다시 연결하는 중입니다"
-                        detail = "Runtime 설치·서명·서비스 상태를 다시 확인합니다"
+                        detail = "Binder 세션을 해제하고 다시 바인딩합니다"
                         retryRuntime()
-                        return@retry
-                    }
-                    if (noCameraHardware) {
-                        status = blockedReason() ?: status
-                        detail = "전면 또는 후면 카메라가 있는 기기에서 실행해 주세요"
-                        return@retry
-                    }
-                    if (analyzerFatalStall) {
-                        analyzerFatalStall = false
-                        cameraAvailable = true
-                        firstAnalyzedFrameLogged.set(false)
-                        lastAnalysisAt.set(0L)
-                        cameraRetryNonce += 1
-                        status = "Runtime과 카메라를 복구하는 중입니다"
-                        detail = "Binder 연결과 카메라 분석 파이프라인을 다시 시작합니다"
-                        retryRuntime()
-                        return@retry
-                    }
-                    cameraAvailable = true
-                    noCameraHardware = false
-                    cameraRetryNonce += 1
-                    if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
-                    if (storeError != null) {
+                    },
+                    onEnroll = enroll@{
+                        blockedReason()?.let {
+                            status = it
+                            detail = "상태를 해결한 뒤 다시 시도해 주세요"
+                            return@enroll
+                        }
+                        clearAuthResultHold()
+                        guideState = FaceGuideState.Center
+                        if (name.trim().isEmpty()) {
+                            status = "이름을 입력하세요"
+                            detail = "등록할 사용자의 이름이 필요합니다"
+                        } else {
+                            performAdminAction(AdminAction.StartEnroll)
+                        }
+                    },
+                    onAuth = auth@{
+                        blockedReason()?.let {
+                            status = it
+                            detail = "상태를 해결한 뒤 다시 시도해 주세요"
+                            return@auth
+                        }
+                        mode = AppMode.Auth
+                        enrollmentExpiresAt = 0L
+                        enrollmentName = ""
+                        clearAuthResultHold()
+                        guideState = FaceGuideState.Searching
+                        resetTransient()
+                        status = if (users.isEmpty()) "먼저 얼굴을 등록하세요" else "인증 모드"
+                        detail = if (users.isEmpty()) "등록 사용자 0명" else "카메라를 바라봐 주세요"
+                    },
+                    onDelete = {
+                        confirmDelete = true
+                    },
+                    onDeleteUser = { index ->
+                        pendingDeleteUserIndex = index
+                    },
+                    onSetHeadAdmin = { index ->
+                        pendingHeadAdminUserIndex = index
+                        requestAdmin(AdminAction.SetHeadAdmin)
+                    },
+                    onClearHeadAdmin = { index ->
+                        pendingHeadAdminUserIndex = index
+                        requestAdmin(AdminAction.ClearHeadAdmin)
+                    },
+                    onUnlockStore = {
                         performAdminAction(AdminAction.UnlockStore)
-                    } else if (doorConfigError != null) {
+                    },
+                    onResetStore = {
+                        performAdminAction(AdminAction.ResetStore)
+                    },
+                    onUnlockDoor = {
                         performAdminAction(AdminAction.UnlockDoor)
-                    } else {
-                        status = "카메라를 다시 확인하는 중입니다"
-                        detail = "잠시만 기다려 주세요"
+                    },
+                    onRetry = retry@{
+                        if (modelError != null) {
+                            status = "FFacio Runtime을 다시 연결하는 중입니다"
+                            detail = "Runtime 설치·서명·서비스 상태를 다시 확인합니다"
+                            retryRuntime()
+                            return@retry
+                        }
+                        if (noCameraHardware) {
+                            status = blockedReason() ?: status
+                            detail = "전면 또는 후면 카메라가 있는 기기에서 실행해 주세요"
+                            return@retry
+                        }
+                        if (analyzerFatalStall) {
+                            analyzerFatalStall = false
+                            cameraAvailable = true
+                            firstAnalyzedFrameLogged.set(false)
+                            lastAnalysisAt.set(0L)
+                            cameraRetryNonce += 1
+                            status = "Runtime과 카메라를 복구하는 중입니다"
+                            detail = "Binder 연결과 카메라 분석 파이프라인을 다시 시작합니다"
+                            retryRuntime()
+                            return@retry
+                        }
+                        cameraAvailable = true
+                        noCameraHardware = false
+                        cameraRetryNonce += 1
+                        if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
+                        if (storeError != null) {
+                            performAdminAction(AdminAction.UnlockStore)
+                        } else if (doorConfigError != null) {
+                            performAdminAction(AdminAction.UnlockDoor)
+                        } else {
+                            status = "카메라를 다시 확인하는 중입니다"
+                            detail = "잠시만 기다려 주세요"
+                        }
+                    },
+                    onOpenSettings = {
+                        context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.fromParts("package", context.packageName, null)
+                        })
                     }
-                },
-                onOpenSettings = {
-                    context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                        data = Uri.fromParts("package", context.packageName, null)
-                    })
-                }
                 )
             }
         }
@@ -2252,8 +2138,6 @@ private fun CameraStage(
     faceBounds: FaceBounds?,
     isEnrollmentMode: Boolean,
     isAdminAuthMode: Boolean,
-    enrollmentPoses: List<Int>,
-    enrollmentCount: Int,
     enrollmentHoldProgress: Float,
     engineProvider: () -> MobileFaceEngine?,
     analyzerExecutor: ExecutorService,
@@ -2375,11 +2259,7 @@ private fun CameraStage(
             .clip(RoundedCornerShape(32.dp))
             .background(ComposeColor.Black)
     ) {
-        val enrollmentGuide = if (enabled && isEnrollmentMode) {
-            enrollmentGuideState(enrollmentPoses, enrollmentCount, enrollmentHoldProgress)
-        } else {
-            null
-        }
+        val enrollmentProgress = enrollmentHoldProgress.takeIf { enabled && isEnrollmentMode }
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val fallbackRingSize = responsiveFaceGuideSize(maxWidth, maxHeight)
             val containerWidthPx = with(density) { maxWidth.toPx() }
@@ -2405,7 +2285,7 @@ private fun CameraStage(
             AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
             FaceGuideOverlay(
                 state = guideState,
-                enrollmentGuide = enrollmentGuide,
+                enrollmentProgress = enrollmentProgress,
                 isAdminAuthMode = isAdminAuthMode,
                 ringSize = ringSize,
                 modifier = Modifier
@@ -2457,7 +2337,7 @@ private fun CameraStage(
 @Composable
 private fun FaceGuideOverlay(
     state: FaceGuideState,
-    enrollmentGuide: EnrollmentGuideState? = null,
+    enrollmentProgress: Float? = null,
     isAdminAuthMode: Boolean = false,
     ringSize: Dp = 260.dp,
     modifier: Modifier = Modifier
@@ -2465,19 +2345,24 @@ private fun FaceGuideOverlay(
     val targetRingColor = when {
         state == FaceGuideState.Approved -> ComposeColor(0xFF30D158)
         state == FaceGuideState.Rejected -> ComposeColor(0xFFFF453A)
-        state == FaceGuideState.TurnLeft || state == FaceGuideState.TurnRight -> ComposeColor(0xFF0A84FF)
+        enrollmentProgress != null -> ComposeColor(0xFF30D158)
         isAdminAuthMode -> ComposeColor(0xFF0A84FF)
-        state == FaceGuideState.Center -> ComposeColor(0xFFFFFFFF)
+        state == FaceGuideState.Center -> ComposeColor.White
         else -> ComposeColor(0x99FFFFFF)
     }
     val ringColor by animateColorAsState(
-        targetValue = if (enrollmentGuide != null) ComposeColor(0xFF30D158) else targetRingColor,
+        targetValue = targetRingColor,
         animationSpec = tween(durationMillis = 220),
         label = "face-guide-color"
     )
     val progress by animateFloatAsState(
-        targetValue = enrollmentGuide?.progress ?: if (state == FaceGuideState.Approved) 1.0f else 0.0f,
-        animationSpec = tween(durationMillis = 280),
+        targetValue = enrollmentProgress ?: when (state) {
+            FaceGuideState.Searching -> 0.16f
+            FaceGuideState.Center -> 0.34f
+            FaceGuideState.Rejected -> 0.66f
+            FaceGuideState.Approved -> 1.0f
+        },
+        animationSpec = tween(durationMillis = 260),
         label = "face-guide-progress"
     )
     val scale by animateFloatAsState(
@@ -2494,18 +2379,6 @@ private fun FaceGuideOverlay(
         animationSpec = tween(durationMillis = 260),
         label = "face-guide-alpha"
     )
-    val symbolOffset by animateFloatAsState(
-        targetValue = when {
-            enrollmentGuide?.nextPose == -1 -> -26.0f
-            enrollmentGuide?.nextPose == 1 -> 26.0f
-            state == FaceGuideState.TurnLeft -> -26.0f
-            state == FaceGuideState.TurnRight -> 26.0f
-            else -> 0.0f
-        },
-        animationSpec = tween(durationMillis = 280),
-        label = "face-guide-symbol-offset"
-    )
-    val symbolState = if (enrollmentGuide == null) state else FaceGuideState.Searching
     Box(
         modifier = modifier
             .size(ringSize)
@@ -2513,98 +2386,26 @@ private fun FaceGuideOverlay(
                 scaleX = scale
                 scaleY = scale
                 this.alpha = alpha
-        },
+            },
         contentAlignment = Alignment.Center
     ) {
-        if (enrollmentGuide != null) {
-            Canvas(modifier = Modifier.fillMaxSize().padding(5.dp)) {
-                val outerStroke = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
-                val poseStroke = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round)
-                drawArc(
-                    color = ComposeColor.White.copy(alpha = 0.24f),
-                    startAngle = -90f,
-                    sweepAngle = 360f,
-                    useCenter = false,
-                    style = outerStroke
-                )
-                drawArc(
-                    color = ComposeColor(0xFF30D158).copy(alpha = 0.92f),
-                    startAngle = -90f,
-                    sweepAngle = 360f * progress,
-                    useCenter = false,
-                    style = outerStroke
-                )
-                drawArc(
-                    color = ComposeColor(0xFF0071E3).copy(alpha = 0.86f),
-                    startAngle = -90f,
-                    sweepAngle = 360f * enrollmentGuide.holdProgress,
-                    useCenter = false,
-                    style = poseStroke
-                )
-                drawArc(
-                    color = enrollmentPoseColor(enrollmentGuide.collected.contains(0)),
-                    startAngle = -106f,
-                    sweepAngle = 32f,
-                    useCenter = false,
-                    style = poseStroke
-                )
-                drawArc(
-                    color = enrollmentPoseColor(enrollmentGuide.collected.contains(-1)),
-                    startAngle = 158f,
-                    sweepAngle = 32f,
-                    useCenter = false,
-                    style = poseStroke
-                )
-                drawArc(
-                    color = enrollmentPoseColor(enrollmentGuide.collected.contains(1)),
-                    startAngle = -10f,
-                    sweepAngle = 32f,
-                    useCenter = false,
-                    style = poseStroke
-                )
-            }
-        } else {
-            Canvas(modifier = Modifier.fillMaxSize().padding(5.dp)) {
-                val trackStroke = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
-                val activeStroke = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
-                drawArc(
-                    color = ComposeColor.White.copy(alpha = 0.20f),
-                    startAngle = -90f,
-                    sweepAngle = 360f,
-                    useCenter = false,
-                    style = trackStroke
-                )
-                val sweep = when (state) {
-                    FaceGuideState.Searching -> 58f
-                    FaceGuideState.Center -> 118f
-                    FaceGuideState.TurnLeft, FaceGuideState.TurnRight -> 178f
-                    FaceGuideState.Rejected -> 240f
-                    FaceGuideState.Approved -> 360f
-                }
-                drawArc(
-                    color = ringColor.copy(alpha = 0.94f),
-                    startAngle = -90f,
-                    sweepAngle = sweep,
-                    useCenter = false,
-                    style = activeStroke
-                )
-                if (state != FaceGuideState.Searching && state != FaceGuideState.Approved) {
-                    drawArc(
-                        color = ringColor.copy(alpha = 0.58f),
-                        startAngle = 120f,
-                        sweepAngle = 58f,
-                        useCenter = false,
-                        style = activeStroke
-                    )
-                    drawArc(
-                        color = ringColor.copy(alpha = 0.42f),
-                        startAngle = 250f,
-                        sweepAngle = 42f,
-                        useCenter = false,
-                        style = activeStroke
-                    )
-                }
-            }
+        Canvas(modifier = Modifier.fillMaxSize().padding(5.dp)) {
+            val trackStroke = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
+            val activeStroke = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
+            drawArc(
+                color = ComposeColor.White.copy(alpha = 0.20f),
+                startAngle = -90f,
+                sweepAngle = 360f,
+                useCenter = false,
+                style = trackStroke
+            )
+            drawArc(
+                color = ringColor.copy(alpha = 0.94f),
+                startAngle = -90f,
+                sweepAngle = 360f * progress.coerceIn(0f, 1f),
+                useCenter = false,
+                style = activeStroke
+            )
         }
         Box(
             modifier = Modifier
@@ -2613,12 +2414,10 @@ private fun FaceGuideOverlay(
                 .border(1.dp, ComposeColor.White.copy(alpha = 0.18f), CircleShape)
                 .background(ComposeColor.Transparent)
         )
-        when (symbolState) {
+        when (state) {
             FaceGuideState.Approved -> GuideBadge("✓", ComposeColor(0xFF30D158), Modifier.align(Alignment.BottomCenter))
             FaceGuideState.Rejected -> GuideBadge("!", ComposeColor(0xFFFF453A), Modifier.align(Alignment.TopCenter))
-            FaceGuideState.TurnLeft -> GuideBadge("‹", ComposeColor(0xFF0A84FF), Modifier.align(Alignment.CenterStart).graphicsLayer { translationX = symbolOffset })
-            FaceGuideState.TurnRight -> GuideBadge("›", ComposeColor(0xFF0A84FF), Modifier.align(Alignment.CenterEnd).graphicsLayer { translationX = symbolOffset })
-            FaceGuideState.Center -> if (enrollmentGuide != null) Text("•", color = ComposeColor.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            FaceGuideState.Center -> Text("•", color = ComposeColor.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
             FaceGuideState.Searching -> Text("", color = ComposeColor.White)
         }
     }
@@ -2637,70 +2436,6 @@ private fun GuideBadge(symbol: String, color: ComposeColor, modifier: Modifier =
         Text(symbol, color = ComposeColor.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
     }
 }
-
-@Composable
-private fun EnrollmentPoseRibbon(
-    guide: EnrollmentGuideState,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        color = ComposeColor.Black.copy(alpha = 0.58f),
-        shape = RoundedCornerShape(18.dp),
-        modifier = modifier.fillMaxWidth(0.92f)
-    ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                EnrollmentPoseDot("정면", guide.collected.contains(0), guide.nextPose == 0, Modifier.weight(1f))
-                EnrollmentPoseDot("왼쪽", guide.collected.contains(-1), guide.nextPose == -1, Modifier.weight(1f))
-                EnrollmentPoseDot("오른쪽", guide.collected.contains(1), guide.nextPose == 1, Modifier.weight(1f))
-            }
-            LinearProgressIndicator(
-                progress = { guide.progress },
-                modifier = Modifier.fillMaxWidth(),
-                color = ComposeColor(0xFF30D158),
-                trackColor = ComposeColor.White.copy(alpha = 0.22f)
-            )
-            Text(
-                "${guide.instruction} · ${guide.count}/$ENROLL_SAMPLES",
-                color = ComposeColor.White.copy(alpha = 0.92f),
-                fontSize = 11.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
-    }
-}
-
-@Composable
-private fun EnrollmentPoseDot(label: String, collected: Boolean, active: Boolean, modifier: Modifier = Modifier) {
-    val fill by animateColorAsState(
-        targetValue = if (collected) ComposeColor(0xFF30D158) else ComposeColor.White.copy(alpha = 0.18f),
-        animationSpec = tween(durationMillis = 220),
-        label = "enrollment-pose-fill"
-    )
-    val scale by animateFloatAsState(
-        targetValue = if (active && !collected) 1.16f else 1.0f,
-        animationSpec = tween(durationMillis = 260),
-        label = "enrollment-pose-active-scale"
-    )
-    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Box(
-            Modifier
-                .size(10.dp)
-                .graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
-                }
-                .clip(CircleShape)
-                .background(fill)
-                .border(1.dp, ComposeColor.White.copy(alpha = 0.44f), CircleShape)
-        )
-        Text(label, color = if (active || collected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.68f), fontSize = 11.sp)
-    }
-}
-
-private fun enrollmentPoseColor(collected: Boolean): ComposeColor =
-    if (collected) ComposeColor(0xFF30D158).copy(alpha = 0.96f) else ComposeColor.White.copy(alpha = 0.42f)
 
 private fun responsiveFaceGuideSize(maxWidth: Dp, maxHeight: Dp): Dp {
     val shortSide = min(maxWidth.value, maxHeight.value)
@@ -2808,7 +2543,6 @@ private fun ControlPanel(
     authDecisionLogs: List<AuthDecisionLogEntry>,
     users: List<UserTemplate>,
     userCount: Int,
-    enrollCount: Int,
     canResetStore: Boolean,
     canUnlockDoor: Boolean,
     canRetryBlocked: Boolean,
@@ -2939,15 +2673,7 @@ private fun ControlPanel(
                 }
             }
             if (mode == AppMode.Enroll) {
-                Text("등록 진행 $enrollCount/$ENROLL_SAMPLES", color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
-            }
-            if (mode == AppMode.Enroll) {
-                LinearProgressIndicator(
-                    progress = { (enrollCount.toFloat() / ENROLL_SAMPLES.toFloat()).coerceIn(0f, 1f) },
-                    modifier = Modifier.fillMaxWidth(),
-                    color = ComposeColor(0xFF30D158),
-                    trackColor = ComposeColor(0xFFE5E5EA)
-                )
+                Text("단일 Runtime 템플릿 등록 중", color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
             }
             OutlinedTextField(
                 value = name,
@@ -3025,39 +2751,39 @@ private fun ControlPanel(
                         }
                         users.forEachIndexed { index, user ->
                             Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Text(user.name, color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
-                                        if (user.isHeadAdmin) {
-                                            Surface(color = ComposeColor(0xFF0071E3), shape = RoundedCornerShape(999.dp)) {
-                                                Text(
-                                                    "Head Admin",
-                                                    color = ComposeColor.White,
-                                                    fontSize = 10.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                                )
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            Text(user.name, color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
+                                            if (user.isHeadAdmin) {
+                                                Surface(color = ComposeColor(0xFF0071E3), shape = RoundedCornerShape(999.dp)) {
+                                                    Text(
+                                                        "Head Admin",
+                                                        color = ComposeColor.White,
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                    )
+                                                }
                                             }
                                         }
+                                        Text(
+                                            if (user.isHeadAdmin) "관리 작업 얼굴 인증 권한 보유" else "로컬 얼굴 템플릿",
+                                            color = if (user.isHeadAdmin) ComposeColor(0xFF248A3D) else ComposeColor(0xFF6E6E73),
+                                            fontSize = 12.sp
+                                        )
                                     }
-                                    Text(
-                                        if (user.isHeadAdmin) "관리 작업 얼굴 인증 권한 보유" else "로컬 얼굴 템플릿",
-                                        color = if (user.isHeadAdmin) ComposeColor(0xFF248A3D) else ComposeColor(0xFF6E6E73),
-                                        fontSize = 12.sp
-                                    )
+                                    TextButton(enabled = canMutate, onClick = { onDeleteUser(index) }) {
+                                        Text("삭제", color = ComposeColor(0xFFFF3B30))
+                                    }
                                 }
-                                TextButton(enabled = canMutate, onClick = { onDeleteUser(index) }) {
-                                    Text("삭제", color = ComposeColor(0xFFFF3B30))
+                                OutlinedButton(
+                                    onClick = { if (user.isHeadAdmin) onClearHeadAdmin(index) else onSetHeadAdmin(index) },
+                                    enabled = canMutate,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(if (user.isHeadAdmin) "Head Admin 해제" else "Head Admin 추가")
                                 }
-                            }
-                            OutlinedButton(
-                                onClick = { if (user.isHeadAdmin) onClearHeadAdmin(index) else onSetHeadAdmin(index) },
-                                enabled = canMutate,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(if (user.isHeadAdmin) "Head Admin 해제" else "Head Admin 추가")
-                            }
                             }
                         }
                     }
@@ -3082,7 +2808,7 @@ private fun ControlPanel(
                     Text("FFacio Runtime 라이브니스", color = ComposeColor(0xFF1D1D1F))
                 }
                 if (!passiveLivenessEnabled) {
-                    Text("기본 모드: 좌우 얼굴 돌리기 챌린지로 실제 얼굴을 확인합니다", color = ComposeColor(0xFF6E6E73), fontSize = 13.sp)
+                    Text("라이브니스 검사를 끄면 Runtime 품질과 유사도 기준만 사용합니다", color = ComposeColor(0xFF6E6E73), fontSize = 13.sp)
                 }
                 if (passiveLivenessEnabled) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -3228,7 +2954,7 @@ private fun analyzeProxy(
         proxy.close()
         return
     }
-    val now = System.currentTimeMillis()
+    val now = SystemClock.elapsedRealtime()
     val previous = lastAnalysisAt.get()
     if (now - previous < ANALYSIS_INTERVAL_MS || !lastAnalysisAt.compareAndSet(previous, now)) {
         proxy.close()
@@ -3345,7 +3071,7 @@ private class MobileFaceEngine {
         passiveLivenessEnabled: Boolean,
         enrollmentMode: Boolean,
         livenessLevel: Int = 0,
-        occlusionCheckEnabled: Boolean = true
+        occlusionCheckEnabled: Boolean = false
     ): Observation {
         if (!FaceSDK.isReady()) return Observation.fail("FFacio Runtime 연결이 준비되지 않았습니다")
         var bitmap: Bitmap? = null
@@ -3367,40 +3093,62 @@ private class MobileFaceEngine {
             val options = runtimeDetectionOptions(
                 passiveLivenessEnabled = passiveLivenessEnabled,
                 livenessLevel = livenessLevel,
-                occlusionCheckEnabled = occlusionCheckEnabled,
-                enrollmentMode = enrollmentMode
+                occlusionCheckEnabled = occlusionCheckEnabled
             )
             val detectStartedAt = SystemClock.elapsedRealtime()
             val faces = FaceSDK.faceDetection(bitmap, options).orEmpty()
             val detectMillis = SystemClock.elapsedRealtime() - detectStartedAt
             if (faces.isEmpty()) return Observation.fail("얼굴을 찾을 수 없습니다")
-            if (faces.size > 1) return Observation.fail("한 명만 카메라 앞에 서 주세요")
-            val face = faces.single()
+            // When several people are visible, consistently process only the largest face.
+            val face = largestRuntimeFace(faces)
+                ?: return Observation.fail("얼굴을 찾을 수 없습니다")
             val bounds = faceBoundsFromRuntime(face, bitmap.width, bitmap.height)
                 ?: return Observation.fail("Runtime 얼굴 좌표가 올바르지 않습니다")
-            val faceWidth = face.x2 - face.x1
-            if (faceWidth < bitmap.width * 0.16f) {
-                return Observation.fail("조금 더 가까이 와 주세요", faceBounds = bounds)
-            }
-            if (!face.face_quality.isFinite() || face.face_quality < RUNTIME_QUALITY_THRESHOLD) {
-                return Observation.fail("얼굴 품질이 낮습니다. 조명과 초점을 맞춰 주세요", faceBounds = bounds)
-            }
-            if (!face.face_luminance.isFinite()) {
-                return Observation.fail("얼굴 밝기 값을 확인할 수 없습니다", faceBounds = bounds)
-            }
-            if (!face.yaw.isFinite() || !face.pitch.isFinite() || !face.roll.isFinite()) {
-                return Observation.fail("얼굴 자세 값을 확인할 수 없습니다", faceBounds = bounds)
-            }
-            val maximumPitch = if (enrollmentMode) 10.0f else RUNTIME_MAX_PITCH
-            val maximumRoll = if (enrollmentMode) 10.0f else RUNTIME_MAX_ROLL
-            if (kotlin.math.abs(face.pitch) > maximumPitch || kotlin.math.abs(face.roll) > maximumRoll) {
-                return Observation.fail("고개를 세우고 카메라를 정면으로 바라봐 주세요", faceBounds = bounds)
-            }
-            if (enrollmentMode && face.landmarks_68?.size != RUNTIME_LANDMARK_VALUE_COUNT) {
-                return Observation.fail("얼굴 특징점을 안정적으로 찾지 못했습니다", faceBounds = bounds)
-            }
-            if (passiveLivenessEnabled) {
-                if (!face.liveness.isFinite() || face.liveness < ANTISPOOF_THRESHOLD) {
+            val faceWidth = (face.x2 - face.x1).coerceAtLeast(0)
+            val faceHeight = (face.y2 - face.y1).coerceAtLeast(0)
+            val faceSize = max(faceWidth, faceHeight)
+            val faceAreaRatio = faceWidth.toDouble() * faceHeight.toDouble() /
+                (bitmap.width.toDouble() * bitmap.height.toDouble()).coerceAtLeast(1.0)
+            if (enrollmentMode) {
+                // Runtime demo enrollment order: bounds/landmarks -> size -> center -> attributes -> liveness.
+                if (face.landmarks_68?.size != RUNTIME_LANDMARK_VALUE_COUNT) {
+                    return Observation.fail("얼굴 특징점을 안정적으로 찾지 못했습니다", faceBounds = bounds)
+                }
+                if (faceSize < RUNTIME_MIN_FACE_SIZE) {
+                    return Observation.fail("조금 더 가까이 와 주세요", faceBounds = bounds)
+                }
+                if (faceSize > RUNTIME_MAX_FACE_SIZE) {
+                    return Observation.fail("조금 뒤로 이동해 주세요", faceBounds = bounds)
+                }
+                if (!isRuntimeFaceCentered(face, bitmap.width, bitmap.height)) {
+                    return Observation.fail("얼굴을 화면 중앙에 맞춰 주세요", faceBounds = bounds)
+                }
+                if (!face.face_quality.isFinite() || face.face_quality < RUNTIME_QUALITY_THRESHOLD) {
+                    return Observation.fail("얼굴 품질이 낮습니다. 조명과 초점을 맞춰 주세요", faceBounds = bounds)
+                }
+                if (!face.face_luminance.isFinite() || face.face_luminance !in RUNTIME_LUMINANCE_MIN..RUNTIME_LUMINANCE_MAX) {
+                    return Observation.fail("얼굴 밝기를 조절해 주세요", faceBounds = bounds)
+                }
+                if (!face.yaw.isFinite() || !face.pitch.isFinite() || !face.roll.isFinite()) {
+                    return Observation.fail("얼굴 자세 값을 확인할 수 없습니다", faceBounds = bounds)
+                }
+                if (kotlin.math.abs(face.yaw) > RUNTIME_MAX_YAW ||
+                    kotlin.math.abs(face.pitch) > RUNTIME_MAX_PITCH ||
+                    kotlin.math.abs(face.roll) > RUNTIME_MAX_ROLL) {
+                    return Observation.fail("카메라를 정면으로 바라봐 주세요", faceBounds = bounds)
+                }
+                if (!face.left_eye_closed.isFinite() || !face.right_eye_closed.isFinite() ||
+                    face.left_eye_closed > RUNTIME_EYE_CLOSED_THRESHOLD ||
+                    face.right_eye_closed > RUNTIME_EYE_CLOSED_THRESHOLD) {
+                    return Observation.fail("눈을 뜨고 카메라를 바라봐 주세요", faceBounds = bounds)
+                }
+                if (occlusionCheckEnabled && (!face.face_occlusion.isFinite() || face.face_occlusion > RUNTIME_OCCLUSION_THRESHOLD)) {
+                    return Observation.fail("얼굴을 가리는 물체를 치워 주세요", faceBounds = bounds)
+                }
+                if (!face.mouth_opened.isFinite() || face.mouth_opened > RUNTIME_MOUTH_OPEN_THRESHOLD) {
+                    return Observation.fail("입을 다문 상태로 유지해 주세요", faceBounds = bounds)
+                }
+                if (passiveLivenessEnabled && (!face.liveness.isFinite() || face.liveness < ANTISPOOF_THRESHOLD)) {
                     return Observation.fail(
                         "사진이나 화면으로 보이는 얼굴입니다. 실제 얼굴을 보여주세요",
                         liveScore = face.liveness.takeIf { it.isFinite() } ?: 0f,
@@ -3408,26 +3156,23 @@ private class MobileFaceEngine {
                         faceBounds = bounds
                     )
                 }
-            }
-            if (!face.left_eye_closed.isFinite() || !face.right_eye_closed.isFinite()) {
-                return Observation.fail("눈 상태 값을 확인할 수 없습니다", faceBounds = bounds)
-            }
-            if (face.left_eye_closed > RUNTIME_EYE_CLOSED_THRESHOLD || face.right_eye_closed > RUNTIME_EYE_CLOSED_THRESHOLD) {
-                return Observation.fail("눈을 뜨고 카메라를 바라봐 주세요", faceBounds = bounds)
-            }
-            if (occlusionCheckEnabled) {
-                if (!face.face_occlusion.isFinite()) {
-                    return Observation.fail("얼굴 가림 상태 값을 확인할 수 없습니다", faceBounds = bounds)
+            } else {
+                // Runtime demo authentication order: liveness first, then quality and minimum area.
+                if (passiveLivenessEnabled && (!face.liveness.isFinite() || face.liveness < ANTISPOOF_THRESHOLD)) {
+                    return Observation.fail(
+                        "사진이나 화면으로 보이는 얼굴입니다. 실제 얼굴을 보여주세요",
+                        liveScore = face.liveness.takeIf { it.isFinite() } ?: 0f,
+                        liveState = "runtime_rejected",
+                        faceBounds = bounds
+                    )
                 }
-                if (face.face_occlusion > RUNTIME_OCCLUSION_THRESHOLD) {
-                    return Observation.fail("얼굴을 가리는 물체를 치워 주세요", faceBounds = bounds)
+                if (!face.face_quality.isFinite() || face.face_quality < RUNTIME_QUALITY_THRESHOLD ||
+                    faceAreaRatio < RUNTIME_MIN_FACE_AREA_RATIO) {
+                    return Observation.fail(
+                        if (faceAreaRatio < RUNTIME_MIN_FACE_AREA_RATIO) "조금 더 가까이 와 주세요" else "얼굴 품질이 낮습니다. 조명과 초점을 맞춰 주세요",
+                        faceBounds = bounds
+                    )
                 }
-            }
-            if (!face.mouth_opened.isFinite()) {
-                return Observation.fail("입 벌림 상태 값을 확인할 수 없습니다", faceBounds = bounds)
-            }
-            if (face.mouth_opened > RUNTIME_MOUTH_OPEN_THRESHOLD) {
-                return Observation.fail("입을 다문 상태로 유지해 주세요", faceBounds = bounds)
             }
 
             val templateStartedAt = SystemClock.elapsedRealtime()
@@ -3437,16 +3182,10 @@ private class MobileFaceEngine {
                 template?.fill(0)
                 return Observation.fail("Runtime 얼굴 템플릿을 추출할 수 없습니다", faceBounds = bounds)
             }
-            val pose = when {
-                face.yaw < -10f -> -1
-                face.yaw > 10f -> 1
-                else -> 0
-            }
             return Observation(
                 ok = true,
                 message = "확인 중",
                 template = template,
-                pose = pose,
                 liveScore = if (passiveLivenessEnabled) face.liveness else 1f,
                 liveState = if (passiveLivenessEnabled) "runtime_live" else "disabled",
                 faceBounds = bounds,
@@ -3455,8 +3194,6 @@ private class MobileFaceEngine {
                 yaw = face.yaw,
                 pitch = face.pitch,
                 roll = face.roll,
-                age = face.age.takeIf { enrollmentMode && it in 1..120 },
-                genderCode = face.gender.takeIf { enrollmentMode },
                 timings = RuntimeCallTimings(convertMillis, detectMillis, templateMillis)
             )
         } catch (error: Throwable) {
@@ -3468,6 +3205,68 @@ private class MobileFaceEngine {
     }
 
     fun close() = Unit
+}
+
+internal fun largestRuntimeFace(faces: List<FaceBox>): FaceBox? = faces.maxByOrNull { face ->
+    val width = (face.x2 - face.x1).coerceAtLeast(0)
+    val height = (face.y2 - face.y1).coerceAtLeast(0)
+    width.toLong() * height.toLong()
+}
+
+internal fun isRuntimeFaceCentered(face: FaceBox, frameWidth: Int, frameHeight: Int): Boolean {
+    if (frameWidth <= 0 || frameHeight <= 0) return false
+    val targetWidth = frameWidth * 2.0f / 3.0f
+    val targetHeight = min(targetWidth * 1.2f, frameHeight * 0.8f)
+    val left = (frameWidth - targetWidth) / 2.0f
+    val top = (frameHeight - targetHeight) / 2.0f
+    val right = (frameWidth + targetWidth) / 2.0f
+    val bottom = (frameHeight + targetHeight) / 2.0f
+    val centerX = (face.x1 + face.x2) / 2.0f
+    val centerY = (face.y1 + face.y2) / 2.0f
+    return centerX in left..right && centerY in top..bottom
+}
+
+internal class EnrollmentStabilityTracker(private val stableMillis: Long) {
+    private var validSince = 0L
+    private var bestQuality = Float.NEGATIVE_INFINITY
+    private var bestTemplate: ByteArray? = null
+
+    fun update(observation: Observation, now: Long): Boolean {
+        if (!observation.ok || !isUsableRuntimeTemplate(observation.template)) {
+            reset()
+            return false
+        }
+        if (validSince == 0L || now < validSince) {
+            reset()
+            validSince = now
+        }
+        if (observation.quality.isFinite() && observation.quality >= bestQuality) {
+            bestTemplate?.fill(0)
+            bestTemplate = observation.template.copyOf()
+            bestQuality = observation.quality
+        }
+        return now - validSince >= stableMillis
+    }
+
+    fun progress(now: Long): Float {
+        if (validSince == 0L || now < validSince) return 0.0f
+        return ((now - validSince).toFloat() / stableMillis.coerceAtLeast(1L).toFloat()).coerceIn(0.0f, 1.0f)
+    }
+
+    fun takeTemplate(): ByteArray? {
+        val result = bestTemplate
+        bestTemplate = null
+        validSince = 0L
+        bestQuality = Float.NEGATIVE_INFINITY
+        return result
+    }
+
+    fun reset() {
+        bestTemplate?.fill(0)
+        bestTemplate = null
+        validSince = 0L
+        bestQuality = Float.NEGATIVE_INFINITY
+    }
 }
 
 private fun faceBoundsFromRuntime(face: FaceBox, frameWidth: Int, frameHeight: Int): FaceBounds? {
@@ -3483,8 +3282,8 @@ private fun faceBoundsFromRuntime(face: FaceBox, frameWidth: Int, frameHeight: I
 private fun isUsableRuntimeTemplate(value: ByteArray?): Boolean =
     value != null && value.size in MIN_RUNTIME_TEMPLATE_BYTES..MAX_RUNTIME_TEMPLATE_BYTES
 
-private fun runtimeObservationSummary(obs: Observation, includeDemographics: Boolean): String {
-    val base = "품질 %.2f · 밝기 %.0f · 자세 %.0f/%.0f/%.0f".format(
+private fun runtimeObservationSummary(obs: Observation): String =
+    "품질 %.2f · 밝기 %.0f · 자세 %.0f/%.0f/%.0f".format(
         Locale.US,
         obs.quality,
         obs.luminance,
@@ -3492,11 +3291,6 @@ private fun runtimeObservationSummary(obs: Observation, includeDemographics: Boo
         obs.pitch,
         obs.roll
     )
-    if (!includeDemographics) return base
-    val estimatedAge = obs.age?.let { "추정 나이 ${it}" }
-    val gender = obs.genderCode?.let { "성별 코드 ${it}" }
-    return listOfNotNull(base, estimatedAge, gender).joinToString(" · ")
-}
 
 private fun runtimeCallFailureMessage(error: Throwable): String {
     val chain = generateSequence(error) { it.cause }.toList()
@@ -3508,75 +3302,6 @@ private fun runtimeCallFailureMessage(error: Throwable): String {
         message.contains("initialization", ignoreCase = true) -> "FFacio Runtime 초기화에 실패했습니다"
         else -> "FFacio Runtime 분석 오류가 발생했습니다"
     }
-}
-
-private class LivenessChallenge {
-    private val targets = IntArray(3)
-    private var index = 0
-    private var holdStartedAt = 0L
-
-    init {
-        reset()
-    }
-
-    fun reset() {
-        targets[0] = 0
-        targets[1] = if (Random.nextBoolean()) -1 else 1
-        targets[2] = -targets[1]
-        index = 0
-        holdStartedAt = 0L
-    }
-
-    fun update(pose: Int): Boolean {
-        if (index >= targets.size) return true
-        if (pose != targets[index]) {
-            holdStartedAt = 0L
-            return false
-        }
-        val now = System.currentTimeMillis()
-        if (holdStartedAt == 0L) {
-            holdStartedAt = now
-            return false
-        }
-        if (now - holdStartedAt >= 380L) {
-            index += 1
-            holdStartedAt = 0L
-        }
-        return index >= targets.size
-    }
-
-    fun currentTarget(): Int = if (index >= targets.size) 0 else targets[index]
-
-    fun prompt(): String = if (index >= targets.size) "라이브니스 확인 완료" else "${poseLabel(targets[index])}으로 살짝 돌려 잠시 유지해 주세요"
-}
-
-internal class EnrollmentPoseHold(private val holdMillis: Long = ENROLL_POSE_HOLD_MS) {
-    private var targetPose: Int? = null
-    private var holdStartedAt = 0L
-    private var lastProgress = 0.0f
-
-    fun reset() {
-        targetPose = null
-        holdStartedAt = 0L
-        lastProgress = 0.0f
-    }
-
-    fun update(target: Int, pose: Int, now: Long = System.currentTimeMillis()): Boolean {
-        if (pose != target) {
-            reset()
-            return false
-        }
-        if (targetPose != target || holdStartedAt == 0L) {
-            targetPose = target
-            holdStartedAt = now
-            lastProgress = 0.0f
-            return false
-        }
-        lastProgress = ((now - holdStartedAt).toFloat() / holdMillis.toFloat()).coerceIn(0.0f, 1.0f)
-        return now - holdStartedAt >= holdMillis
-    }
-
-    fun progress(): Float = lastProgress
 }
 
 private enum class AppMode { Auth, Enroll, AdminAuth }
@@ -3599,7 +3324,7 @@ internal enum class AdminAction {
     ClearHeadAdmin
 }
 internal enum class AdminAuthDecision { Approved, Rejected, Expired }
-private enum class FaceGuideState { Searching, Center, TurnLeft, TurnRight, Approved, Rejected }
+private enum class FaceGuideState { Searching, Center, Approved, Rejected }
 internal enum class AccessFeedbackKind { AuthOnly, DoorPending, DoorSucceeded, DoorFailed }
 private sealed class ModelLoadState {
     data object Loading : ModelLoadState()
@@ -3609,11 +3334,10 @@ private sealed class ModelLoadState {
 
 internal data class AccessFeedback(val kind: AccessFeedbackKind, val userName: String)
 
-private data class Observation(
+internal data class Observation(
     val ok: Boolean,
     val message: String,
     val template: ByteArray,
-    val pose: Int,
     val liveScore: Float = 0.0f,
     val liveState: String = "unknown",
     val faceBounds: FaceBounds? = null,
@@ -3622,13 +3346,11 @@ private data class Observation(
     val yaw: Float = 0.0f,
     val pitch: Float = 0.0f,
     val roll: Float = 0.0f,
-    val age: Int? = null,
-    val genderCode: Int? = null,
     val timings: RuntimeCallTimings? = null
 ) {
     companion object {
         fun fail(message: String, liveScore: Float = 0.0f, liveState: String = "unknown", faceBounds: FaceBounds? = null) =
-            Observation(false, message, ByteArray(0), 0, liveScore, liveState, faceBounds)
+            Observation(false, message, ByteArray(0), liveScore, liveState, faceBounds)
     }
 }
 
@@ -3646,15 +3368,14 @@ internal fun sanitizeRuntimeLivenessLevel(value: Int): Int = if (value == 1) 1 e
 internal fun runtimeDetectionOptions(
     passiveLivenessEnabled: Boolean,
     livenessLevel: Int,
-    occlusionCheckEnabled: Boolean,
-    enrollmentMode: Boolean
+    occlusionCheckEnabled: Boolean
 ): FaceDetectionParam = FaceDetectionParam().apply {
     check_liveness = passiveLivenessEnabled
     check_liveness_level = sanitizeRuntimeLivenessLevel(livenessLevel)
     check_eye_closeness = true
     check_face_occlusion = occlusionCheckEnabled
     check_mouth_opened = true
-    estimate_age_gender = enrollmentMode
+    estimate_age_gender = false
 }
 
 internal fun runtimeConnectionStateLabel(connected: Boolean, connecting: Boolean, ready: Boolean): String = when {
@@ -3712,37 +3433,30 @@ internal data class FaceGuideTarget(val centerX: Float, val centerY: Float, val 
 internal data class UserTemplate(
     val name: String,
     val template: ByteArray,
-    val samples: List<ByteArray> = emptyList(),
     val engineId: String = FACE_ENGINE_ID,
     val templateSize: Int = template.size,
     val isHeadAdmin: Boolean = false
 ) {
-    fun matchingSamples(): List<ByteArray> = buildList {
-        if (isUsableRuntimeTemplate(template) && template.size == templateSize) add(template)
-        samples.filterTo(this) { isUsableRuntimeTemplate(it) && it.size == templateSize }
-    }
-    fun matchSampleCount(): Int = matchingSamples().size
-    fun isCompatible(): Boolean {
-        if (engineId != FACE_ENGINE_ID || !isUsableRuntimeTemplate(template) || templateSize != template.size) return false
-        if (samples.any { !isUsableRuntimeTemplate(it) || it.size != templateSize }) return false
-        return matchingSamples().isNotEmpty()
-    }
+    fun isCompatible(): Boolean =
+        engineId == FACE_ENGINE_ID && isUsableRuntimeTemplate(template) && templateSize == template.size
 }
 internal data class Match(
     val index: Int,
     val score: Double,
     val secondScore: Double,
-    val supportCount: Int,
     val successfulComparisons: Int = 0,
     val failedComparisons: Int = 0
 )
 
 private sealed interface EnrollmentRuntimeDecision {
-    data class Rejected(val decision: EnrollmentSampleDecision) : EnrollmentRuntimeDecision
-    data class Duplicate(val userName: String) : EnrollmentRuntimeDecision
-    data class SampleAccepted(val template: ByteArray, val pose: Int) : EnrollmentRuntimeDecision
-    data class TemplateRejected(val decision: EnrollmentTemplateQualityDecision) : EnrollmentRuntimeDecision
-    data class Ready(val name: String, val template: ByteArray, val samples: List<ByteArray>) : EnrollmentRuntimeDecision
+    data class Rejected(val decision: EnrollmentFailure) : EnrollmentRuntimeDecision
+    data class Ready(
+        val name: String,
+        val template: ByteArray,
+        val duplicateName: String? = null,
+        val duplicateScore: Double = -1.0,
+        val failedComparisons: Int = 0
+    ) : EnrollmentRuntimeDecision
 }
 
 private data class AuthenticationRuntimeDecision(
@@ -3751,27 +3465,10 @@ private data class AuthenticationRuntimeDecision(
 )
 
 private fun EnrollmentRuntimeDecision.wipe() {
-    when (this) {
-        is EnrollmentRuntimeDecision.SampleAccepted -> template.fill(0)
-        is EnrollmentRuntimeDecision.Ready -> {
-            template.fill(0)
-            samples.wipeCopies()
-        }
-        else -> Unit
-    }
+    if (this is EnrollmentRuntimeDecision.Ready) template.fill(0)
 }
 
-internal data class EnrollmentGuideState(
-    val count: Int,
-    val progress: Float,
-    val holdProgress: Float,
-    val collected: Set<Int>,
-    val nextPose: Int?,
-    val instruction: String,
-    val complete: Boolean
-)
-internal data class EnrollmentSampleDecision(val accepted: Boolean, val status: String, val detail: String)
-internal data class EnrollmentTemplateQualityDecision(val accepted: Boolean, val status: String, val detail: String)
+internal data class EnrollmentFailure(val status: String, val detail: String)
 internal data class ApprovalLogEntry(val time: String, val userName: String, val result: String)
 internal data class AuthDecisionLogEntry(
     val time: String,
@@ -3779,8 +3476,7 @@ internal data class AuthDecisionLogEntry(
     val result: String,
     val reason: String,
     val score: Double,
-    val secondScore: Double,
-    val supportCount: Int
+    val secondScore: Double
 )
 private data class StoreLoadResult(val users: List<UserTemplate>, val error: Throwable?)
 
@@ -3789,26 +3485,15 @@ private fun MutableList<UserTemplate>.replaceWith(items: List<UserTemplate>) {
     addAll(items)
 }
 
-private fun MutableList<ByteArray>.clearSecurely() {
-    forEach { it.fill(0) }
-    clear()
-}
-
-private fun List<ByteArray>.wipeCopies() {
-    forEach { it.fill(0) }
-}
-
 private fun UserTemplate.wipe() {
     template.fill(0)
-    samples.wipeCopies()
 }
 
-private fun UserTemplate.copyForRuntimeDecision(): UserTemplate = copy(
-    template = template.copyOf(),
-    samples = samples.map { it.copyOf() }
+internal fun UserTemplate.copyForRuntimeDecision(): UserTemplate = copy(
+    template = template.copyOf()
 )
 
-private fun List<UserTemplate>.wipeTemplates() {
+internal fun List<UserTemplate>.wipeTemplates() {
     forEach { it.wipe() }
 }
 
@@ -4083,8 +3768,7 @@ internal data class AdminAutoLockResetPlan(
     val clearAdminDialogs: Boolean = true,
     val clearEnrollment: Boolean = true,
     val clearAuthHold: Boolean = true,
-    val clearAccessFeedback: Boolean = true,
-    val resetTransientRecognition: Boolean = true
+    val clearAccessFeedback: Boolean = true
 )
 
 internal fun adminAutoLockResetPlan(): AdminAutoLockResetPlan = AdminAutoLockResetPlan()
@@ -4097,13 +3781,8 @@ internal data class AdminAutoLockState(
     val confirmDelete: Boolean = true,
     val pendingDeleteUserIndex: Int = 0,
     val enrollmentName: String = "pending",
-    val enrollSampleCount: Int = 1,
-    val enrollPoseCount: Int = 1,
     val authResultHoldUntil: Long = 1L,
-    val hasAccessFeedback: Boolean = true,
-    val liveCandidate: Int = 1,
-    val stableUser: Int = 1,
-    val stableCount: Int = 1
+    val hasAccessFeedback: Boolean = true
 )
 
 internal fun applyAdminAutoLockReset(
@@ -4117,13 +3796,8 @@ internal fun applyAdminAutoLockReset(
     confirmDelete = if (plan.clearAdminDialogs) false else state.confirmDelete,
     pendingDeleteUserIndex = if (plan.clearAdminDialogs) -1 else state.pendingDeleteUserIndex,
     enrollmentName = if (plan.clearEnrollment) "" else state.enrollmentName,
-    enrollSampleCount = if (plan.clearEnrollment) 0 else state.enrollSampleCount,
-    enrollPoseCount = if (plan.clearEnrollment) 0 else state.enrollPoseCount,
     authResultHoldUntil = if (plan.clearAuthHold) 0L else state.authResultHoldUntil,
-    hasAccessFeedback = if (plan.clearAccessFeedback) false else state.hasAccessFeedback,
-    liveCandidate = if (plan.resetTransientRecognition) -1 else state.liveCandidate,
-    stableUser = if (plan.resetTransientRecognition) -1 else state.stableUser,
-    stableCount = if (plan.resetTransientRecognition) 0 else state.stableCount
+    hasAccessFeedback = if (plan.clearAccessFeedback) false else state.hasAccessFeedback
 )
 
 internal fun shouldAutoLockEnrollment(
@@ -4143,59 +3817,62 @@ internal fun shouldAutoLockEnrollment(
 internal fun <T> removeRegisteredUserAt(users: List<T>, index: Int): List<T>? =
     if (index in users.indices) users.filterIndexed { itemIndex, _ -> itemIndex != index } else null
 
-private fun loadUsers(context: Context, prefs: SharedPreferences): StoreLoadResult = runCatching {
-    val raw = secureGetString(context, prefs, USERS_KEY, "[]", failClosed = true)
-    val array = JSONArray(raw)
-    StoreLoadResult(normalizeHeadAdminUsers(buildList {
+internal fun needsUserStorePolicyReset(
+    storedVersion: Int,
+    currentVersion: Int = USER_STORE_POLICY_VERSION
+): Boolean = storedVersion != currentVersion
+
+private fun resetLegacyUserStoreForSingleTemplatePolicy(prefs: SharedPreferences): Result<Unit> = runCatching {
+    val storedVersion = prefs.getInt(USER_STORE_POLICY_KEY, 0)
+    if (!needsUserStorePolicyReset(storedVersion)) return@runCatching
+    val saved = prefs.edit()
+        .remove(USERS_KEY)
+        .remove("$USERS_KEY$SECURE_SUFFIX")
+        .remove("$USERS_KEY$LEGACY_SECURE_SUFFIX")
+        .remove("$USERS_KEY$OLDER_SECURE_SUFFIX")
+        .putBoolean(PASSIVE_LIVENESS_ENABLED_KEY, true)
+        .putInt(RUNTIME_LIVENESS_LEVEL_KEY, 0)
+        .putBoolean(OCCLUSION_CHECK_ENABLED_KEY, false)
+        .putInt(USER_STORE_POLICY_KEY, USER_STORE_POLICY_VERSION)
+        .commit()
+    check(saved) { "Single-template user store reset could not be saved" }
+}
+
+private fun loadUsers(context: Context, prefs: SharedPreferences): StoreLoadResult {
+    val loaded = mutableListOf<UserTemplate>()
+    return runCatching {
+        val raw = secureGetString(context, prefs, USERS_KEY, "[]", failClosed = true)
+        val array = JSONArray(raw)
         for (i in 0 until array.length()) {
-            val item = array.getJSONObject(i)
+            val item = array.optJSONObject(i) ?: continue
             val name = item.optString("name").trim()
             if (name.isEmpty()) continue
             val schemaVersion = item.optInt("schema_version", 0)
             val storedEngineId = item.optString("engine_id", "legacy.unknown")
             val template = decodeTemplate(item.optString("template_b64", ""))
-            val encodedSamples = item.optJSONArray("samples_b64")
-            val decodedSamples = buildList {
-                if (encodedSamples != null) {
-                    for (sampleIndex in 0 until encodedSamples.length()) {
-                        add(decodeTemplate(encodedSamples.optString(sampleIndex, "")))
-                    }
-                }
-            }
-            val declaredSize = item.optInt("template_size", template.size)
-            val compatible = schemaVersion in 2..USER_STORE_SCHEMA_VERSION &&
+            val declaredSize = item.optInt("template_size", -1)
+            val compatible = schemaVersion == USER_STORE_SCHEMA_VERSION &&
                 storedEngineId == FACE_ENGINE_ID &&
                 isUsableRuntimeTemplate(template) &&
-                declaredSize == template.size &&
-                decodedSamples.all { isUsableRuntimeTemplate(it) && it.size == template.size }
+                declaredSize == template.size
             if (compatible) {
-                add(
-                    UserTemplate(
-                        name = name,
-                        template = template,
-                        samples = decodedSamples,
-                        engineId = FACE_ENGINE_ID,
-                        templateSize = template.size,
-                        isHeadAdmin = item.optBoolean("head_admin", false)
-                    )
+                loaded += UserTemplate(
+                    name = name,
+                    template = template,
+                    engineId = FACE_ENGINE_ID,
+                    templateSize = template.size,
+                    isHeadAdmin = item.optBoolean("head_admin", false)
                 )
             } else {
                 template.fill(0)
-                decodedSamples.wipeCopies()
-                add(
-                    UserTemplate(
-                        name = name,
-                        template = ByteArray(0),
-                        samples = emptyList(),
-                        engineId = if (storedEngineId == FACE_ENGINE_ID) "$FACE_ENGINE_ID.incompatible" else storedEngineId,
-                        templateSize = 0,
-                        isHeadAdmin = false
-                    )
-                )
             }
         }
-    }), null)
-}.getOrElse { StoreLoadResult(emptyList(), it) }
+        StoreLoadResult(normalizeHeadAdminUsers(loaded), null)
+    }.getOrElse { error ->
+        loaded.wipeTemplates()
+        StoreLoadResult(emptyList(), error)
+    }
+}
 
 private fun saveUsers(context: Context, prefs: SharedPreferences, users: List<UserTemplate>) {
     val array = JSONArray()
@@ -4214,16 +3891,6 @@ private fun saveUsers(context: Context, prefs: SharedPreferences, users: List<Us
             "template_b64",
             if (compatible) Base64.encodeToString(user.template, Base64.NO_WRAP) else ""
         )
-        val samples = JSONArray()
-        if (compatible) {
-            user.samples.forEach { sample ->
-                require(isUsableRuntimeTemplate(sample) && sample.size == user.templateSize) {
-                    "Runtime user sample is incomplete or inconsistent"
-                }
-                samples.put(Base64.encodeToString(sample, Base64.NO_WRAP))
-            }
-        }
-        item.put("samples_b64", samples)
         array.put(item)
     }
     securePutString(context, prefs, USERS_KEY, array.toString())
@@ -4338,44 +4005,34 @@ internal fun match(
     users: List<UserTemplate>,
     comparator: (ByteArray, ByteArray) -> Double = ::runtimeSimilarity
 ): Match {
-    if (!isUsableRuntimeTemplate(template)) return Match(-1, -1.0, -1.0, 0)
+    if (!isUsableRuntimeTemplate(template)) return Match(-1, -1.0, -1.0)
     var bestScore = -1.0
     var second = -1.0
-    var bestSupportCount = 0
     var bestIndex = -1
     var successfulComparisons = 0
     var failedComparisons = 0
     users.forEachIndexed { index, user ->
         if (!user.isCompatible() || user.templateSize != template.size) return@forEachIndexed
-        val scores = buildList {
-            user.matchingSamples().forEach { stored ->
-                val score = runCatching { comparator(template, stored) }
-                    .onFailure { failedComparisons += 1 }
-                    .getOrNull()
-                if (score != null && score.isFinite()) {
-                    successfulComparisons += 1
-                    add(score)
-                } else if (score != null) {
-                    failedComparisons += 1
-                }
-            }
+        val score = runCatching { comparator(template, user.template) }
+            .onFailure { failedComparisons += 1 }
+            .getOrNull()
+        if (score == null || !score.isFinite()) {
+            if (score != null) failedComparisons += 1
+            return@forEachIndexed
         }
-        val rankScore = scores.maxOrNull() ?: return@forEachIndexed
-        val supportCount = scores.count { it >= MATCH_SAMPLE_THRESHOLD }
-        if (rankScore > bestScore) {
+        successfulComparisons += 1
+        if (score > bestScore) {
             second = bestScore
-            bestScore = rankScore
-            bestSupportCount = supportCount
+            bestScore = score
             bestIndex = index
-        } else if (rankScore > second) {
-            second = rankScore
+        } else if (score > second) {
+            second = score
         }
     }
     return Match(
         index = bestIndex,
         score = bestScore,
         secondScore = second,
-        supportCount = bestSupportCount,
         successfulComparisons = successfulComparisons,
         failedComparisons = failedComparisons
     )
@@ -4384,96 +4041,45 @@ internal fun match(
 internal fun acceptsAuthenticationCandidate(
     score: Double,
     secondScore: Double,
-    supportCount: Int,
-    availableSamples: Int,
     threshold: Double = MATCH_THRESHOLD,
-    margin: Double = MATCH_MARGIN,
-    minSupportingSamples: Int = MATCH_MIN_SUPPORTING_SAMPLES
+    margin: Double = MATCH_MARGIN
 ): Boolean {
     if (score < threshold) return false
     if (secondScore > 0.0 && score - secondScore < margin) return false
-    val requiredSupport = min(minSupportingSamples, max(1, availableSamples))
-    return supportCount >= requiredSupport
+    return true
 }
 
-internal fun enrollmentSampleDecision(
-    template: ByteArray,
-    pose: Int,
-    samples: List<ByteArray>,
-    poses: List<Int>,
-    comparator: (ByteArray, ByteArray) -> Double = ::runtimeSimilarity
-): EnrollmentSampleDecision {
-    if (!isUsableRuntimeTemplate(template)) {
-        return EnrollmentSampleDecision(false, "얼굴 특징을 다시 추출해 주세요", "Runtime 템플릿이 비어 있거나 손상되었습니다")
-    }
-    if (samples.any { !isUsableRuntimeTemplate(it) || it.size != template.size }) {
-        return EnrollmentSampleDecision(false, "얼굴 특징을 다시 추출해 주세요", "등록 샘플 형식이 일치하지 않습니다")
-    }
-    val targetPose = enrollmentTargetPose(samples.size, poses)
-    if (targetPose != null && pose != targetPose) {
-        return EnrollmentSampleDecision(false, enrollmentTargetStatus(targetPose), "${samples.size}/$ENROLL_SAMPLES · ${enrollmentTargetInstruction(targetPose)}")
-    }
-    val repeated = samples.any { stored ->
-        runCatching { comparator(template, stored) }.getOrElse {
-            return EnrollmentSampleDecision(false, "Runtime 비교를 다시 시도해 주세요", runtimeCallFailureMessage(it))
-        } > ENROLL_REPEAT_THRESHOLD
-    }
-    if (repeated) {
-        return EnrollmentSampleDecision(false, "고개를 좌우로 천천히 돌려 주세요", "${samples.size}/$ENROLL_SAMPLES · 이미 수집한 각도와 너무 비슷합니다")
-    }
-    if (samples.size >= ENROLL_SAMPLES - 1) {
-        val distinctPoses = (poses + pose).toSet().size
-        if (distinctPoses < ENROLL_MIN_DISTINCT_POSES) {
-            return EnrollmentSampleDecision(false, "고개를 살짝 돌려 주세요", "${samples.size}/$ENROLL_SAMPLES · 정면, 왼쪽, 오른쪽 각도가 모두 필요합니다")
-        }
-    }
-    return EnrollmentSampleDecision(true, "", "")
-}
+internal data class EnrollmentDuplicateSearchResult(
+    val userName: String?,
+    val score: Double,
+    val failedComparisons: Int
+)
 
-internal fun enrollmentTemplateQuality(
-    representative: ByteArray,
-    samples: List<ByteArray>,
-    poses: List<Int> = emptyList(),
-    minSampleScore: Double = ENROLL_TEMPLATE_MIN_SAMPLE_SCORE,
-    averageSampleScore: Double = ENROLL_TEMPLATE_AVG_SAMPLE_SCORE,
-    minPairScore: Double = ENROLL_TEMPLATE_MIN_PAIR_SCORE,
-    comparator: (ByteArray, ByteArray) -> Double = ::runtimeSimilarity
-): EnrollmentTemplateQualityDecision {
-    if (!isUsableRuntimeTemplate(representative) || samples.isEmpty()) {
-        return EnrollmentTemplateQualityDecision(false, "등록 품질이 낮습니다", "얼굴 샘플을 다시 수집해 주세요")
-    }
-    if (samples.any { !isUsableRuntimeTemplate(it) || it.size != representative.size }) {
-        return EnrollmentTemplateQualityDecision(false, "등록 품질이 낮습니다", "Runtime 템플릿 형식이 일치하지 않습니다. 다시 등록해 주세요")
-    }
-    if (poses.isNotEmpty() && !enrollmentPoseCoverageAccepted(poses)) {
-        return EnrollmentTemplateQualityDecision(false, "등록 품질이 낮습니다", "정면, 왼쪽, 오른쪽을 모두 다시 수집해 주세요")
-    }
-    return runCatching {
-        val scores = samples.map { comparator(representative, it) }
-        val weakest = scores.minOrNull() ?: 0.0
-        val averageScore = scores.average()
-        var weakestPair = 1.0
-        for (left in samples.indices) {
-            for (right in left + 1 until samples.size) {
-                weakestPair = min(weakestPair, comparator(samples[left], samples[right]))
-            }
-        }
-        if (weakest >= minSampleScore && averageScore >= averageSampleScore && weakestPair >= minPairScore) {
-            EnrollmentTemplateQualityDecision(true, "", "")
-        } else {
-            EnrollmentTemplateQualityDecision(false, "등록 품질이 낮습니다", "한 사람만 카메라 앞에서 조명과 거리를 맞춘 뒤 처음부터 다시 등록해 주세요")
-        }
-    }.getOrElse {
-        EnrollmentTemplateQualityDecision(false, "Runtime 비교 오류", runtimeCallFailureMessage(it))
-    }
-}
-
-private fun duplicateUserForEnrollment(
+internal fun findBestEnrollmentDuplicate(
     template: ByteArray,
     users: List<UserTemplate>,
-    comparator: (ByteArray, ByteArray) -> Double = ::runtimeSimilarity
-): UserTemplate? = users.firstOrNull { user ->
-    user.isCompatible() && enrollmentDuplicateScore(template, user, comparator) >= ENROLL_DUPLICATE_THRESHOLD
+    comparator: (ByteArray, ByteArray) -> Double = ::runtimeSimilarity,
+    threshold: Double = ENROLL_DUPLICATE_THRESHOLD
+): EnrollmentDuplicateSearchResult {
+    var bestName: String? = null
+    var bestScore = -1.0
+    var failedComparisons = 0
+    users.forEach { user ->
+        if (!user.isCompatible() || user.templateSize != template.size) return@forEach
+        val score = runCatching { enrollmentDuplicateScore(template, user, comparator) }
+            .onFailure { failedComparisons += 1 }
+            .getOrNull()
+            ?: return@forEach
+        if (score > bestScore) {
+            bestScore = score
+            bestName = user.name
+        }
+    }
+    return EnrollmentDuplicateSearchResult(
+        userName = bestName?.takeIf { bestScore >= threshold },
+        score = bestScore,
+        failedComparisons = failedComparisons
+    )
 }
 
 internal fun enrollmentDuplicateScore(
@@ -4482,84 +4088,9 @@ internal fun enrollmentDuplicateScore(
     comparator: (ByteArray, ByteArray) -> Double = ::runtimeSimilarity
 ): Double {
     if (!user.isCompatible() || user.templateSize != template.size) return -1.0
-    return user.matchingSamples().maxOfOrNull { stored ->
-        comparator(template, stored).also { require(it.isFinite()) { "Runtime returned a non-finite similarity score" } }
-    } ?: -1.0
-}
-
-private fun selectRepresentativeTemplate(
-    samples: List<ByteArray>,
-    comparator: (ByteArray, ByteArray) -> Double = ::runtimeSimilarity
-): ByteArray {
-    require(samples.isNotEmpty()) { "No Runtime templates to select" }
-    if (samples.size == 1) return samples.first().copyOf()
-    val best = samples.maxByOrNull { candidate ->
-        samples.filterNot { it === candidate }.map { other ->
-            comparator(candidate, other).also { require(it.isFinite()) { "Runtime returned a non-finite similarity score" } }
-        }.average()
-    } ?: samples.first()
-    return best.copyOf()
-}
-
-private fun poseLabel(pose: Int): String = when {
-    pose < 0 -> "왼쪽"
-    pose > 0 -> "오른쪽"
-    else -> "정면"
-}
-
-internal fun enrollmentTargetPose(sampleCount: Int, poses: List<Int>): Int? {
-    val guidedSequence = intArrayOf(0, -1, 1, -1, 1)
-    return guidedSequence.getOrNull(sampleCount)
-}
-
-internal fun enrollmentGuideState(poses: List<Int>, count: Int, holdProgress: Float = 0.0f): EnrollmentGuideState {
-    val collected = poses.toSet()
-    val nextPose = enrollmentTargetPose(count, poses)
-    val complete = count >= ENROLL_SAMPLES
-    return EnrollmentGuideState(
-        count = count,
-        progress = (count.toFloat() / ENROLL_SAMPLES.toFloat()).coerceIn(0f, 1f),
-        holdProgress = holdProgress.coerceIn(0f, 1f),
-        collected = collected,
-        nextPose = nextPose,
-        instruction = if (complete) "등록 완료" else enrollmentTargetInstruction(nextPose),
-        complete = complete
-    )
-}
-
-private fun enrollmentTargetInstruction(targetPose: Int?): String = when (targetPose) {
-    -1 -> "왼쪽으로 살짝 돌려 잠시 유지"
-    1 -> "오른쪽으로 살짝 돌려 잠시 유지"
-    0 -> "정면을 바라보고 잠시 유지"
-    else -> "얼굴을 천천히 좌우로 움직여 주세요"
-}
-
-private fun enrollmentTargetStatus(targetPose: Int): String = when (targetPose) {
-    -1 -> "왼쪽으로 살짝 돌려 주세요"
-    1 -> "오른쪽으로 살짝 돌려 주세요"
-    else -> "정면을 바라봐 주세요"
-}
-
-private fun faceGuideStateForPose(pose: Int?): FaceGuideState = when (pose) {
-    -1 -> FaceGuideState.TurnLeft
-    1 -> FaceGuideState.TurnRight
-    0 -> FaceGuideState.Center
-    else -> FaceGuideState.Center
-}
-
-private fun enrollmentProgressDetail(count: Int, capturedPose: Int, nextPose: Int?): String {
-    val nextInstruction = enrollmentTargetInstruction(nextPose)
-    return "$count/$ENROLL_SAMPLES · ${poseLabel(capturedPose)} 수집 완료 · $nextInstruction"
-}
-
-internal fun enrollmentPoseCoverageAccepted(poses: List<Int>): Boolean {
-    val collected = poses.toSet()
-    return poses.size >= ENROLL_SAMPLES &&
-        collected.contains(0) &&
-        collected.contains(-1) &&
-        collected.contains(1) &&
-        poses.count { it == -1 } >= 2 &&
-        poses.count { it == 1 } >= 2
+    return comparator(template, user.template).also {
+        require(it.isFinite()) { "Runtime returned a non-finite similarity score" }
+    }
 }
 
 internal fun addApprovalLog(
@@ -4584,10 +4115,9 @@ internal fun addAuthDecisionLog(
     }
 }
 
-internal fun authDecisionReason(match: Match, availableSamples: Int): String = when {
+internal fun authDecisionReason(match: Match): String = when {
     match.score < MATCH_THRESHOLD -> "score below threshold"
     match.secondScore > 0.0 && match.score - match.secondScore < MATCH_MARGIN -> "ambiguous runner-up"
-    match.supportCount < min(MATCH_MIN_SUPPORTING_SAMPLES, max(1, availableSamples)) -> "not enough sample support"
     else -> "candidate accepted"
 }
 
@@ -4608,7 +4138,7 @@ internal fun shouldRecordAuthDecisionLog(
     key != lastKey || lastAtMillis <= 0L || nowMillis - lastAtMillis >= dedupeMillis
 
 internal fun authDecisionSummary(entry: AuthDecisionLogEntry): String =
-    "${entry.reason} · score ${formatScore(entry.score)} · second ${formatScore(entry.secondScore)} · support ${entry.supportCount}"
+    "${entry.reason} · score ${formatScore(entry.score)} · second ${formatScore(entry.secondScore)}"
 
 private fun formatScore(value: Double): String =
     if (value < 0.0) "-" else String.format(Locale.US, "%.3f", value)

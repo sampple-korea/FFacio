@@ -1,8 +1,8 @@
-# FFacio Android 0.6.0 — FFacio Runtime 기반
+# FFacio Android 0.6.2 — Runtime Demo 정렬 버전
 
-FFacio는 카메라 기반 출입 인증과 사용자·Head Admin·릴레이 관리 흐름을 담당하는 Android 앱입니다. 0.5.0부터 얼굴 엔진을 앱에 직접 포함하지 않으며, 별도 설치되는 **FFacio Runtime**(`com.kbyai.faceattribute`)을 Binder/AIDL로 호출합니다.
+FFacio는 카메라 기반 출입 인증과 사용자·Head Admin·HTTPS 릴레이 관리 흐름을 담당하는 Android 앱입니다. 얼굴 검출, 속성 분석, YUV 변환, 템플릿 추출과 템플릿 비교는 별도 설치되는 **FFacio Runtime**(`com.kbyai.faceattribute`)을 Binder/AIDL로 호출합니다.
 
-## 바뀐 구조
+## 구조
 
 ```text
 FFacio UI / 사용자·관리자·릴레이 로직
@@ -14,84 +14,66 @@ FFacio Runtime APK / FFacioRuntimeService
 Runtime facesdk / JNI / 모델
 ```
 
-FFacio APK에는 OpenCV, ONNX Runtime, ArcFace, YuNet, SFace, MiniFASNet 또는 모델 파일이 들어가지 않습니다. 얼굴 검출, 속성 분석, YUV 변환, 템플릿 추출, 템플릿 비교는 Runtime에서 처리합니다.
+FFacio APK에는 OpenCV, ONNX Runtime, ArcFace, YuNet, SFace, MiniFASNet 또는 얼굴 모델 파일이 들어가지 않습니다.
 
+## 0.6.2 변경 사항
 
-## 0.5.1 안정화 내용
+- 고개 돌리기 챌린지와 관련 상태·판정·안내를 완전히 제거했습니다.
+- 정면·좌·우 5장 등록, 자세 유지, 반복 자세 판정, 샘플 간 일관성 검사와 대표 샘플 선정 절차를 제거했습니다.
+- 등록은 Runtime Demo 기준을 통과한 얼굴을 1200ms 안정적으로 관찰한 뒤 품질이 가장 좋은 Runtime 템플릿 하나만 저장합니다.
+- 화면에 여러 얼굴이 있어도 사각형 면적이 가장 큰 얼굴 하나만 등록·인증합니다.
+- 인증은 Runtime 라이브니스(켜진 경우), 품질 0.50, 유사도 0.80, 1위·2위 차이 0.03을 사용하며 안정화 프레임은 1입니다.
+- 이 버전 첫 실행 시 이전 등록 사용자를 전부 삭제하고 얼굴 인식 설정을 Runtime Demo 기본값(라이브니스 켬·레벨 0·가림 검사 끔)으로 초기화합니다. 이후 스키마 5의 대표 Runtime 템플릿 하나만 저장·비교합니다.
+- Runtime Demo처럼 인증·등록 모두 눈·입 속성을 요청하되, 눈·입 기준은 등록에서만 통과 조건으로 사용합니다. 나이·성별 추정은 요청하지 않습니다.
+- 라이브니스를 끄면 과거의 동작 챌린지로 대체하지 않고 품질·유사도 기준만 사용합니다.
+- Runtime Demo와 달리 매 프레임 임시 파일을 덮어쓰기·동기화하던 추가 I/O를 제거해, 앱 전용 캐시 파일을 즉시 삭제합니다.
+- 저장 작업은 템플릿의 독립 복사본을 사용하며, 손상된 개별 사용자 레코드는 전체 저장소를 막지 않고 제외합니다.
 
-- Runtime 템플릿 비교를 UI 스레드에서 분리하고 8초 제한·단일 실행·오래된 결과 폐기를 적용했습니다. 동기식 Binder 호출이 계속 응답하지 않으면 10초 정지 감시가 판정 토큰을 무효화하고 Runtime 연결을 다시 초기화합니다.
-- 비교 중에는 새 카메라 분석을 초기에 건너뛰어 Binder 호출 중첩과 카메라 watchdog 오판을 막습니다.
-- YUV plane의 실제 ByteBuffer 시작 위치, row/pixel stride, crop 정렬을 검증합니다.
-- Runtime 연결 상태 변화와 사용자 저장소 로딩을 분리해 재연결 때 메모리 사용자 목록이 덮어써지지 않습니다. 백그라운드 비교에는 사용자 템플릿의 독립 복사본을 사용해 삭제·초기화와의 경합을 막고 작업 종료 시 복사본을 지웁니다.
-- 저장 스키마 v3에서 손상되거나 크기가 섞인 샘플을 조용히 버리지 않고 비호환 처리합니다.
-- Runtime IPC 임시 파일을 현재 요청 종료 시 가능한 범위에서 덮어쓴 뒤 삭제하고, 이전 프로세스의 잔여 파일은 앱 시작을 막지 않도록 빠르게 제거합니다. 템플릿 크기·NV21 길이·orientation도 검증합니다.
-- 만료된 관리자 세션이 자동 잠금 직전 관리 작업을 통과하지 못하도록 실행 시각을 다시 검사하고, 릴레이는 파싱 가능한 HTTPS URL과 토큰이 모두 있을 때만 활성화합니다. 앱 전체의 평문 HTTP도 차단했습니다.
+## Runtime Demo 기준 기본값
 
-## 실제 사용 중인 Runtime 기능
+| 항목 | 값 |
+|---|---:|
+| 라이브니스 | 켜짐, 레벨 0, 임계값 0.70 |
+| 식별 임계값 | 0.80 |
+| 1위·2위 불확실 구간 | 0.03 |
+| 품질 임계값 | 0.50 |
+| 밝기 | 0~255 |
+| yaw / pitch / roll | 각각 최대 10도 |
+| 양쪽 눈 감김 | 각각 0.80 이하 |
+| 얼굴 가림 | 기본 꺼짐, 임계값 0.50 |
+| 입 벌림 | 0.50 이하 |
+| 등록 얼굴 크기 | 80~1200px |
+| 등록 안정화 | 1200ms |
+| 프레임 분석 간격 | 180ms |
+| 인증 결과 표시 | 3500ms |
+| 인증 안정화 | **1프레임** |
 
-- CameraX `YUV_420_888` 프레임을 NV21로 정리한 뒤 Runtime `yuv2Bitmap()` 호출
-- `faceDetection()`으로 얼굴 수와 좌표, 68점 랜드마크, yaw/pitch/roll, 품질, 밝기 요청
-- 선택 가능한 Runtime 라이브니스와 눈 감김·가림·입 벌림 검사
-- 나이 추정 원값과 성별 코드 요청(등록 화면 진단에만 표시)
-- `templateExtraction()`으로 Runtime 전용 바이트 템플릿 생성
-- `similarityCalculation()`으로 등록 중복 검사, 대표 템플릿 선택, 1:N 인증과 1·2위 모호성 검사
-- Binder 연결 상태 구독, Runtime 사망 시 자동 재연결, 초기화 코드별 오류 안내
-- 관리자 진단 카드: Runtime 패키지 버전, Binder 상태, 초기화 결과, 끊김 사유, 자동 재연결 횟수, 수동 재연결
-- 프레임별 Runtime 호출 계측: YUV 변환·검출+속성·템플릿 추출 시간 (검출과 속성은 하나의 AIDL 호출이므로 속성만의 시간은 표시하지 않음)
-- 라이브니스 검사 레벨(엔진 계약에 그대로 전달)과 얼굴 가림 검사 토글 — 끄면 Runtime 검출 요청 옵션에서도 제외
+## 유지되는 기능
 
-## 유지되는 FFacio 기능
-
-- 5단계 정면/좌/우 등록 흐름과 안정화 시간
-- 다중 등록 샘플, 대표 템플릿 선정, 오염된 등록 세트 차단
-- 최고 후보 점수·2위 점수 차이·복수 샘플 지지를 함께 쓰는 인증
 - Head Admin 얼굴 승인과 Android 화면잠금 복구 경로
 - 암호화된 사용자·릴레이 설정 저장, 승인·판정 로그
 - HTTPS 릴레이 단일 실행과 상태 점검
-- 카메라 정지 감시, 몰입형 출입 단말 화면, 개인정보 노출 최소화
+- Runtime 비교의 I/O 스레드 실행, 제한 시간, 오래된 결과 폐기
+- Runtime 연결 상태 구독·자동 재연결과 카메라 정지 감시
+- 관리자 진단 카드와 프레임별 Runtime 호출 계측
+- Runtime 라이브니스, 라이브니스 레벨, 얼굴 가림 검사 설정
 
 ## 중요한 호환 조건
 
 FFacio Runtime 서비스 권한은 `signature` 보호 수준입니다. **FFacio APK와 Runtime APK는 반드시 같은 인증서로 서명해야 합니다.** Runtime을 먼저 설치한 뒤 FFacio를 설치합니다.
 
-기존 자체 엔진의 Float 임베딩은 Runtime 템플릿과 변환·비교하지 않습니다. 기존 사용자 이름은 복구·삭제를 위해 읽을 수 있지만 인증에는 사용하지 않으며, Runtime 전환 뒤 다시 등록해야 합니다.
+기존 등록 데이터는 새 단일 템플릿 정책의 첫 실행 초기화에서 전부 삭제됩니다. 릴레이 설정은 유지되며, 사용자는 모두 다시 등록해야 합니다.
 
 ## 빌드
 
 요구 환경은 JDK 17, Android SDK 36, 지원 기기 ABI `arm64-v8a` 또는 `armeabi-v7a`입니다.
-
-```powershell
-$env:FFACIO_KEYSTORE_PATH = "C:\secure\ffacio-runtime-pair.p12"
-$env:FFACIO_KEYSTORE_PASSWORD = "..."
-$env:FFACIO_KEY_ALIAS = "ffacio-runtime-pair"
-$env:FFACIO_KEY_PASSWORD = "..."
-
-# 같은 환경 변수로 FFacio-Runtime의 runtime APK를 먼저 빌드
-# 그다음 FFacio 빌드와 Runtime 인증서 일치 검증
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_android.ps1 `
-  -RuntimeApk C:\path\to\runtime-release.apk
-```
-
-직접 Gradle을 실행할 때는 다음과 같습니다.
 
 ```bash
 cd android
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-Debug 빌드도 두 프로젝트를 같은 컴퓨터의 같은 Android debug keystore로 빌드해야 서비스에 연결됩니다.
-
-## 실제 기기 확인
-
-Runtime 네이티브 라이브러리는 현재 ARM ABI를 대상으로 하므로 실제 ARM Android 기기에서 통합 확인합니다.
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify_android_device.ps1 `
-  -RuntimeApk C:\path\to\runtime-release.apk `
-  -AppApk .\release\FFacio-Android-release.apk
-```
-
-세부 구현과 마이그레이션 근거는 [docs/android.md](docs/android.md), [docs/runtime-migration.md](docs/runtime-migration.md)를 참고하세요.
+Release 빌드는 Runtime 프로젝트와 FFacio 프로젝트에 같은 `FFACIO_KEYSTORE_*` 환경 변수를 사용해야 합니다. 실제 ARM 기기 통합 확인은 `scripts/verify_android_device.ps1`을 사용합니다.
 
 ## 소스 정적 점검
 
@@ -99,4 +81,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify_android_dev
 python3 scripts/verify_source_static.py
 ```
 
-이 검사는 XML, Kotlin/Java/Gradle 괄호 구조, Runtime 필수 호출, 이전 엔진 흔적, 모델·서명키 포함 여부와 주요 IPC 방어 코드를 확인합니다.
+이 검사는 XML과 소스 구조, Runtime 필수 호출, 폐기한 등록·인증 로직의 잔존 여부, 이전 자체 엔진 흔적, 모델·서명키 포함 여부와 주요 IPC 방어 코드를 확인합니다.
+
+세부 내용은 [docs/android.md](docs/android.md)와 [FFACIO_RUNTIME_REFACTOR_REPORT.md](FFACIO_RUNTIME_REFACTOR_REPORT.md)를 참고하세요.

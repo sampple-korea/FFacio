@@ -36,12 +36,45 @@ REQUIRED_MAIN_MARKERS = (
     "withTimeout(RUNTIME_DECISION_TIMEOUT_MS)",
     "RUNTIME_DECISION_STALL_RECOVERY_MS",
     "runtimeDecisionToken",
-    "USER_STORE_SCHEMA_VERSION = 3",
-    "clearSecurely",
+    "USER_STORE_SCHEMA_VERSION = 5",
+    "USER_STORE_POLICY_VERSION = 5",
+    "resetLegacyUserStoreForSingleTemplatePolicy",
+    ".putBoolean(PASSIVE_LIVENESS_ENABLED_KEY, true)",
+    ".putInt(RUNTIME_LIVENESS_LEVEL_KEY, 0)",
+    ".putBoolean(OCCLUSION_CHECK_ENABLED_KEY, false)",
+    "users.indices.filter { index -> users[index].isCompatible() }",
+    "largestRuntimeFace",
+    "findBestEnrollmentDuplicate",
+    "ownedTemplates.forEach { it.fill(0) }",
+    "EnrollmentStabilityTracker",
+    "AUTH_STABLE_FRAMES = 1",
+    "check_eye_closeness = true",
+    "check_mouth_opened = true",
+    "estimate_age_gender = false",
     "isAdminSessionActive",
     "copyForRuntimeDecision",
     "SystemClock.elapsedRealtime()",
+    "CoroutineStart.UNDISPATCHED",
+    "persistenceSnapshot.wipeTemplates()",
+    "array.optJSONObject(i) ?: continue",
+    "users.forEach { it.wipe() }",
 )
+
+OBSOLETE_ENROLLMENT_MARKERS = (
+    "LivenessChallenge",
+    "EnrollmentPoseHold",
+    "enrollmentTargetPose",
+    "enrollmentSampleDecision",
+    "enrollmentTemplateQuality",
+    "ENROLL_SAMPLES",
+    "matchingSamples",
+    "samples_b64",
+    "supportCount",
+    "availableSamples",
+    "좌우 얼굴 돌리기",
+    "다각도",
+)
+
 SECRET_PATTERNS = (
     re.compile(r"ghp_[A-Za-z0-9]{20,}"),
     re.compile(r"sk-(?:proj-)?[A-Za-z0-9_-]{20,}"),
@@ -155,6 +188,9 @@ def main() -> int:
     for marker in REQUIRED_MAIN_MARKERS:
         if marker not in main_text:
             fail(f"required Runtime integration marker missing: {marker}")
+    for marker in OBSOLETE_ENROLLMENT_MARKERS:
+        if marker in main_text:
+            fail(f"retired enrollment/authentication logic remains: {marker}")
 
     if "implementation project(\":runtime-client\")" not in read(APP_GRADLE):
         fail("app does not depend on :runtime-client")
@@ -179,10 +215,15 @@ def main() -> int:
         "template sizes must match",
         "YUV input size does not match width and height",
         "deleteTemporaryFile",
+        "if (!file.delete() && file.exists()) file.deleteOnExit();",
         "releaseDeadBinding();",
     ):
         if marker not in client_text:
             fail(f"Runtime client guard missing: {marker}")
+    for marker in ("RandomAccessFile", "getFD().sync", "setLength(0"):
+        if marker in client_text:
+            fail(f"per-frame synchronous temporary-file wipe returned: {marker}")
+
     face_sdk_text = read(FACE_SDK)
     for marker in ("scheduleReconnect", "similarityCalculation", "yuv2Bitmap"):
         if marker not in face_sdk_text:
@@ -200,6 +241,11 @@ def main() -> int:
     ]
     if keystores:
         fail("signing key must not be packaged: " + str(keystores[0].relative_to(ROOT)))
+
+    test_files = [p for p in ROOT.rglob("*Test.kt") if p.is_file() and not is_excluded(p)]
+    test_count = sum(read(path).count("@Test") for path in test_files)
+    if test_count < 79:
+        fail(f"regression test inventory shrank unexpectedly: {test_count} < 79")
 
     digest = hashlib.sha256(MAIN.read_bytes()).hexdigest()
     print(f"Source audit passed: {len(source_files)} Kotlin/Java/Gradle files, MainActivity SHA-256 {digest}")

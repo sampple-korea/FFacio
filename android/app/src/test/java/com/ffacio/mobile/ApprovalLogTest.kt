@@ -34,8 +34,7 @@ class ApprovalLogTest {
                     result = if (index == 10) "승인" else "보류",
                     reason = "score below threshold",
                     score = 0.40 + index / 100.0,
-                    secondScore = 0.20,
-                    supportCount = index
+                    secondScore = 0.20
                 ),
                 limit = 8
             )
@@ -47,7 +46,7 @@ class ApprovalLogTest {
     }
 
     @Test
-    fun authDecisionSummaryIncludesScoresAndSupport() {
+    fun authDecisionSummaryIncludesScores() {
         val summary = authDecisionSummary(
             AuthDecisionLogEntry(
                 time = "12:10:00",
@@ -55,12 +54,11 @@ class ApprovalLogTest {
                 result = "보류",
                 reason = "ambiguous runner-up",
                 score = 0.61234,
-                secondScore = 0.59012,
-                supportCount = 1
+                secondScore = 0.59012
             )
         )
 
-        assertEquals("ambiguous runner-up · score 0.612 · second 0.590 · support 1", summary)
+        assertEquals("ambiguous runner-up · score 0.612 · second 0.590", summary)
     }
 
     @Test
@@ -71,8 +69,7 @@ class ApprovalLogTest {
             result = "보류",
             reason = "score below threshold",
             score = 0.512,
-            secondScore = 0.233,
-            supportCount = 1
+            secondScore = 0.233
         )
         val key = authDecisionDedupeKey(entry)
 
@@ -89,10 +86,9 @@ class ApprovalLogTest {
             result = "보류",
             reason = "score below threshold",
             score = 0.512,
-            secondScore = 0.233,
-            supportCount = 1
+            secondScore = 0.233
         )
-        val jittered = first.copy(score = 0.519, secondScore = 0.241, supportCount = 2)
+        val jittered = first.copy(score = 0.519, secondScore = 0.241)
 
         assertEquals(authDecisionDedupeKey(first), authDecisionDedupeKey(jittered))
     }
@@ -101,15 +97,15 @@ class ApprovalLogTest {
     fun authDecisionReasonNamesTheBlockingGate() {
         assertEquals(
             "score below threshold",
-            authDecisionReason(Match(index = 0, score = 0.40, secondScore = 0.10, supportCount = 5), availableSamples = 5)
+            authDecisionReason(Match(index = 0, score = 0.40, secondScore = 0.10))
         )
         assertEquals(
             "ambiguous runner-up",
-            authDecisionReason(Match(index = 0, score = 0.85, secondScore = 0.84, supportCount = 5), availableSamples = 5)
+            authDecisionReason(Match(index = 0, score = 0.85, secondScore = 0.84))
         )
         assertEquals(
-            "not enough sample support",
-            authDecisionReason(Match(index = 0, score = 0.85, secondScore = 0.10, supportCount = 1), availableSamples = 5)
+            "candidate accepted",
+            authDecisionReason(Match(index = 0, score = 0.85, secondScore = 0.10))
         )
     }
 

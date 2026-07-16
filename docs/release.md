@@ -1,5 +1,14 @@
 # FFacio Android Release Notes
 
+## Android 0.6.2-runtime-demo-aligned-final
+
+- Removes the active head-turn liveness challenge, five-pose enrollment, pose hold gates, sample-cohesion checks, representative-sample selection, and supporting-sample authentication.
+- Uses the Runtime Demo registration policy with a single 1200 ms stable capture and stores the highest-quality Runtime template from that interval.
+- Selects only the largest detected face when multiple people are visible.
+- Aligns Runtime Demo defaults for liveness, quality, pose, luminance, eye, occlusion, mouth, size, thresholds, frame interval, and result hold; authentication stabilization is intentionally one frame.
+- Requests eye and mouth attributes for both authentication and enrollment like the Runtime Demo, while applying those pass/fail gates only during enrollment.
+- Introduces user-store policy/schema version 5. On first launch, all previous enrolled users and encrypted user templates are deleted; non-biometric relay settings are preserved.
+
 ## Android 0.6.0-runtime
 
 - Adds a Runtime diagnostics card to the admin advanced settings: Runtime package install state and version, Binder connection phase, initialization result, disconnect reason, automatic reconnect attempt count, and a manual reconnect button.

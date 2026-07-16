@@ -1,138 +1,85 @@
 package com.ffacio.mobile
 
+import com.kbyai.facesdk.FaceBox
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import kotlin.math.abs
 
 class EnrollmentQualityTest {
     @Test
-    fun enrollmentTargetPoseGuidesFiveStepPoseSequence() {
-        assertEquals(0, enrollmentTargetPose(sampleCount = 0, poses = emptyList()))
-        assertEquals(-1, enrollmentTargetPose(sampleCount = 1, poses = listOf(0)))
-        assertEquals(1, enrollmentTargetPose(sampleCount = 2, poses = listOf(0, -1)))
-        assertEquals(-1, enrollmentTargetPose(sampleCount = 3, poses = listOf(0, -1, 1)))
-        assertEquals(1, enrollmentTargetPose(sampleCount = 4, poses = listOf(0, -1, 1, -1)))
-        assertEquals(null, enrollmentTargetPose(sampleCount = 5, poses = listOf(0, -1, 1, -1, 1)))
+    fun largestFaceIsSelectedWhenSeveralFacesAreVisible() {
+        val small = face(10, 10, 110, 110)
+        val largest = face(20, 20, 320, 320)
+        val medium = face(30, 30, 230, 230)
+
+        assertSame(largest, largestRuntimeFace(listOf(small, largest, medium)))
     }
 
     @Test
-    fun wrongTargetPoseIsRejectedDuringGuidedEnrollment() {
-        val result = enrollmentSampleDecision(
-            template = template(20),
-            pose = 1,
-            samples = listOf(template(10)),
-            poses = listOf(0),
-            comparator = ::similarity
-        )
+    fun firstFaceWinsWhenAreasAreEqual() {
+        val first = face(0, 0, 100, 100)
+        val second = face(50, 50, 150, 150)
 
-        assertFalse(result.accepted)
-        assertEquals("왼쪽으로 살짝 돌려 주세요", result.status)
+        assertSame(first, largestRuntimeFace(listOf(first, second)))
     }
 
     @Test
-    fun repeatedRuntimeTemplateIsRejected() {
-        val result = enrollmentSampleDecision(
-            template = template(10),
-            pose = -1,
-            samples = listOf(template(10)),
-            poses = listOf(0),
-            comparator = ::similarity
-        )
-
-        assertFalse(result.accepted)
-        assertEquals("고개를 좌우로 천천히 돌려 주세요", result.status)
+    fun faceCenterMustRemainInsideRuntimeDemoGuide() {
+        assertTrue(isRuntimeFaceCentered(face(400, 200, 600, 500), frameWidth = 1000, frameHeight = 700))
+        assertFalse(isRuntimeFaceCentered(face(0, 0, 100, 100), frameWidth = 1000, frameHeight = 700))
     }
 
     @Test
-    fun finalSampleNeedsPoseDiversity() {
-        val samples = listOf(template(10), template(14), template(18), template(22))
-        val result = enrollmentSampleDecision(
-            template = template(26),
-            pose = 0,
-            samples = samples,
-            poses = listOf(0, 0, 0, 0),
-            comparator = ::similarity
-        )
+    fun singleTemplateEnrollmentNeedsOnlyStableNeutralCapture() {
+        val tracker = EnrollmentStabilityTracker(stableMillis = 1200L)
+        val first = observation(code = 10, quality = 0.60f)
+        val sharper = observation(code = 20, quality = 0.90f)
 
-        assertFalse(result.accepted)
+        assertFalse(tracker.update(first, now = 1_000L))
+        assertFalse(tracker.update(sharper, now = 2_199L))
+        assertTrue(tracker.update(sharper, now = 2_200L))
+        assertArrayEquals(sharper.template, tracker.takeTemplate())
     }
 
     @Test
-    fun diverseFinalSampleIsAccepted() {
-        val samples = listOf(template(10), template(14), template(18), template(22))
-        val result = enrollmentSampleDecision(
-            template = template(26),
-            pose = 1,
-            samples = samples,
-            poses = listOf(0, -1, 1, -1),
-            comparator = ::similarity
-        )
+    fun invalidFrameResetsSingleTemplateStabilityWindow() {
+        val tracker = EnrollmentStabilityTracker(stableMillis = 1200L)
 
-        assertTrue(result.accepted)
+        assertFalse(tracker.update(observation(10, 0.8f), now = 1_000L))
+        assertFalse(tracker.update(Observation.fail("no face"), now = 2_100L))
+        assertFalse(tracker.update(observation(20, 0.9f), now = 2_200L))
+        assertEquals(0.0f, tracker.progress(now = 2_200L), 0.0f)
     }
 
     @Test
-    fun enrollmentPoseHoldRequiresStablePoseDuration() {
-        val hold = EnrollmentPoseHold(holdMillis = 400L)
+    fun monotonicClockRegressionRestartsEnrollmentWindow() {
+        val tracker = EnrollmentStabilityTracker(stableMillis = 1200L)
 
-        assertFalse(hold.update(target = -1, pose = -1, now = 1_000L))
-        assertFalse(hold.update(target = -1, pose = -1, now = 1_250L))
-        assertTrue(hold.progress() in 0.5f..0.7f)
-        assertTrue(hold.update(target = -1, pose = -1, now = 1_420L))
+        assertFalse(tracker.update(observation(10, 0.8f), now = 2_000L))
+        assertFalse(tracker.update(observation(20, 0.9f), now = 1_000L))
+        assertEquals(0.0f, tracker.progress(now = 1_000L), 0.0f)
+        assertTrue(tracker.update(observation(20, 0.9f), now = 2_200L))
     }
 
     @Test
-    fun enrollmentPoseHoldResetsWhenPoseChanges() {
-        val hold = EnrollmentPoseHold(holdMillis = 400L)
-
-        assertFalse(hold.update(target = -1, pose = -1, now = 1_000L))
-        assertFalse(hold.update(target = -1, pose = 1, now = 1_300L))
-        assertEquals(0.0f, hold.progress(), 0.0f)
+    fun authenticationStabilizationIsExactlyOneFrame() {
+        assertEquals(1, AUTH_STABLE_FRAMES)
     }
 
-    @Test
-    fun finalTemplateQualityRequiresPoseCoverageWhenProvided() {
-        val samples = listOf(template(10), template(14), template(18), template(22), template(26))
-        val result = enrollmentTemplateQuality(
-            representative = template(18),
-            samples = samples,
-            poses = listOf(0, 0, 0, -1, 1),
-            comparator = ::similarity
-        )
-
-        assertFalse(result.accepted)
+    private fun face(x1: Int, y1: Int, x2: Int, y2: Int): FaceBox = FaceBox().apply {
+        this.x1 = x1
+        this.y1 = y1
+        this.x2 = x2
+        this.y2 = y2
     }
 
-    @Test
-    fun cohesiveRuntimeTemplateSetIsAccepted() {
-        val samples = listOf(template(10), template(14), template(18), template(22), template(26))
-        val result = enrollmentTemplateQuality(
-            representative = template(18),
-            samples = samples,
-            poses = listOf(0, -1, 1, -1, 1),
-            comparator = ::similarity
-        )
-
-        assertTrue(result.accepted)
-    }
-
-    @Test
-    fun contaminatedRuntimeTemplateSetIsRejected() {
-        val samples = listOf(template(10), template(14), template(18), template(90), template(22))
-        val result = enrollmentTemplateQuality(
-            representative = template(18),
-            samples = samples,
-            poses = listOf(0, -1, 1, -1, 1),
-            comparator = ::similarity
-        )
-
-        assertFalse(result.accepted)
-    }
-
-    private fun template(code: Int): ByteArray = ByteArray(32).also { it[0] = code.toByte() }
-
-    private fun similarity(first: ByteArray, second: ByteArray): Double =
-        1.0 - abs((first[0].toInt() and 0xff) - (second[0].toInt() and 0xff)) / 100.0
+    private fun observation(code: Int, quality: Float): Observation = Observation(
+        ok = true,
+        message = "ok",
+        template = ByteArray(32).also { it[0] = code.toByte() },
+        quality = quality
+    )
 }

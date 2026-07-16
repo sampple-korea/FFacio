@@ -18,7 +18,6 @@ import io.ffacio.ipc.IFFacioRuntime;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -247,19 +246,8 @@ public final class FFacioRuntimeClient {
 
     private static void deleteTemporaryFile(File file) {
         if (file == null || !file.exists()) return;
-        try (RandomAccessFile random = new RandomAccessFile(file, "rw")) {
-            byte[] zeros = new byte[16 * 1024];
-            long remaining = random.length();
-            random.seek(0L);
-            while (remaining > 0L) {
-                int count = (int) Math.min(zeros.length, remaining);
-                random.write(zeros, 0, count);
-                remaining -= count;
-            }
-            random.getFD().sync();
-        } catch (Throwable ignored) {
-            // Cache cleanup is best effort; the private file is still removed below.
-        }
+        // Runtime Demo behavior: unlink the app-private cache file immediately.
+        // Synchronous overwrite + fsync on every camera frame caused avoidable analysis stalls.
         if (!file.delete() && file.exists()) file.deleteOnExit();
     }
 

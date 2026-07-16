@@ -500,7 +500,6 @@ class AdminOperationGateTest {
         assertTrue(plan.clearEnrollment)
         assertTrue(plan.clearAuthHold)
         assertTrue(plan.clearAccessFeedback)
-        assertTrue(plan.resetTransientRecognition)
 
         val reset = applyAdminAutoLockReset(AdminAutoLockState())
 
@@ -511,13 +510,8 @@ class AdminOperationGateTest {
         assertFalse(reset.confirmDelete)
         assertEquals(-1, reset.pendingDeleteUserIndex)
         assertEquals("", reset.enrollmentName)
-        assertEquals(0, reset.enrollSampleCount)
-        assertEquals(0, reset.enrollPoseCount)
         assertEquals(0L, reset.authResultHoldUntil)
         assertFalse(reset.hasAccessFeedback)
-        assertEquals(-1, reset.liveCandidate)
-        assertEquals(-1, reset.stableUser)
-        assertEquals(0, reset.stableCount)
     }
 
     @Test
@@ -599,7 +593,6 @@ class AdminOperationGateTest {
         return UserTemplate(
             name = name,
             template = template,
-            samples = listOf(ByteArray(32) { 2 }),
             engineId = FACE_ENGINE_ID,
             templateSize = template.size,
             isHeadAdmin = isHeadAdmin
@@ -610,7 +603,6 @@ class AdminOperationGateTest {
         return UserTemplate(
             name = name,
             template = ByteArray(0),
-            samples = emptyList(),
             engineId = "legacy.unknown",
             templateSize = 0,
             isHeadAdmin = isHeadAdmin

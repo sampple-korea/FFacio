@@ -22,8 +22,7 @@ class RuntimeDiagnosticsTest {
         val options = runtimeDetectionOptions(
             passiveLivenessEnabled = false,
             livenessLevel = 1,
-            occlusionCheckEnabled = false,
-            enrollmentMode = false
+            occlusionCheckEnabled = false
         )
         assertFalse(options.check_liveness)
         assertFalse(options.check_face_occlusion)
@@ -38,12 +37,13 @@ class RuntimeDiagnosticsTest {
         val options = runtimeDetectionOptions(
             passiveLivenessEnabled = true,
             livenessLevel = 7,
-            occlusionCheckEnabled = true,
-            enrollmentMode = true
+            occlusionCheckEnabled = true
         )
         assertTrue(options.check_liveness)
         assertTrue(options.check_face_occlusion)
-        assertTrue(options.estimate_age_gender)
+        assertTrue(options.check_eye_closeness)
+        assertTrue(options.check_mouth_opened)
+        assertFalse(options.estimate_age_gender)
         assertEquals(0, options.check_liveness_level)
     }
 
