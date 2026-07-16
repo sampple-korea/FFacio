@@ -1,38 +1,7 @@
-# FFacio Android Recognition Research
+# Runtime 판정 정책 메모
 
-Updated: 2026-06-12
+FFacio 0.5.1의 엔진 입력은 제공된 FFacio Runtime과 Runtime Demo 구현을 기준으로 정리했습니다. 앱은 Runtime 템플릿을 해석하거나 자체 임베딩으로 대체하지 않습니다.
 
-## Decision
+현재 기본값은 Runtime Demo의 식별 기준 0.8, 1·2위 차이 0.03, 라이브니스 0.7, 품질 0.5, 눈 0.8, 가림·입 0.5를 출발점으로 사용합니다. FFacio는 출입 단말 특성상 단일 최고 점수만으로 승인하지 않고 복수 등록 샘플 지지와 능동 얼굴 돌리기를 추가합니다.
 
-FFacio Android now prioritizes InsightFace ArcFace `w600k_r50.onnx` through ONNX Runtime Android for recognition embeddings. OpenCV YuNet remains the detector, OpenCV SFace remains the face alignment/fallback path, and MiniFASNet-V2 remains the optional passive anti-spoofing model.
-
-This keeps the app offline, avoids cloud subscriptions, and improves recognition strength over SFace-only embeddings.
-
-## Compared Options
-
-| Option | Result |
-| --- | --- |
-| InsightFace ArcFace ONNX | Best immediate fit. Strong recognition family, local ONNX inference, model already bundled in `resources/models`. |
-| OpenCV SFace | Useful and lightweight, but now fallback only because a real-device false accept was reported with SFace-era matching. |
-| KBY-AI Android SDK | Potentially strong commercial SDK with liveness/recognition, but Android use is license-tied and not the free/offline source-tree path for this project. |
-| InspireFace Android SDK | Promising InsightFace-family SDK for edge/mobile, but native SDK integration is a larger migration than using the existing ONNX model through ORT. |
-| MediaPipe Face Landmarker | Good for landmarks/pose/liveness assistance, but it is not a face identity embedding model by itself. |
-| FaceNet/TFLite sample apps | Useful references, but ArcFace/InsightFace is the stronger current recognition direction for this project. |
-
-## Current Hardening
-
-- ArcFace embeddings are normalized before storage/matching.
-- New users store the full enrollment sample set, not only one averaged centroid.
-- Authentication requires centroid score, ambiguity margin, enrollment-sample support, active liveness, and stable multi-frame confirmation.
-- Enrollment rejects near-duplicate samples, missing pose diversity, mixed/unstable template sets, and likely duplicate users.
-- Legacy users remain loadable, but should be deleted and re-registered after 0.3.16 for the strongest false-accept guard.
-
-## References
-
-- InsightFace: https://github.com/deepinsight/insightface
-- InsightFace buffalo_l models: https://github.com/deepinsight/insightface/releases
-- ONNX Runtime Android: https://onnxruntime.ai/docs/install/
-- OpenCV Zoo YuNet/SFace: https://github.com/opencv/opencv_zoo
-- KBY-AI Android docs: https://docs.kby-ai.com/help/product/face-liveness-detection-sdk-face-recognition-sdk/standard-sdk-mobile/standard-sdk-android
-- InspireFace Android SDK: https://github.com/HyperInspire/inspireface-android-sdk
-- MediaPipe Face Landmarker: https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker
+이 기준은 실제 배치 환경의 카메라, 거리, 조명, Runtime 모델 버전과 사용자 집단에 따라 다시 검증해야 합니다. 관리자 판정 로그는 후보 점수·2위·지지 샘플·거부 이유를 기록하지만 공개 운용 화면에는 생체 점수나 이름 이력을 노출하지 않습니다.

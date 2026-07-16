@@ -4,73 +4,62 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class AuthenticationMatchingTest {
     @Test
-    fun mismatchedEmbeddingDimensionsFailClosed() {
-        assertEquals(
-            -1.0,
-            cosine(FloatArray(512) { 1.0f }, FloatArray(128) { 1.0f }),
-            0.0
+    fun emptyRuntimeTemplateIsIncompatible() {
+        val user = UserTemplate(
+            name = "empty",
+            template = ByteArray(0),
+            engineId = FACE_ENGINE_ID,
+            templateSize = 0
         )
+
+        assertFalse(user.isCompatible())
     }
 
     @Test
-    fun currentEngineTemplateWithoutSamplesIsIncompatible() {
-        val template = UserTemplate(
-            name = "missing-samples",
-            embedding = unitEmbedding(0),
+    fun runtimePrimaryTemplateIsCompatibleWithoutImprovementSamples() {
+        val template = runtimeTemplate(10)
+        val user = UserTemplate(
+            name = "primary-only",
+            template = template,
             samples = emptyList(),
             engineId = FACE_ENGINE_ID,
-            embeddingSize = FACE_EMBEDDING_SIZE
+            templateSize = template.size
         )
 
-        assertFalse(template.isCompatible())
+        assertTrue(user.isCompatible())
+        assertEquals(1, user.matchSampleCount())
     }
 
     @Test
-    fun runnerUpAmbiguityUsesOtherUsersEnrollmentSamples() {
-        val probe = unitEmbedding(0)
-        val enrolled = UserTemplate(
-            name = "enrolled",
-            embedding = unitEmbedding(0),
-            samples = listOf(unitEmbedding(0), mixedEmbedding(0, 1, 0.98f)),
-            engineId = FACE_ENGINE_ID,
-            embeddingSize = FACE_EMBEDDING_SIZE
-        )
-        val nearbySampleUser = UserTemplate(
-            name = "nearby-sample",
-            embedding = unitEmbedding(2),
-            samples = listOf(mixedEmbedding(0, 2, 0.97f), unitEmbedding(2)),
-            engineId = FACE_ENGINE_ID,
-            embeddingSize = FACE_EMBEDDING_SIZE
-        )
+    fun runnerUpAmbiguityUsesEveryUsersRuntimeSamples() {
+        val probe = runtimeTemplate(10)
+        val enrolled = user("enrolled", 10, 12)
+        val nearbySampleUser = user("nearby", 60, 14)
 
-        val result = match(probe, listOf(enrolled, nearbySampleUser))
+        val result = match(probe, listOf(enrolled, nearbySampleUser), ::fakeRuntimeSimilarity)
 
         assertEquals(0, result.index)
-        assertTrue(result.secondScore > 0.90)
+        assertTrue(result.score > 0.99)
+        assertTrue(result.secondScore > 0.95)
     }
 
     @Test
     fun enrollmentDuplicateScoreUsesStoredSampleMaximum() {
-        val probe = unitEmbedding(0)
-        val user = UserTemplate(
-            name = "sample-match",
-            embedding = unitEmbedding(3),
-            samples = listOf(mixedEmbedding(0, 3, 0.96f), unitEmbedding(3)),
-            engineId = FACE_ENGINE_ID,
-            embeddingSize = FACE_EMBEDDING_SIZE
-        )
+        val probe = runtimeTemplate(10)
+        val user = user("sample-match", 80, 12)
 
-        assertTrue(enrollmentDuplicateScore(probe, user) > 0.90)
+        assertTrue(enrollmentDuplicateScore(probe, user, ::fakeRuntimeSimilarity) > 0.95)
     }
 
     @Test
-    fun weakScoreThatPreviouslyCouldPassIsRejected() {
+    fun weakScoreIsRejected() {
         assertFalse(
             acceptsAuthenticationCandidate(
-                score = 0.50,
+                score = 0.79,
                 secondScore = 0.0,
                 supportCount = 5,
                 availableSamples = 5
@@ -82,8 +71,8 @@ class AuthenticationMatchingTest {
     fun multiSampleTemplateRequiresMoreThanOneSupportingSample() {
         assertFalse(
             acceptsAuthenticationCandidate(
-                score = 0.72,
-                secondScore = 0.40,
+                score = 0.91,
+                secondScore = 0.50,
                 supportCount = 1,
                 availableSamples = 5
             )
@@ -94,8 +83,8 @@ class AuthenticationMatchingTest {
     fun strongSupportedCandidateIsAccepted() {
         assertTrue(
             acceptsAuthenticationCandidate(
-                score = 0.72,
-                secondScore = 0.40,
+                score = 0.91,
+                secondScore = 0.50,
                 supportCount = 2,
                 availableSamples = 5
             )
@@ -106,22 +95,55 @@ class AuthenticationMatchingTest {
     fun ambiguousCandidateIsRejectedEvenWithHighScore() {
         assertFalse(
             acceptsAuthenticationCandidate(
-                score = 0.72,
-                secondScore = 0.67,
+                score = 0.91,
+                secondScore = 0.89,
                 supportCount = 3,
                 availableSamples = 5
             )
         )
     }
 
-    private fun unitEmbedding(index: Int): FloatArray =
-        FloatArray(FACE_EMBEDDING_SIZE).also { it[index] = 1.0f }
-
-    private fun mixedEmbedding(primary: Int, secondary: Int, primaryWeight: Float): FloatArray {
-        val secondaryWeight = kotlin.math.sqrt(1.0f - primaryWeight * primaryWeight)
-        return FloatArray(FACE_EMBEDDING_SIZE).also {
-            it[primary] = primaryWeight
-            it[secondary] = secondaryWeight
+    @Test
+    fun runtimeComparisonFailuresAreCountedAndDoNotBecomeMatches() {
+        val probe = runtimeTemplate(10)
+        val result = match(probe, listOf(user("broken", 10, 12))) { _, _ ->
+            error("binder failed")
         }
+
+        assertEquals(-1, result.index)
+        assertEquals(0, result.successfulComparisons)
+        assertEquals(2, result.failedComparisons)
     }
+
+    @Test
+    fun partialRuntimeComparisonFailureCanStillUseEnoughValidSamples() {
+        val probe = runtimeTemplate(10)
+        val enrolled = user("partial", 10, 12)
+        var calls = 0
+        val result = match(probe, listOf(enrolled)) { first, second ->
+            calls += 1
+            if (calls == 1) error("temporary binder failure")
+            fakeRuntimeSimilarity(first, second)
+        }
+
+        assertEquals(0, result.index)
+        assertEquals(1, result.successfulComparisons)
+        assertEquals(1, result.failedComparisons)
+    }
+
+    private fun user(name: String, primary: Int, sample: Int): UserTemplate {
+        val template = runtimeTemplate(primary)
+        return UserTemplate(
+            name = name,
+            template = template,
+            samples = listOf(runtimeTemplate(sample)),
+            engineId = FACE_ENGINE_ID,
+            templateSize = template.size
+        )
+    }
+
+    private fun runtimeTemplate(code: Int): ByteArray = ByteArray(32).also { it[0] = code.toByte() }
+
+    private fun fakeRuntimeSimilarity(first: ByteArray, second: ByteArray): Double =
+        1.0 - abs((first[0].toInt() and 0xff) - (second[0].toInt() and 0xff)) / 100.0
 }

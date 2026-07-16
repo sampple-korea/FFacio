@@ -1,66 +1,108 @@
-# FFacio Android
+# FFacio Android Runtime 구현
 
-Android build target for the same offline face access goal.
+## 책임 분리
 
-## Stack
+FFacio는 화면, 카메라 수명주기, 사용자 등록 절차, 인증 정책, Head Admin, 암호화 저장소와 문 릴레이를 소유합니다. 얼굴 엔진과 네이티브 모델은 FFacio Runtime이 소유합니다. 앱이 Runtime 반환 템플릿을 해석하거나 자체 벡터로 변환하지 않습니다.
 
-- Kotlin + Jetpack Compose for the mobile UI.
-- CameraX for preview and frame analysis.
-- OpenCV Android AAR for YuNet face detection and SFace embeddings.
-- Android Keystore AES-GCM for stored face templates and HTTP relay token.
-- The APK bundles an Android-only offline model set generated from `resources/models/`: OpenCV YuNet, OpenCV SFace alignment fallback, InsightFace ArcFace `w600k_r50`, and MiniFASNet-V2. It does not need a model download on first launch. ArcFace is the primary recognition embedding model; SFace remains available for face alignment and fallback embeddings. Release APKs include MiniFASNet-V2 for the optional passive PAD switch, but runtime load failure degrades to active face-turn mode instead of blocking the whole app.
-- Sensitive screens run with Android `FLAG_SECURE`, so camera preview, recognized names, and relay settings are blocked from screenshots, screen recording, and recent-app thumbnails on compliant devices.
-- While the app is active it keeps the display awake for door-terminal operation. The operation view also hides system bars with transient swipe reveal to reduce accidental navigation on a mounted terminal; this immersive mode is disabled when touch exploration accessibility is active. The admin view restores normal system UI and still auto-locks back to the operation view after the admin session timeout.
-- The default screen is an operation view for door use: camera guidance, current status, recent approvals, relay failures, and camera retry only. Registration, user management, relay settings, and destructive actions live in the admin view. After a Head Admin is configured, entering the admin view is approved by a Head Admin face; normal actions inside that admin session run immediately, while Head Admin assignment/removal and initial no-Head-Admin setup use Android screen-lock verification.
-- The admin view automatically returns to the operation view after the admin session timeout, with a separate idle timeout that cancels stalled enrollment. Secure prompts and storage operations are not interrupted.
+`android/runtime-client`는 제공된 FFacio-Runtime 저장소의 `client` 계약을 포함한 소스 모듈입니다. 원본 IPC 계약을 유지하면서 입력 크기 검증과 임시 파일 실패 정리를 보강했습니다. AIDL, Parcelable, `FFacioRuntimeClient`, 기존 호환 API인 `FaceSDK`가 들어 있습니다. Runtime의 IPC 계약이 바뀌면 이 모듈도 같은 버전으로 갱신해야 합니다.
 
-## Build
+## 시작과 연결
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup_android_deps.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create_android_release_keystore.ps1
-$env:FFACIO_ANDROID_KEYSTORE = "C:\path\to\release.jks"
-$env:FFACIO_ANDROID_KEYSTORE_PASSWORD = "<store-password>"
-$env:FFACIO_ANDROID_KEY_ALIAS = "<key-alias>"
-$env:FFACIO_ANDROID_KEY_PASSWORD = "<key-password>"
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_android.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify_android_static.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify_android_emulator.ps1
-```
+`MainActivity`는 Runtime 패키지 설치 여부를 먼저 확인하고 `FaceSDK.initialize()`를 호출합니다. 연결 상태 listener로 다음 상태를 구분합니다.
 
-For disposable local sideload testing only, `scripts\build_android.ps1 -AllowGeneratedSigningKey` can create `release\ffacio-local-release.jks`. Do not treat that generated key as reproducible production signing provenance.
+- 패키지 미설치
+- 서비스 연결 중
+- Binder 연결·SDK 초기화 완료
+- 라이선스/App ID/만료/비활성/초기화 오류
+- 서비스 연결 해제 또는 Binder 사망
+- 서명 권한 거부
 
-For production-like door terminals, create and back up one persistent keystore outside the repo with `scripts\create_android_release_keystore.ps1`, then reuse it for every release. Replacing the keystore changes the APK signing lineage and can prevent in-place upgrades on installed devices.
+`FaceSDK`는 프로세스당 한 Binder 세션을 유지하고 연결이 사라지면 재연결합니다. Activity 종료 시 listener 제거, 연결 해제, 분석 executor 종료 순서로 정리합니다.
 
-Output:
+## 카메라와 Runtime 분석
 
-- `release\FFacio-Android-release.apk`
-- `release\FFacio-Android-debug.apk`
-- `release\android-release-manifest.json`
-- `release\android-emulator-verification.json`
-- `release\android-gradle-verification.log`
+CameraX 분석은 `YUV_420_888`을 사용합니다. 각 plane의 row stride와 pixel stride를 반영해 NV21을 만들고 Demo의 EXIF orientation 매핑과 동일한 코드를 Runtime `yuv2Bitmap()`에 넘깁니다. 전면 카메라 미러링은 Runtime 변환 단계에서 한 번만 적용합니다.
 
-## Current Caveats
+한 분석 프레임의 호출 순서는 다음과 같습니다.
 
-- Release APK signing requires `FFACIO_ANDROID_KEYSTORE` and related signing environment variables. The private signing key is intentionally not stored in git.
-- `android-release-manifest.json` records whether the APK used production signing or the disposable local sideload key.
-- Android uses OpenCV YuNet for detection, OpenCV SFace for face alignment/fallback, InsightFace ArcFace `w600k_r50` for primary recognition embeddings, and MiniFASNet-V2 for optional passive PAD. Only the required InsightFace recognition model is packaged, not the full `buffalo_l` bundle.
-- Android packages 64-bit native libraries only (`arm64-v8a` for real devices and `x86_64` for emulator verification) to keep the ONNX Runtime APK footprint lower.
-- `scripts\build_android.ps1` runs unit tests, release lint, debug/release assembly, static APK verification, and emulator launch/model-readiness smoke. The emulator check is still not a substitute for real-device enrollment/auth/liveness testing.
-- RGB-camera liveness defaults to the active left/right pose challenge. The optional passive MiniFASNet anti-spoofing switch can add another check against many static photo and simple screen attacks, but it is not equivalent to hardware depth/IR Face ID.
-- Basic real-face verification uses the active left/right face-turn challenge by default. Advanced settings include an optional Head-Admin-approved `사진/화면 차단 모델` switch for passive PAD on top of that challenge; release builds package that model, and if it cannot be loaded at runtime the app continues in active-challenge mode.
-- Enrollment rejects near-duplicate samples, requires center/left/right pose diversity with a five-step center/left/right/left/right sequence, checks final template cohesion before saving, and blocks faces that already match an enrolled user or any of their stored enrollment samples.
-- During enrollment, the camera preview uses the face guide ring as the main progress surface: it shows sample progress, pose coverage, and hold progress while the user slowly turns their face for a stronger template.
-- The camera guide ring follows the detected face position and size, using a light segmented outline plus edge badges for turn direction so the face remains visible during enrollment, Head Admin approval, and normal authentication.
-- Android authentication is intentionally conservative for door use: a candidate must clear a stricter centroid score, ambiguity margin, and supporting enrollment-sample check. Users enrolled before Android 0.3.16 are intentionally not matched against the new ArcFace embedding space; delete and re-register them to store ArcFace templates with the full sample set.
-- During enrollment save, the camera pipeline remains bound while heavy frame analysis pauses until encrypted template storage finishes, avoiding the freeze-like preview teardown seen on some devices.
-- When analysis frames stop arriving while camera analysis is expected, Android automatically rebinds the camera pipeline for silent CameraX feed stalls, then fails visibly after repeated unsuccessful recovery attempts. If the analyzer itself stays stuck inside a frame for an extended window, the app asks for a full restart instead of racing native face-engine cleanup.
-- The admin view supports selecting and deleting individual registered users, plus a separate all-users reset path for destructive maintenance.
-- The protected user list shows the Head Admin badge and lets an Android screen-lock-verified operator set or clear Head Admin users. Multiple Head Admin users are supported. Once the admin screen has been opened by a compatible Head Admin face, user deletion, all-user deletion, relay/token changes, relay tests, and full local-store reset run directly within that admin session.
-- The screen-lock-protected admin view includes an authentication decision log with score, runner-up, support count, and reason fields so real-device false-accept/false-reject reports can be investigated without exposing biometric scores on the public operation screen.
-- Individual user deletion requires a name-specific confirmation dialog inside the admin screen. Relay activation is stored as an admin setting and remains enabled across normal app lifecycle changes until an admin disables it or the encrypted relay token cannot be opened.
-- Door relay requests are single-flight with a short cooldown, so repeated accepted frames while one relay request is pending do not send additional open requests.
-- Android relay requests do not include the recognized user's name in the outbound JSON payload; detailed identity remains local to the protected approval log.
-- Android includes a relay connection test in the locked admin view. It never calls the configured open URL; it only sends an HTTPS `GET` to `.well-known/ffacio-door-relay` under the same relay parent path and treats non-2xx responses as failure.
-- Real device camera/liveness testing is still required on actual phones.
-- Full Android lock-task kiosk enforcement still requires device-owner / managed-device setup outside the app. The app's immersive operation view is an ergonomic guard, not a replacement for MDM/device-owner lock task mode.
+1. `FaceSDK.yuv2Bitmap`
+2. `FaceSDK.faceDetection` — 전체 속성 옵션 사용
+3. 단일 얼굴·최소 크기·품질·자세·68점 랜드마크 검사
+4. 선택적 라이브니스, 양쪽 눈, 가림, 입 벌림 검사
+5. `FaceSDK.templateExtraction`
+6. 등록 또는 인증 단계에서 `FaceSDK.similarityCalculation`
+
+
+Runtime Binder 계약상 Bitmap과 NV21은 앱 전용 cache의 임시 파일·파일 디스크립터를 거칩니다. 현재 요청의 파일은 성공·실패 경로 모두 가능한 범위에서 0으로 덮어쓴 뒤 즉시 삭제하고, 이전 프로세스가 남긴 임시 파일은 시작 경로를 막지 않도록 빠르게 제거합니다. NV21 배열과 삭제된 템플릿 배열도 가능한 시점에 0으로 덮어씁니다. 이는 영구 얼굴 사진 저장과는 다르지만, 플래시 저장장치 전체를 대상으로 한 포렌식 삭제 보장은 아닙니다. Runtime 초기화 예외 때는 binding을 해제해 다음 재연결을 허용합니다.
+
+분석 간격은 180ms이며 이전 분석이나 등록·인증 비교가 끝나기 전에 새 작업을 쌓지 않습니다. 템플릿 비교는 UI 스레드가 아닌 I/O 작업에서 단일 실행하며, 8초 제한과 상태 세대 번호·판정 토큰으로 오래된 결과를 폐기합니다. 동기식 Binder 호출이 10초 이상 반환하지 않으면 정지 감시가 해당 판정을 무효화하고 Runtime 연결을 다시 초기화합니다. CameraX 프레임은 항상 `finally`에서 닫습니다. Runtime 호출이 끊기면 성공으로 간주하지 않고 사용자에게 설치·서명·연결 상태를 안내합니다.
+
+## Runtime 옵션과 앱 판정
+
+요청 옵션은 `check_liveness`, `check_liveness_level`, `check_eye_closeness`, `check_face_occlusion`, `check_mouth_opened`, `estimate_age_gender`입니다. 0.6.0부터 라이브니스 검사 레벨과 얼굴 가림 검사는 관리자 설정입니다. 가림 검사를 끄면 결과만 숨기는 것이 아니라 Runtime 검출 요청에서 `check_face_occlusion=false`로 제외하고 인증·등록 통과 조건에도 사용하지 않습니다(런타임 데모와 같은 의미). 라이브니스 레벨 정수는 엔진 계약에 그대로 전달하며 앱은 0 또는 1만 허용합니다. FFacio는 Runtime 원점수를 다음 앱 정책에 사용합니다.
+
+| 항목 | 기본 정책 |
+|---|---:|
+| 라이브니스 | 0.70 이상 |
+| 얼굴 품질 | 0.50 이상 |
+| 눈 감김 | 각 0.80 이하 |
+| 가림 | 0.50 이하 |
+| 입 벌림 | 0.50 이하 |
+| pitch/roll | 절댓값 20도 이하 |
+| 랜드마크 | 68쌍, 배열 길이 136 |
+| 얼굴 폭 | 변환 이미지 폭의 16% 이상 |
+
+이 값은 Runtime Demo 기본값과 기존 FFacio 사용 흐름을 결합한 앱 정책이며 엔진 자체의 공식 보증값으로 간주하지 않습니다. 실제 설치 환경에서 오인식·거부 로그를 보고 조정해야 합니다.
+
+나이와 성별은 신원 판정에 사용하지 않습니다. 등록 화면에서 Runtime 호출이 실제로 반환되는지 확인할 수 있도록 `추정 나이`와 원시 `성별 코드`만 표시합니다.
+
+## 등록
+
+등록은 정면→왼쪽→오른쪽→왼쪽→오른쪽 다섯 샘플을 수집합니다. 각 샘플은 Runtime 템플릿이며 앱이 평균 벡터를 만들지 않습니다.
+
+- 같은 각도에서 거의 동일한 템플릿은 재수집
+- 기존 사용자 모든 샘플과 Runtime 비교해 중복 등록 차단
+- 다섯 샘플의 상호 유사도를 검사해 섞이거나 불안정한 세트 차단
+- 각 후보가 다른 샘플과 갖는 평균 Runtime 유사도가 가장 높은 샘플을 대표 템플릿으로 선택
+- 나머지 샘플은 보조 템플릿으로 보존
+
+저장 스키마 v3는 `engine_id=ffacio.runtime.template.v1`, 템플릿 크기, Base64 대표 템플릿, Base64 보조 템플릿을 암호화 저장소 안에 기록합니다.
+
+## 인증
+
+입력 템플릿을 각 사용자의 대표·보조 템플릿과 Runtime에서 개별 비교합니다. 앱은 사용자별 최고 점수와 기준 이상 샘플 수를 계산합니다. 승인은 다음 조건을 모두 만족해야 합니다.
+
+- 최고 사용자 점수 0.80 이상
+- 2위 사용자와 차이 0.03 이상
+- 저장 샘플 중 최소 2개가 0.75 이상(보유 샘플이 하나면 하나)
+- 선택한 Runtime 라이브니스와 좌우 얼굴 돌리기 챌린지 통과
+- 같은 후보가 3프레임 연속 안정적으로 유지
+
+비교 호출 실패, 손상·크기 불일치 템플릿, 호환되지 않는 엔진 ID는 모두 fail-closed입니다.
+
+## Runtime 진단
+
+관리자 화면 고급 설정의 진단 카드는 다음을 표시합니다.
+
+- Runtime 패키지(`com.kbyai.faceattribute`) 설치 여부와 버전명·버전 코드
+- Binder 연결 단계(연결 안 됨 / 연결 중 / Binder 연결됨·초기화 확인 중 / 준비됨)
+- 초기화 결과 코드 — `0`만 성공으로 처리
+- 마지막 끊김 사유(수동 해제, 서비스 연결 끊김, Runtime 프로세스 종료, 연결 오류)
+- 자동 재연결 시도 횟수와 수동 재연결 버튼
+- 최근 분석 프레임의 YUV 변환·검출+속성·템플릿 추출 시간
+
+Runtime AIDL은 검출과 요청 속성을 하나의 `detect` 호출로 반환하므로 속성 분석만의 시간은 따로 표시하지 않습니다. 진단 텍스트에는 얼굴 이미지, 템플릿, 사용자 이름이 포함되지 않습니다.
+
+## 이전 데이터
+
+기존 OpenCV/ONNX/ArcFace Float 임베딩은 Runtime 바이트 템플릿으로 변환할 근거가 없습니다. 로더는 사용자 이름과 Head Admin 표시를 보존할 수 있지만 해당 사용자를 `isCompatible=false`로 만들고 인증 후보에서 제외합니다. 호환되지 않는 Head Admin만 남아 있으면 Android 화면잠금으로 관리자 복구 후 삭제·재등록합니다.
+
+## 서명과 설치
+
+Runtime Manifest는 `io.ffacio.sdk.permission.BIND_RUNTIME`을 signature 권한으로 선언합니다. `runtime-client` Manifest가 권한 요청과 Runtime package query를 FFacio Manifest에 병합합니다.
+
+Release 빌드는 Runtime 프로젝트와 FFacio 프로젝트에 같은 `FFACIO_KEYSTORE_*` 환경 변수를 사용해야 합니다. `scripts/build_android.ps1 -RuntimeApk ...`는 두 APK의 signer SHA-256을 비교해 다르면 실패합니다.
+
+## 검증 범위
+
+단위 테스트는 Runtime 비교를 가짜 comparator로 주입해 인증 문턱, 모호성, 샘플 지지, 등록 자세, 중복·오염 세트, Runtime 템플릿 호환 정책과 Runtime 비교 실패 계수를 검사합니다. 실제 Binder, 라이선스, 카메라 방향, 라이브니스와 네이티브 결과는 `verify_android_device.ps1`로 ARM Android 기기에서 확인해야 합니다.

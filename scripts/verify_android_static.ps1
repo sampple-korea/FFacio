@@ -1,176 +1,86 @@
 param(
     [string]$Apk = "$PSScriptRoot\..\release\FFacio-Android-release.apk",
     [string]$Manifest = "$PSScriptRoot\..\release\android-release-manifest.json",
-    [string]$ModelManifest = "$PSScriptRoot\..\android\app\build\generated\ffacioAssets\models\models.manifest.json",
-    [switch]$AllowStaleSourceState
+    [string]$RuntimeApk = ""
 )
 
 $ErrorActionPreference = "Stop"
-
 if (-not (Test-Path $Apk)) { throw "Android APK missing: $Apk" }
-if (-not (Test-Path $Manifest)) { throw "Android release manifest missing: $Manifest" }
-if (-not (Test-Path $ModelManifest)) { throw "Model manifest missing: $ModelManifest" }
+if (-not (Test-Path $Manifest)) { throw "Release manifest missing: $Manifest" }
 
 $apkPath = (Resolve-Path $Apk).Path
 $manifestPath = (Resolve-Path $Manifest).Path
-$modelManifestPath = (Resolve-Path $ModelManifest).Path
-$json = Get-Content -Raw $manifestPath -Encoding UTF8 | ConvertFrom-Json
+$json = Get-Content -Raw -Encoding UTF8 $manifestPath | ConvertFrom-Json
 $file = Get-Item $apkPath
 $hash = (Get-FileHash $apkPath -Algorithm SHA256).Hash.ToLowerInvariant()
-
-if ($json.artifact -ne (Split-Path -Leaf $apkPath)) {
-    throw "Manifest artifact '$($json.artifact)' does not match APK '$((Split-Path -Leaf $apkPath))'."
-}
-if ([int64]$json.size -ne [int64]$file.Length) {
-    throw "Manifest size $($json.size) does not match APK size $($file.Length)."
-}
-if ([string]$json.sha256 -ne $hash) {
-    throw "Manifest SHA-256 $($json.sha256) does not match APK SHA-256 $hash."
-}
-if (-not [bool]$json.signed) {
-    throw "Android manifest does not mark the release APK as signed."
-}
-if (-not $AllowStaleSourceState) {
-    $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-    $currentCommit = (& git -C $repoRoot rev-parse HEAD 2>$null)
-    if ($LASTEXITCODE -eq 0 -and $json.git_commit -and ([string]$json.git_commit).Trim() -ne ([string]$currentCommit).Trim()) {
-        throw "Manifest git_commit $($json.git_commit) does not match current HEAD $currentCommit."
-    }
-    $status = @(& git -C $repoRoot status --porcelain 2>$null)
-    if ($LASTEXITCODE -eq 0 -and $json.PSObject.Properties.Name -contains "git_dirty") {
-        $manifestRelative = (Resolve-Path $manifestPath).Path.Substring((Resolve-Path $repoRoot).Path.Length).TrimStart("\", "/").Replace("\", "/")
-        $statusComparable = @(
-            $status |
-                ForEach-Object { [string]$_ } |
-                Where-Object { (-not $_.Replace("\", "/").EndsWith(" $manifestRelative")) -and ($_.Replace("\", "/") -ne "?? $manifestRelative") }
-        )
-        $dirty = $statusComparable.Count -gt 0
-        if ([bool]$json.git_dirty -ne $dirty) {
-            throw "Manifest git_dirty=$($json.git_dirty) does not match current dirty state $dirty."
-        }
-        if ($json.PSObject.Properties.Name -contains "git_dirty_paths") {
-            $manifestDirtyPaths = @(
-                $json.git_dirty_paths |
-                    ForEach-Object { [string]$_ } |
-                    Where-Object { (-not $_.Replace("\", "/").EndsWith(" $manifestRelative")) -and ($_.Replace("\", "/") -ne "?? $manifestRelative") }
-            )
-            $expected = @($manifestDirtyPaths | Sort-Object)
-            $actual = @($statusComparable | Sort-Object)
-            if ($expected.Count -ne $actual.Count) {
-                throw "Manifest git_dirty_paths count $($expected.Count) does not match current dirty path count $($actual.Count). Manifest=[$($expected -join '; ')] Current=[$($actual -join '; ')]"
-            }
-            for ($i = 0; $i -lt $expected.Count; $i++) {
-                if ($expected[$i] -ne $actual[$i]) {
-                    throw "Manifest git_dirty_paths do not match current dirty paths. Manifest=[$($expected -join '; ')] Current=[$($actual -join '; ')]"
-                }
-            }
-        }
-    }
-}
+if ($json.artifact -ne (Split-Path -Leaf $apkPath)) { throw "Manifest artifact name mismatch." }
+if ([int64]$json.size -ne [int64]$file.Length) { throw "Manifest APK size mismatch." }
+if ([string]$json.sha256 -ne $hash) { throw "Manifest APK hash mismatch." }
+if (-not [bool]$json.signed) { throw "Release manifest does not mark the APK signed." }
+if ([string]$json.runtime_package -ne "com.kbyai.faceattribute") { throw "Runtime package contract is missing from release manifest." }
+if ([bool]$json.legacy_models_bundled) { throw "Release manifest claims legacy models are bundled." }
 
 $sdk = $env:ANDROID_HOME
 if (-not $sdk) { $sdk = $env:ANDROID_SDK_ROOT }
 if (-not $sdk) { $sdk = "$env:LOCALAPPDATA\Android\Sdk" }
-$javaHome = $env:JAVA_HOME
-if (-not $javaHome) { $javaHome = "$env:ProgramFiles\Android\Android Studio\jbr" }
-if (Test-Path (Join-Path $javaHome "bin\java.exe")) {
-    $env:JAVA_HOME = (Resolve-Path $javaHome).Path
-    $env:PATH = (Join-Path $env:JAVA_HOME "bin") + ";" + $env:PATH
-}
 $apksigner = Get-ChildItem (Join-Path $sdk "build-tools") -Recurse -Filter apksigner.bat -ErrorAction SilentlyContinue |
-    Sort-Object FullName -Descending |
-    Select-Object -First 1
-if (-not $apksigner) {
-    throw "apksigner.bat is required for release verification. Install Android build-tools."
+    Sort-Object FullName -Descending | Select-Object -First 1
+if (-not $apksigner) { throw "apksigner.bat is required for verification." }
+
+function Get-SignerSha256([string]$Path) {
+    $result = (& $apksigner.FullName verify --print-certs $Path) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw "APK signature verification failed: $Path" }
+    if ($result -notmatch "SHA-256 digest:\s*([0-9A-Fa-f:]+)") { throw "Could not read signer digest: $Path" }
+    return $Matches[1].Replace(":", "").ToLowerInvariant()
 }
-$certOutput = (& $apksigner.FullName verify --print-certs $apkPath) -join "`n"
-if ($LASTEXITCODE -ne 0) { throw "apksigner verification failed with exit code $LASTEXITCODE." }
-$certDigest = $null
-if ($certOutput -match "SHA-256 digest:\s*([0-9A-Fa-f:]+)") {
-    $certDigest = $Matches[1].Replace(":", "").ToLowerInvariant()
+
+$appSigner = Get-SignerSha256 $apkPath
+if ($json.signer_cert_sha256 -and ([string]$json.signer_cert_sha256).ToLowerInvariant() -ne $appSigner) {
+    throw "Signer certificate does not match release manifest."
 }
-if (-not $certDigest) { throw "Could not read signer SHA-256 certificate digest from apksigner output." }
-if ($json.signer_cert_sha256 -and ([string]$json.signer_cert_sha256).ToLowerInvariant() -ne $certDigest) {
-    throw "Signer certificate digest $certDigest does not match manifest $($json.signer_cert_sha256)."
+if ($RuntimeApk) {
+    if (-not (Test-Path $RuntimeApk)) { throw "Runtime APK missing: $RuntimeApk" }
+    $runtimeSigner = Get-SignerSha256 (Resolve-Path $RuntimeApk).Path
+    if ($runtimeSigner -ne $appSigner) { throw "FFacio and Runtime signer certificates differ." }
 }
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$sha = [System.Security.Cryptography.SHA256]::Create()
 $zip = [System.IO.Compression.ZipFile]::OpenRead($apkPath)
 try {
     $entries = @{}
     foreach ($entry in $zip.Entries) { $entries[$entry.FullName] = $entry }
-    $required = @(
-        "assets/models/models.manifest.json",
-        "assets/models/opencv/face_detection_yunet_2023mar.onnx",
-        "assets/models/opencv/face_recognition_sface_2021dec.onnx",
-        "assets/models/insightface/models/buffalo_l/w600k_r50.onnx",
-        "assets/models/antispoof/minifasnet_v2.onnx",
-        "classes.dex",
-        "AndroidManifest.xml"
-    )
-    foreach ($entry in $required) {
-        if (-not $entries.ContainsKey($entry)) {
-            throw "APK is missing required entry: $entry"
-        }
-    }
+    if (-not $entries.ContainsKey("AndroidManifest.xml")) { throw "APK is missing required entry: AndroidManifest.xml" }
+    $dexEntries = @($zip.Entries | Where-Object { $_.FullName -match '^classes([0-9]+)?\.dex$' })
+    if ($dexEntries.Count -eq 0) { throw "APK does not contain any classes*.dex entry." }
+    $legacyAssets = @($entries.Keys | Where-Object { $_ -like "assets/models/*" })
+    if ($legacyAssets.Count -gt 0) { throw "APK still contains legacy model assets: $($legacyAssets[0])" }
 
-    $embeddedManifest = $entries["assets/models/models.manifest.json"]
-    $embeddedManifestStream = $embeddedManifest.Open()
-    try {
-        $embeddedManifestHash = [System.BitConverter]::ToString($sha.ComputeHash($embeddedManifestStream)).Replace("-", "").ToLowerInvariant()
-    }
-    finally {
-        $embeddedManifestStream.Dispose()
-    }
-    $sourceManifestHash = (Get-FileHash $modelManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($embeddedManifestHash -ne $sourceManifestHash) {
-        throw "Embedded models.manifest.json SHA-256 $embeddedManifestHash does not match source manifest $sourceManifestHash."
-    }
-
-    $modelManifestJson = Get-Content -Raw $modelManifestPath -Encoding UTF8 | ConvertFrom-Json
-    foreach ($model in $modelManifestJson.files) {
-        $entryName = "assets/models/$($model.path)"
-        if (-not $entries.ContainsKey($entryName)) { throw "APK is missing bundled model: $entryName" }
-        $entry = $entries[$entryName]
-        if ([int64]$entry.Length -ne [int64]$model.size) {
-            throw "Model size mismatch for $entryName. APK=$($entry.Length), manifest=$($model.size)."
-        }
-        $stream = $entry.Open()
+    $dexTexts = foreach ($dexEntry in $dexEntries) {
+        $dex = $dexEntry.Open()
+        $memory = $null
         try {
-            $entryHash = [System.BitConverter]::ToString($sha.ComputeHash($stream)).Replace("-", "").ToLowerInvariant()
-            if ($entryHash -ne [string]$model.sha256) {
-                throw "Model SHA-256 mismatch for $entryName. APK=$entryHash, manifest=$($model.sha256)."
-            }
+            $memory = New-Object System.IO.MemoryStream
+            $dex.CopyTo($memory)
+            [System.Text.Encoding]::ASCII.GetString($memory.ToArray())
         }
         finally {
-            $stream.Dispose()
+            $dex.Dispose()
+            if ($memory) { $memory.Dispose() }
         }
     }
-
-    $androidOnlyModelIds = @(
-        "opencv.yunet",
-        "opencv.sface",
-        "insightface.recognition",
-        "antispoof.minifasnet_v2"
-    )
-    $unexpectedModels = @(
-        $modelManifestJson.files |
-            Where-Object { $androidOnlyModelIds -notcontains [string]$_.id } |
-            ForEach-Object { [string]$_.id }
-    )
-    if ($unexpectedModels.Count -gt 0) {
-        throw "Android APK model manifest contains non-runtime model(s): $($unexpectedModels -join ', ')"
+    foreach ($forbidden in @("ai/onnxruntime", "org/opencv", "w600k_r50.onnx", "minifasnet_v2.onnx", "face_detection_yunet")) {
+        if ($dexTexts | Where-Object { $_.Contains($forbidden) }) {
+            throw "Legacy engine marker remains in classes*.dex: $forbidden"
+        }
     }
-    $insightFaceEntries = @($entries.Keys | Where-Object { $_ -like "assets/models/insightface/*" -and $_ -ne "assets/models/insightface/models/buffalo_l/w600k_r50.onnx" })
-    if ($insightFaceEntries.Count -gt 0) {
-        $sampleInsightFaceEntries = (@($insightFaceEntries | Select-Object -First 5) -join ', ')
-        throw "Android APK contains unused InsightFace model asset(s): $sampleInsightFaceEntries"
+    foreach ($requiredMarker in @("io/ffacio/sdk/FFacioRuntimeClient", "com/kbyai/facesdk/FaceSDK")) {
+        if (-not ($dexTexts | Where-Object { $_.Contains($requiredMarker) })) {
+            throw "Runtime client marker is missing from classes*.dex: $requiredMarker"
+        }
     }
 }
 finally {
     $zip.Dispose()
-    $sha.Dispose()
 }
 
-Write-Host "Android static verification passed: $apkPath"
+Write-Host "Android Runtime-client static verification passed: $apkPath"

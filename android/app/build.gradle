@@ -1,11 +1,26 @@
-import groovy.json.JsonOutput
-import groovy.json.JsonSlurper
-
 plugins {
     id "com.android.application"
     id "org.jetbrains.kotlin.android"
     id "org.jetbrains.kotlin.plugin.compose"
 }
+
+def releaseStorePath = providers.gradleProperty("ffacioStoreFile").orNull ?:
+    System.getenv("FFACIO_ANDROID_KEYSTORE") ?:
+    System.getenv("FFACIO_KEYSTORE_PATH")
+def releaseStorePassword = providers.gradleProperty("ffacioStorePassword").orNull ?:
+    System.getenv("FFACIO_ANDROID_KEYSTORE_PASSWORD") ?:
+    System.getenv("FFACIO_KEYSTORE_PASSWORD")
+def releaseKeyAlias = providers.gradleProperty("ffacioKeyAlias").orNull ?:
+    System.getenv("FFACIO_ANDROID_KEY_ALIAS") ?:
+    System.getenv("FFACIO_KEY_ALIAS")
+def releaseKeyPassword = providers.gradleProperty("ffacioKeyPassword").orNull ?:
+    System.getenv("FFACIO_ANDROID_KEY_PASSWORD") ?:
+    System.getenv("FFACIO_KEY_PASSWORD")
+def releaseStoreType = providers.gradleProperty("ffacioStoreType").orNull ?:
+    System.getenv("FFACIO_KEYSTORE_TYPE") ?:
+    "PKCS12"
+def hasReleaseSigning = [releaseStorePath, releaseStorePassword, releaseKeyAlias, releaseKeyPassword]
+    .every { it != null && it.toString().trim() }
 
 android {
     namespace "com.ffacio.mobile"
@@ -15,21 +30,22 @@ android {
         applicationId "com.ffacio.mobile"
         minSdk 26
         targetSdk 36
-        versionCode 27
-        versionName "0.4.5"
+        versionCode 30
+        versionName "0.6.0-runtime"
         ndk {
-            abiFilters "arm64-v8a", "x86_64"
+            // FFacio Runtime currently exposes these ABIs. Keeping the client aligned avoids unsupported installs.
+            abiFilters "arm64-v8a", "armeabi-v7a"
         }
     }
 
     signingConfigs {
-        release {
-            def storePath = providers.gradleProperty("ffacioStoreFile").orNull ?: System.getenv("FFACIO_ANDROID_KEYSTORE")
-            if (storePath != null && storePath.trim()) {
-                storeFile file(storePath)
-                storePassword providers.gradleProperty("ffacioStorePassword").orNull ?: System.getenv("FFACIO_ANDROID_KEYSTORE_PASSWORD")
-                keyAlias providers.gradleProperty("ffacioKeyAlias").orNull ?: System.getenv("FFACIO_ANDROID_KEY_ALIAS") ?: "ffacio-local-release"
-                keyPassword providers.gradleProperty("ffacioKeyPassword").orNull ?: System.getenv("FFACIO_ANDROID_KEY_PASSWORD")
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseStorePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+                storeType releaseStoreType
             }
         }
     }
@@ -38,98 +54,27 @@ android {
         release {
             minifyEnabled false
             shrinkResources false
-            signingConfig signingConfigs.release
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 
     packaging {
-        resources {
-            excludes += ["/META-INF/{AL2.0,LGPL2.1}"]
-        }
-        jniLibs {
-            useLegacyPackaging = false
-        }
+        resources { excludes += ["/META-INF/{AL2.0,LGPL2.1}"] }
+        jniLibs { useLegacyPackaging = false }
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
-    androidResources {
-        noCompress += ["onnx", "json"]
-    }
-
-    sourceSets {
-        main {
-            assets.srcDirs += [layout.buildDirectory.dir("generated/ffacioAssets")]
-        }
-    }
-}
-
-def ffacioAndroidModelIds = [
-    "opencv.yunet",
-    "opencv.sface",
-    "insightface.recognition",
-    "antispoof.minifasnet_v2"
-] as Set
-
-tasks.register("syncFfacioAndroidModelAssets") {
-    def sourceRoot = file("../../resources/models")
-    def outputRoot = layout.buildDirectory.dir("generated/ffacioAssets").get().asFile
-    inputs.file(file("${sourceRoot}/models.manifest.json"))
-    inputs.files(
-        file("${sourceRoot}/opencv/face_detection_yunet_2023mar.onnx"),
-        file("${sourceRoot}/opencv/face_recognition_sface_2021dec.onnx"),
-        file("${sourceRoot}/insightface/models/buffalo_l/w600k_r50.onnx"),
-        file("${sourceRoot}/antispoof/minifasnet_v2.onnx")
-    )
-    outputs.dir(outputRoot)
-
-    doLast {
-        def manifestFile = file("${sourceRoot}/models.manifest.json")
-        if (!manifestFile.exists()) {
-            throw new GradleException("FFacio model manifest is missing: ${manifestFile}")
-        }
-        def sourceManifest = new JsonSlurper().parse(manifestFile)
-        def selectedFiles = sourceManifest.files.findAll { ffacioAndroidModelIds.contains(it.id as String) }
-        if (selectedFiles.size() != ffacioAndroidModelIds.size()) {
-            throw new GradleException("Android model asset set is incomplete. Expected ${ffacioAndroidModelIds}, found ${selectedFiles.collect { it.id }}")
-        }
-
-        delete(outputRoot)
-        selectedFiles.each { model ->
-            def source = file("${sourceRoot}/${model.path}")
-            if (!source.exists()) {
-                throw new GradleException("Android model asset is missing: ${source}")
-            }
-            copy {
-                from(source)
-                into(file("${outputRoot}/models/${model.path}").parentFile)
-            }
-        }
-
-        def androidManifest = [
-            version: sourceManifest.version,
-            generated_by: "android/app/build.gradle syncFfacioAndroidModelAssets",
-            offline_first: true,
-            files: selectedFiles
-        ]
-        def outManifest = file("${outputRoot}/models/models.manifest.json")
-        outManifest.parentFile.mkdirs()
-        outManifest.text = JsonOutput.prettyPrint(JsonOutput.toJson(androidManifest))
-    }
-}
-
-tasks.matching { it.name in ["preBuild", "mergeDebugAssets", "mergeReleaseAssets"] }.configureEach {
-    dependsOn("syncFfacioAndroidModelAssets")
+    kotlinOptions { jvmTarget = "17" }
 }
 
 dependencies {
+    implementation project(":runtime-client")
+
     implementation platform("androidx.compose:compose-bom:2026.04.01")
     implementation "androidx.activity:activity:1.11.0"
     implementation "androidx.activity:activity-compose:1.11.0"
@@ -140,8 +85,7 @@ dependencies {
     implementation "androidx.camera:camera-camera2:1.5.1"
     implementation "androidx.camera:camera-lifecycle:1.5.1"
     implementation "androidx.camera:camera-view:1.5.1"
-    implementation "com.microsoft.onnxruntime:onnxruntime-android:1.26.0"
-    implementation "org.opencv:opencv:4.13.0"
+
     testImplementation "junit:junit:4.13.2"
     debugImplementation "androidx.compose.ui:ui-tooling"
 }

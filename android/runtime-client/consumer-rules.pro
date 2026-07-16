@@ -1,0 +1,2 @@
+-keep class io.ffacio.ipc.** { *; }
+-keep class io.ffacio.sdk.FFacioRuntimeClient { *; }

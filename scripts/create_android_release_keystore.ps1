@@ -1,7 +1,7 @@
 param(
-    [string]$Keystore = "$env:USERPROFILE\Documents\FFacio-signing\ffacio-android-release.jks",
-    [string]$Alias = "ffacio-android-release",
-    [string]$DName = "CN=FFacio Android Release,O=sampple-korea,C=KR",
+    [string]$Keystore = "$env:USERPROFILE\Documents\FFacio-signing\ffacio-runtime-pair.p12",
+    [string]$Alias = "ffacio-runtime-pair",
+    [string]$DName = "CN=FFacio Runtime Pair,O=sampple-korea,C=KR",
     [int]$ValidityDays = 10000,
     [switch]$Force,
     [switch]$AllowRepoPath
@@ -46,11 +46,11 @@ if ((Test-Path $targetPath) -and -not $Force) {
     throw "Keystore already exists: $targetPath. Reuse it for upgrade-compatible releases, or pass -Force only if you intentionally want a new signing lineage."
 }
 
-$storePassword = Read-PasswordOrEnv "FFACIO_ANDROID_KEYSTORE_PASSWORD" "Android keystore password"
+$storePassword = Read-PasswordOrEnv "FFACIO_KEYSTORE_PASSWORD" "Android keystore password"
 if ($storePassword.Length -lt 12) {
     throw "Use a keystore password of at least 12 characters."
 }
-$keyPassword = [Environment]::GetEnvironmentVariable("FFACIO_ANDROID_KEY_PASSWORD")
+$keyPassword = [Environment]::GetEnvironmentVariable("FFACIO_KEY_PASSWORD")
 if (-not $keyPassword) {
     $keyPassword = ConvertTo-PlainText (Read-Host -Prompt "Android key password (press Enter to reuse keystore password)" -AsSecureString)
 }
@@ -65,6 +65,7 @@ if (Test-Path $targetPath) {
 
 & $keytool -genkeypair `
     -v `
+    -storetype PKCS12 `
     -keystore $targetPath `
     -storepass $storePassword `
     -alias $Alias `
@@ -82,10 +83,10 @@ Write-Host "Android release keystore created outside the repo:"
 Write-Host "  $targetPath"
 Write-Host ""
 Write-Host "Set these in the same PowerShell session before production builds:"
-Write-Host "`$env:FFACIO_ANDROID_KEYSTORE = `"$targetPath`""
-Write-Host "`$env:FFACIO_ANDROID_KEYSTORE_PASSWORD = `"<store-password>`""
-Write-Host "`$env:FFACIO_ANDROID_KEY_ALIAS = `"$Alias`""
-Write-Host "`$env:FFACIO_ANDROID_KEY_PASSWORD = `"<key-password>`""
+Write-Host "`$env:FFACIO_KEYSTORE_PATH = `"$targetPath`""
+Write-Host "`$env:FFACIO_KEYSTORE_PASSWORD = `"<store-password>`""
+Write-Host "`$env:FFACIO_KEY_ALIAS = `"$Alias`""
+Write-Host "`$env:FFACIO_KEY_PASSWORD = `"<key-password>`""
 Write-Host ""
 Write-Host "Then run:"
 Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_android.ps1"

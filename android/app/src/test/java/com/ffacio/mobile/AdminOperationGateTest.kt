@@ -595,26 +595,33 @@ class AdminOperationGateTest {
     }
 
     private fun compatibleUser(name: String, isHeadAdmin: Boolean): UserTemplate {
-        val embedding = FloatArray(FACE_EMBEDDING_SIZE) { index -> if (index == 0) 1.0f else 0.0f }
+        val template = ByteArray(32) { 1 }
         return UserTemplate(
             name = name,
-            embedding = embedding,
-            samples = listOf(embedding.copyOf()),
+            template = template,
+            samples = listOf(ByteArray(32) { 2 }),
             engineId = FACE_ENGINE_ID,
-            embeddingSize = FACE_EMBEDDING_SIZE,
+            templateSize = template.size,
             isHeadAdmin = isHeadAdmin
         )
     }
 
     private fun incompatibleUser(name: String, isHeadAdmin: Boolean): UserTemplate {
-        val embedding = FloatArray(FACE_EMBEDDING_SIZE) { index -> if (index == 0) 1.0f else 0.0f }
         return UserTemplate(
             name = name,
-            embedding = embedding,
+            template = ByteArray(0),
             samples = emptyList(),
             engineId = "legacy.unknown",
-            embeddingSize = FACE_EMBEDDING_SIZE,
+            templateSize = 0,
             isHeadAdmin = isHeadAdmin
         )
     }
+    @Test
+    fun expiredAdminSessionCannotRunActionsImmediately() {
+        assertTrue(isAdminSessionActive(isAdminScreen = true, expiresAtMillis = 2_000L, nowMillis = 1_999L))
+        assertFalse(isAdminSessionActive(isAdminScreen = true, expiresAtMillis = 2_000L, nowMillis = 2_000L))
+        assertFalse(isAdminSessionActive(isAdminScreen = false, expiresAtMillis = 2_000L, nowMillis = 1_000L))
+        assertFalse(isAdminSessionActive(isAdminScreen = true, expiresAtMillis = 0L, nowMillis = 0L))
+    }
+
 }

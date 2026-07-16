@@ -1,5 +1,35 @@
 # FFacio Android Release Notes
 
+## Android 0.6.0-runtime
+
+- Adds a Runtime diagnostics card to the admin advanced settings: Runtime package install state and version, Binder connection phase, initialization result, disconnect reason, automatic reconnect attempt count, and a manual reconnect button.
+- Measures real per-frame Runtime call timings (YUV conversion, combined detect+attributes, template extraction) and shows them in the diagnostics card. Detection and requested attributes are one AIDL call, so attribute-only time is never fabricated.
+- Exposes the Runtime liveness check level (passed verbatim to the engine contract) as an admin setting instead of a hardcoded `0`.
+- Adds a face-occlusion check toggle with Runtime Demo semantics: disabling it removes `check_face_occlusion` from the actual Runtime detect request and from authentication/enrollment gating, instead of just hiding the result.
+- Centralizes detect-option construction in a tested `runtimeDetectionOptions()` helper and clamps unknown liveness levels to the documented range.
+- Fixes a stale unit test that still asserted the pre-0.5.x match threshold.
+
+## Android 0.5.1-runtime
+
+- Moves all Runtime template comparisons off the Compose/UI thread with one in-flight decision, an 8-second timeout, stale-result invalidation, and a 10-second stall fallback that invalidates the decision token and reconnects the Runtime Binder.
+- Drops camera analysis before Runtime work while a decision is pending and prevents the camera watchdog from treating comparison latency as a feed stall.
+- Fixes YUV plane reads for non-zero buffer positions and validates chroma-aligned crops, strides, template sizes, NV21 length, and native orientation codes.
+- Loads encrypted users once at startup instead of reloading them on every Runtime connection-state transition.
+- Upgrades encrypted user records to schema v3 and fails closed on malformed or mixed-size Runtime samples instead of silently filtering them.
+- Wipes enrollment/deleted template arrays, clears transient NV21 buffers, and hardens Runtime-client temporary-file cleanup.
+- Extends matching diagnostics with successful/failed comparison counts and separates total Runtime comparison failure from an ordinary non-match.
+- Makes APK static verification scan every `classes*.dex` entry and adds a cross-platform source audit script.
+- Rechecks admin-session expiry at action execution time, requires a valid HTTPS relay URL and token, disables cleartext traffic, and releases a failed Runtime binding so reconnection can proceed.
+
+## Android 0.5.0-runtime
+
+- Replaces the in-app OpenCV/ONNX/ArcFace/SFace/MiniFASNet engine with the separately installed FFacio Runtime Binder service.
+- Uses Runtime YUV conversion, full face attributes, 68-point landmarks, liveness, template extraction, and template comparison.
+- Stores Runtime byte templates and rejects legacy embedding records until users are re-enrolled.
+- Removes bundled model assets and model-fetch/build verification scripts.
+- Adds Runtime connection recovery, initialization-specific errors, and same-certificate release verification for the app/Runtime pair.
+- Keeps FFacio enrollment, authentication, Head Admin, encrypted storage, relay, camera watchdog, and privacy behavior.
+
 ## Android 0.4.5
 
 - Removes the admin guidance card from the real-use operation screen.

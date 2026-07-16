@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class EnrollmentQualityTest {
     @Test
@@ -19,10 +20,11 @@ class EnrollmentQualityTest {
     @Test
     fun wrongTargetPoseIsRejectedDuringGuidedEnrollment() {
         val result = enrollmentSampleDecision(
-            embedding = floatArrayOf(0.0f, 1.0f, 0.0f),
+            template = template(20),
             pose = 1,
-            samples = listOf(floatArrayOf(1.0f, 0.0f, 0.0f)),
-            poses = listOf(0)
+            samples = listOf(template(10)),
+            poses = listOf(0),
+            comparator = ::similarity
         )
 
         assertFalse(result.accepted)
@@ -30,34 +32,13 @@ class EnrollmentQualityTest {
     }
 
     @Test
-    fun repeatedSampleIsRejected() {
-        val sample = floatArrayOf(1.0f, 0.0f, 0.0f)
+    fun repeatedRuntimeTemplateIsRejected() {
         val result = enrollmentSampleDecision(
-            embedding = floatArrayOf(1.0f, 0.0f, 0.0f),
+            template = template(10),
             pose = -1,
-            samples = listOf(
-                sample,
-                floatArrayOf(0.0f, 1.0f, 0.0f),
-                floatArrayOf(0.0f, 0.0f, 1.0f)
-            ),
-            poses = listOf(0, -1, 1)
-        )
-
-        assertFalse(result.accepted)
-        assertEquals("고개를 좌우로 천천히 돌려 주세요", result.status)
-    }
-
-    @Test
-    fun repeatedEarlierSampleIsRejected() {
-        val result = enrollmentSampleDecision(
-            embedding = floatArrayOf(1.0f, 0.0f, 0.0f),
-            pose = -1,
-            samples = listOf(
-                floatArrayOf(1.0f, 0.0f, 0.0f),
-                floatArrayOf(0.0f, 1.0f, 0.0f),
-                floatArrayOf(0.0f, 0.0f, 1.0f)
-            ),
-            poses = listOf(0, -1, 1)
+            samples = listOf(template(10)),
+            poses = listOf(0),
+            comparator = ::similarity
         )
 
         assertFalse(result.accepted)
@@ -66,17 +47,13 @@ class EnrollmentQualityTest {
 
     @Test
     fun finalSampleNeedsPoseDiversity() {
-        val samples = listOf(
-            floatArrayOf(1.0f, 0.0f, 0.0f),
-            floatArrayOf(0.96f, 0.28f, 0.0f),
-            floatArrayOf(0.92f, 0.39f, 0.0f),
-            floatArrayOf(0.87f, 0.49f, 0.0f)
-        )
+        val samples = listOf(template(10), template(14), template(18), template(22))
         val result = enrollmentSampleDecision(
-            embedding = floatArrayOf(0.40f, 0.0f, 0.916f),
+            template = template(26),
             pose = 0,
             samples = samples,
-            poses = listOf(0, 0, 0, 0)
+            poses = listOf(0, 0, 0, 0),
+            comparator = ::similarity
         )
 
         assertFalse(result.accepted)
@@ -84,17 +61,13 @@ class EnrollmentQualityTest {
 
     @Test
     fun diverseFinalSampleIsAccepted() {
-        val samples = listOf(
-            floatArrayOf(1.0f, 0.0f, 0.0f),
-            floatArrayOf(0.96f, 0.28f, 0.0f),
-            floatArrayOf(0.92f, 0.39f, 0.0f),
-            floatArrayOf(0.87f, 0.49f, 0.0f)
-        )
+        val samples = listOf(template(10), template(14), template(18), template(22))
         val result = enrollmentSampleDecision(
-            embedding = floatArrayOf(0.40f, 0.0f, 0.916f),
+            template = template(26),
             pose = 1,
             samples = samples,
-            poses = listOf(0, -1, 1, -1)
+            poses = listOf(0, -1, 1, -1),
+            comparator = ::similarity
         )
 
         assertTrue(result.accepted)
@@ -121,66 +94,45 @@ class EnrollmentQualityTest {
 
     @Test
     fun finalTemplateQualityRequiresPoseCoverageWhenProvided() {
+        val samples = listOf(template(10), template(14), template(18), template(22), template(26))
         val result = enrollmentTemplateQuality(
-            centroid = floatArrayOf(1.0f, 0.0f, 0.0f),
-            samples = listOf(
-                floatArrayOf(1.0f, 0.0f, 0.0f),
-                floatArrayOf(0.92f, 0.20f, 0.0f),
-                floatArrayOf(0.88f, -0.22f, 0.0f),
-                floatArrayOf(0.86f, 0.12f, 0.0f),
-                floatArrayOf(0.90f, -0.18f, 0.0f)
-            ),
-            poses = listOf(0, 0, 0, -1, 1)
+            representative = template(18),
+            samples = samples,
+            poses = listOf(0, 0, 0, -1, 1),
+            comparator = ::similarity
         )
 
         assertFalse(result.accepted)
     }
 
     @Test
-    fun cohesiveTemplateQualityIsAccepted() {
+    fun cohesiveRuntimeTemplateSetIsAccepted() {
+        val samples = listOf(template(10), template(14), template(18), template(22), template(26))
         val result = enrollmentTemplateQuality(
-            centroid = floatArrayOf(1.0f, 0.0f, 0.0f),
-            samples = listOf(
-                floatArrayOf(1.0f, 0.0f, 0.0f),
-                floatArrayOf(0.92f, 0.20f, 0.0f),
-                floatArrayOf(0.88f, -0.22f, 0.0f),
-                floatArrayOf(0.86f, 0.12f, 0.0f),
-                floatArrayOf(0.90f, -0.18f, 0.0f)
-            )
+            representative = template(18),
+            samples = samples,
+            poses = listOf(0, -1, 1, -1, 1),
+            comparator = ::similarity
         )
 
         assertTrue(result.accepted)
     }
 
     @Test
-    fun contaminatedTemplateQualityIsRejected() {
+    fun contaminatedRuntimeTemplateSetIsRejected() {
+        val samples = listOf(template(10), template(14), template(18), template(90), template(22))
         val result = enrollmentTemplateQuality(
-            centroid = floatArrayOf(1.0f, 0.0f, 0.0f),
-            samples = listOf(
-                floatArrayOf(1.0f, 0.0f, 0.0f),
-                floatArrayOf(0.92f, 0.20f, 0.0f),
-                floatArrayOf(0.88f, -0.22f, 0.0f),
-                floatArrayOf(0.0f, 1.0f, 0.0f),
-                floatArrayOf(0.90f, -0.18f, 0.0f)
-            )
+            representative = template(18),
+            samples = samples,
+            poses = listOf(0, -1, 1, -1, 1),
+            comparator = ::similarity
         )
 
         assertFalse(result.accepted)
     }
 
-    @Test
-    fun splitIdentityTemplateQualityIsRejectedByPairwiseCohesion() {
-        val result = enrollmentTemplateQuality(
-            centroid = floatArrayOf(0.86f, 0.51f, 0.0f),
-            samples = listOf(
-                floatArrayOf(1.0f, 0.0f, 0.0f),
-                floatArrayOf(0.98f, 0.18f, 0.0f),
-                floatArrayOf(0.96f, -0.22f, 0.0f),
-                floatArrayOf(0.55f, 0.835f, 0.0f),
-                floatArrayOf(0.50f, 0.866f, 0.0f)
-            )
-        )
+    private fun template(code: Int): ByteArray = ByteArray(32).also { it[0] = code.toByte() }
 
-        assertFalse(result.accepted)
-    }
+    private fun similarity(first: ByteArray, second: ByteArray): Double =
+        1.0 - abs((first[0].toInt() and 0xff) - (second[0].toInt() and 0xff)) / 100.0
 }

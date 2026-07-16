@@ -105,11 +105,11 @@ class ApprovalLogTest {
         )
         assertEquals(
             "ambiguous runner-up",
-            authDecisionReason(Match(index = 0, score = 0.70, secondScore = 0.65, supportCount = 5), availableSamples = 5)
+            authDecisionReason(Match(index = 0, score = 0.85, secondScore = 0.84, supportCount = 5), availableSamples = 5)
         )
         assertEquals(
             "not enough sample support",
-            authDecisionReason(Match(index = 0, score = 0.70, secondScore = 0.10, supportCount = 1), availableSamples = 5)
+            authDecisionReason(Match(index = 0, score = 0.85, secondScore = 0.10, supportCount = 1), availableSamples = 5)
         )
     }
 
@@ -143,6 +143,8 @@ class ApprovalLogTest {
     @Test
     fun doorRelayConfiguredRequiresUrlAndToken() {
         assertEquals(true, doorRelayConfigured("https://relay.example/open", "token"))
+        assertEquals(false, doorRelayConfigured("http://relay.example/open", "token"))
+        assertEquals(false, doorRelayConfigured("not a url", "token"))
         assertEquals(false, doorRelayConfigured("", "token"))
         assertEquals(false, doorRelayConfigured("https://relay.example/open", ""))
     }
