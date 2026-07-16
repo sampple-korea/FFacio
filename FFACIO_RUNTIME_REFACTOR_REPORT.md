@@ -79,3 +79,13 @@ python3 scripts/verify_source_static.py
 ## 이 환경에서 확인하지 못한 항목
 
 현재 실행 환경에는 완전한 Android SDK와 Gradle/Maven 의존성 캐시가 없고 외부 Gradle 배포본을 내려받을 수 없었다. 따라서 여기서는 `testDebugUnitTest`, `lintDebug`, `assembleDebug`, 실제 APK 설치, 카메라 방향, Runtime 네이티브 라이선스·Binder와 실얼굴 인식까지 실행하지 못했다. 결과물의 PowerShell 빌드·정적 APK·실기기 검증 스크립트가 그 단계를 fail-closed 방식으로 수행한다.
+
+## 0.6.0-runtime 후속 검증·확장 부록 (2026-07-16)
+
+이후 완전한 Android SDK(플랫폼 36) 환경에서 다음을 실제로 수행하고 통과를 확인했다.
+
+- `:app:assembleDebug` 빌드 성공 — 디버그 APK 산출, 레거시 ONNX/OpenCV/모델 파일 미포함을 APK 엔트리 검사로 확인
+- `:app:testDebugUnitTest` 84개 테스트 전체 통과 — 이 과정에서 0.5.x 임계값 변경(0.58→0.80)을 반영하지 못한 `ApprovalLogTest`의 기존 실패 1건을 수정
+- `scripts/verify_source_static.py` 통과 — 스크립트가 빌드 산출물(`.gradle`, `build/`)을 소스로 오인하던 문제 수정
+
+또한 Runtime Demo가 사용하는 기능을 추가로 채택해 0.6.0-runtime으로 확장했다: 관리자 Runtime 진단 카드(패키지 버전, Binder 단계, 초기화 코드, 끊김 사유, 자동 재연결 횟수, 수동 재연결), 프레임별 Runtime 호출 계측(YUV 변환·검출+속성·템플릿 추출), 라이브니스 검사 레벨 설정, Demo 의미론의 얼굴 가림 검사 토글(끄면 Runtime 요청 옵션에서 제외). 실기기 설치·카메라·실얼굴 인식 검증은 여전히 ARM 기기에서 `verify_android_device.ps1`로 수행해야 한다.
