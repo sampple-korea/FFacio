@@ -1,5 +1,16 @@
 # FFacio Android Release Notes
 
+## Android 0.7.1-runtime-demo-parity-ios
+
+- Replaces the CameraX YUV_420_888 plane conversion with the exact Fotoapparat 2.7.0 NV21 camera path used by the Runtime Demo.
+- Uses the Demo front-camera EXIF orientation and mirror mapping, 1280×720 enrollment request, 640×480 balanced authentication request, and CenterCrop preview coordinates.
+- Reproduces the Demo registration check order and square capture ROI; the only multi-face difference is the requested largest-face selection.
+- Stores the highest-quality original NV21 frame during the 1200 ms stable interval, then reconverts, redetects, rechecks, and extracts the single final template once, like the Demo capture flow.
+- Keeps authentication at one stable frame as requested while matching Demo liveness, quality, minimum-area, similarity, and uncertain-gap behavior.
+- Adds explicit frame/template ownership and zeroing across replacement, cancellation, stale result, persistence failure, and screen shutdown paths.
+- Refreshes the camera and operation UI with a Face ID-style tracking ring, glass status card, progress treatment, capsules, and iOS-like status colors.
+- Bumps the biometric policy and user schema to 7 so every previous face enrollment is discarded and re-enrolled through the corrected camera path.
+
 ## Android 0.6.2-runtime-demo-aligned-final
 
 - Removes the active head-turn liveness challenge, five-pose enrollment, pose hold gates, sample-cohesion checks, representative-sample selection, and supporting-sample authentication.

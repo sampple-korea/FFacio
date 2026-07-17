@@ -10,6 +10,8 @@ from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = ROOT / "android/app/src/main/java/com/ffacio/mobile/MainActivity.kt"
+POLICY = ROOT / "android/app/src/main/java/com/ffacio/mobile/RuntimeDemoPolicy.kt"
+FOTOAPPARAT = ROOT / "android/app/libs/fotoapparat-2.7.0.aar"
 MANIFEST = ROOT / "android/app/src/main/AndroidManifest.xml"
 APP_GRADLE = ROOT / "android/app/build.gradle"
 SETTINGS = ROOT / "android/settings.gradle"
@@ -31,13 +33,19 @@ REQUIRED_MAIN_MARKERS = (
     "FaceSDK.templateExtraction",
     "FaceSDK.similarityCalculation",
     "FaceSDK.yuv2Bitmap",
+    "Fotoapparat.with(context)",
+    ".previewScaleType(ScaleType.CenterCrop)",
+    "analyzeRuntimeFrame",
+    "RuntimeFrameSnapshot",
+    "frame.image.clone()",
     "runtimeDecisionInFlight",
     "runtimeDecisionGeneration",
     "withTimeout(RUNTIME_DECISION_TIMEOUT_MS)",
     "RUNTIME_DECISION_STALL_RECOVERY_MS",
     "runtimeDecisionToken",
-    "USER_STORE_SCHEMA_VERSION = 5",
-    "USER_STORE_POLICY_VERSION = 5",
+    "USER_STORE_SCHEMA_VERSION = 7",
+    "USER_STORE_POLICY_VERSION = 7",
+    'FACE_ENGINE_ID = "ffacio.runtime.demo.camera.v3"',
     "resetLegacyUserStoreForSingleTemplatePolicy",
     ".putBoolean(PASSIVE_LIVENESS_ENABLED_KEY, true)",
     ".putInt(RUNTIME_LIVENESS_LEVEL_KEY, 0)",
@@ -47,10 +55,10 @@ REQUIRED_MAIN_MARKERS = (
     "findBestEnrollmentDuplicate",
     "ownedTemplates.forEach { it.fill(0) }",
     "EnrollmentStabilityTracker",
-    "AUTH_STABLE_FRAMES = 1",
-    "check_eye_closeness = true",
-    "check_mouth_opened = true",
-    "estimate_age_gender = false",
+    "RuntimeEnrollmentCapture",
+    "finalizeEnrollment",
+    "frameTimestampMillis",
+    "enrollmentCapture.wipe()",
     "isAdminSessionActive",
     "copyForRuntimeDecision",
     "SystemClock.elapsedRealtime()",
@@ -59,6 +67,35 @@ REQUIRED_MAIN_MARKERS = (
     "array.optJSONObject(i) ?: continue",
     "users.forEach { it.wipe() }",
 )
+
+REQUIRED_POLICY_MARKERS = (
+    "ANALYSIS_INTERVAL_MS = 180L",
+    "DEMO_CAPTURE_FRAME_WIDTH = 1280",
+    "DEMO_CAPTURE_FRAME_HEIGHT = 720",
+    "DEMO_IDENTIFICATION_FRAME_WIDTH = 640",
+    "DEMO_IDENTIFICATION_FRAME_HEIGHT = 480",
+    "ANTISPOOF_THRESHOLD = 0.70f",
+    "RUNTIME_QUALITY_THRESHOLD = 0.50f",
+    "RUNTIME_EYE_CLOSED_THRESHOLD = 0.80f",
+    "RUNTIME_OCCLUSION_THRESHOLD = 0.50f",
+    "RUNTIME_MOUTH_OPEN_THRESHOLD = 0.50f",
+    "RUNTIME_MAX_YAW = 10.0f",
+    "RUNTIME_MAX_PITCH = 10.0f",
+    "RUNTIME_MAX_ROLL = 10.0f",
+    "RUNTIME_MIN_FACE_SIZE = 80",
+    "RUNTIME_MAX_FACE_SIZE = 1200",
+    "RUNTIME_MIN_FACE_AREA_RATIO = 0.03",
+    "ENROLL_AUTO_CAPTURE_STABLE_MS = 1200L",
+    "AUTH_STABLE_FRAMES = 1",
+    "check_eye_closeness = true",
+    "check_mouth_opened = true",
+    "estimate_age_gender = false",
+    "largestRuntimeFace",
+    "evaluateRuntimeDemoFace",
+    "runtimeNativeOrientation",
+    "runtimeDemoResolutionCost",
+)
+
 
 OBSOLETE_ENROLLMENT_MARKERS = (
     "LivenessChallenge",
@@ -188,9 +225,28 @@ def main() -> int:
     for marker in REQUIRED_MAIN_MARKERS:
         if marker not in main_text:
             fail(f"required Runtime integration marker missing: {marker}")
+    policy_text = read(POLICY)
+    for marker in REQUIRED_POLICY_MARKERS:
+        if marker not in policy_text:
+            fail(f"required Runtime Demo policy marker missing: {marker}")
     for marker in OBSOLETE_ENROLLMENT_MARKERS:
         if marker in main_text:
             fail(f"retired enrollment/authentication logic remains: {marker}")
+
+    app_gradle_text = read(APP_GRADLE)
+    for marker in ('versionCode 34', 'versionName "0.7.1-runtime-demo-parity-ios"'):
+        if marker not in app_gradle_text:
+            fail(f"expected final app version marker missing: {marker}")
+    for marker in ("androidx.camera", "ImageProxy", "imageProxyToNv21", "ProcessCameraProvider", "PreviewView"):
+        if marker in main_text or marker in app_gradle_text:
+            fail(f"CameraX path remains after Runtime Demo camera migration: {marker}")
+    if not FOTOAPPARAT.is_file():
+        fail("Runtime Demo Fotoapparat AAR is missing")
+    expected_fotoapparat_sha256 = "a9ce65824a2ff6ee05450c1b28d11b0bb668e5345e0c60303b184f3cd8fbbdff"
+    if hashlib.sha256(FOTOAPPARAT.read_bytes()).hexdigest() != expected_fotoapparat_sha256:
+        fail("Fotoapparat AAR differs from the Runtime Demo copy")
+    if 'implementation files("libs/fotoapparat-2.7.0.aar")' not in app_gradle_text:
+        fail("app does not package the Runtime Demo Fotoapparat AAR")
 
     if "implementation project(\":runtime-client\")" not in read(APP_GRADLE):
         fail("app does not depend on :runtime-client")
@@ -244,8 +300,8 @@ def main() -> int:
 
     test_files = [p for p in ROOT.rglob("*Test.kt") if p.is_file() and not is_excluded(p)]
     test_count = sum(read(path).count("@Test") for path in test_files)
-    if test_count < 79:
-        fail(f"regression test inventory shrank unexpectedly: {test_count} < 79")
+    if test_count < 89:
+        fail(f"regression test inventory shrank unexpectedly: {test_count} < 89")
 
     digest = hashlib.sha256(MAIN.read_bytes()).hexdigest()
     print(f"Source audit passed: {len(source_files)} Kotlin/Java/Gradle files, MainActivity SHA-256 {digest}")

@@ -41,7 +41,7 @@ class EnrollmentQualityTest {
         assertFalse(tracker.update(first, now = 1_000L))
         assertFalse(tracker.update(sharper, now = 2_199L))
         assertTrue(tracker.update(sharper, now = 2_200L))
-        assertArrayEquals(sharper.template, tracker.takeTemplate())
+        assertArrayEquals(sharper.enrollmentCapture!!.bytes, tracker.takeCapture()!!.bytes)
     }
 
     @Test
@@ -65,6 +65,20 @@ class EnrollmentQualityTest {
     }
 
     @Test
+    fun stabilityTrackerOwnsBestFrameAndResetWipesIt() {
+        val tracker = EnrollmentStabilityTracker(stableMillis = 1200L)
+        val source = observation(42, 0.9f)
+        val originalBytes = source.enrollmentCapture!!.bytes
+
+        assertFalse(tracker.update(source, now = 1_000L))
+        originalBytes.fill(0)
+        val owned = tracker.takeCapture()!!
+        assertEquals(42, owned.bytes[0].toInt())
+        owned.wipe()
+        assertTrue(owned.bytes.all { it == 0.toByte() })
+    }
+
+    @Test
     fun authenticationStabilizationIsExactlyOneFrame() {
         assertEquals(1, AUTH_STABLE_FRAMES)
     }
@@ -79,7 +93,17 @@ class EnrollmentQualityTest {
     private fun observation(code: Int, quality: Float): Observation = Observation(
         ok = true,
         message = "ok",
-        template = ByteArray(32).also { it[0] = code.toByte() },
-        quality = quality
+        template = ByteArray(0),
+        quality = quality,
+        frameTimestampMillis = code.toLong(),
+        enrollmentCapture = RuntimeEnrollmentCapture(
+            bytes = ByteArray(32).also { it[0] = code.toByte() },
+            width = 640,
+            height = 480,
+            rotationDegrees = 90,
+            frontFacing = true,
+            quality = quality,
+            capturedAtMillis = code.toLong()
+        )
     )
 }

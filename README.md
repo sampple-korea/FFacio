@@ -1,86 +1,99 @@
-# FFacio Android 0.6.2 — Runtime Demo 정렬 버전
+# FFacio Android 0.7.1 — Runtime Demo 완전 정렬·iOS 스타일 UI
 
-FFacio는 카메라 기반 출입 인증과 사용자·Head Admin·HTTPS 릴레이 관리 흐름을 담당하는 Android 앱입니다. 얼굴 검출, 속성 분석, YUV 변환, 템플릿 추출과 템플릿 비교는 별도 설치되는 **FFacio Runtime**(`com.kbyai.faceattribute`)을 Binder/AIDL로 호출합니다.
+FFacio는 카메라 기반 출입 인증, 사용자·Head Admin 관리와 HTTPS 문 릴레이를 담당하는 Android 앱입니다. 얼굴 검출, 속성 분석, NV21 변환, 템플릿 추출과 비교는 별도 설치되는 **FFacio Runtime**(`com.kbyai.faceattribute`)을 Binder/AIDL로 호출합니다.
 
-## 구조
+## 이번 수정의 핵심
 
-```text
-FFacio UI / 사용자·관리자·릴레이 로직
-        ↓
-runtime-client (FaceSDK 호환 API + AIDL Binder client)
-        ↓
-FFacio Runtime APK / FFacioRuntimeService
-        ↓
-Runtime facesdk / JNI / 모델
-```
+이 버전은 FFacio의 얼굴 처리 흐름을 Runtime Demo와 입력 단계부터 다시 맞췄습니다.
 
-FFacio APK에는 OpenCV, ONNX Runtime, ArcFace, YuNet, SFace, MiniFASNet 또는 얼굴 모델 파일이 들어가지 않습니다.
+- CameraX `YUV_420_888`을 직접 NV21로 재조립하던 경로를 제거했습니다.
+- Runtime Demo와 동일한 `fotoapparat-2.7.0.aar`를 포함하고, Fotoapparat가 전달하는 NV21 원본 프레임·회전값을 그대로 사용합니다.
+- 전면 카메라의 EXIF 회전·미러링 코드는 Runtime Demo `CameraCoordinateMapper.nativeOrientation()`과 동일합니다.
+- 등록은 Demo의 1280×720 캡처 요청, 인증은 기본 640×480 균형 설정을 사용합니다. 기기가 정확한 해상도를 지원하지 않으면 화면 방향과 종횡비를 우선하고 면적 차이를 보조 기준으로 가장 가까운 해상도를 선택합니다.
+- 여러 얼굴이 보일 때에는 사용자 요구에 따라 사각형 면적이 가장 큰 얼굴 한 명만 등록·인증·추적합니다.
+- 인증 안정화는 사용자 요구에 따라 1프레임입니다. 그 외 등록·인증 기준과 Runtime 옵션은 Demo 기본값을 따릅니다.
 
-## 0.6.2 변경 사항
+## 등록 흐름
 
-- 고개 돌리기 챌린지와 관련 상태·판정·안내를 완전히 제거했습니다.
-- 정면·좌·우 5장 등록, 자세 유지, 반복 자세 판정, 샘플 간 일관성 검사와 대표 샘플 선정 절차를 제거했습니다.
-- 등록은 Runtime Demo 기준을 통과한 얼굴을 1200ms 안정적으로 관찰한 뒤 품질이 가장 좋은 Runtime 템플릿 하나만 저장합니다.
-- 화면에 여러 얼굴이 있어도 사각형 면적이 가장 큰 얼굴 하나만 등록·인증합니다.
-- 인증은 Runtime 라이브니스(켜진 경우), 품질 0.50, 유사도 0.80, 1위·2위 차이 0.03을 사용하며 안정화 프레임은 1입니다.
-- 이 버전 첫 실행 시 이전 등록 사용자를 전부 삭제하고 얼굴 인식 설정을 Runtime Demo 기본값(라이브니스 켬·레벨 0·가림 검사 끔)으로 초기화합니다. 이후 스키마 5의 대표 Runtime 템플릿 하나만 저장·비교합니다.
-- Runtime Demo처럼 인증·등록 모두 눈·입 속성을 요청하되, 눈·입 기준은 등록에서만 통과 조건으로 사용합니다. 나이·성별 추정은 요청하지 않습니다.
-- 라이브니스를 끄면 과거의 동작 챌린지로 대체하지 않고 품질·유사도 기준만 사용합니다.
-- Runtime Demo와 달리 매 프레임 임시 파일을 덮어쓰기·동기화하던 추가 I/O를 제거해, 앱 전용 캐시 파일을 즉시 삭제합니다.
-- 저장 작업은 템플릿의 독립 복사본을 사용하며, 손상된 개별 사용자 레코드는 전체 저장소를 막지 않고 제외합니다.
+등록은 기존 FFacio의 고개 돌리기 챌린지나 다각도 샘플 수집을 사용하지 않습니다.
 
-## Runtime Demo 기준 기본값
+1. Demo와 같은 옵션으로 얼굴·속성을 한 번에 검출합니다.
+2. 가장 큰 얼굴 하나를 선택합니다.
+3. Demo 등록 순서대로 좌표, 68점 랜드마크, 크기, 정사각형 중앙 가이드, 품질, 밝기, yaw·pitch·roll, 양쪽 눈, 선택적 가림, 입, 라이브니스를 검사합니다.
+4. 모든 조건을 연속 1200ms 만족하는 동안 가장 품질이 좋은 **원본 NV21 프레임**을 보관합니다.
+5. 최종 등록 직전에 그 프레임을 다시 변환·검출·판정한 뒤 템플릿을 한 번만 추출합니다.
+6. 기존 사용자와의 최고 유사도를 경고로 표시하되 Demo처럼 별도 등록을 허용합니다.
+7. 사용자당 Runtime 템플릿 하나만 암호화 저장합니다.
+
+고개 돌리기 챌린지, 5장 등록, 자세별 유지, 등록 샘플 간 유사도·응집도 검사, 보조 샘플 지지 판정은 코드 경로와 저장 형식에서 제거했습니다.
+
+## 인증 흐름
+
+인증은 Runtime Demo `CameraActivityKt`의 기본 판정과 같이 다음 항목만 선행 조건으로 사용합니다.
+
+- 라이브니스가 켜진 경우 0.70 이상
+- 얼굴 품질 0.50 이상
+- 얼굴 면적이 분석 이미지의 3% 이상
+- 최고 유사도 0.80 이상
+- 1위와 2위 후보 점수 차이 0.03 이상
+
+등록용 눈·입·자세 속성은 Runtime 요청에는 포함하지만 인증을 막는 조건으로 사용하지 않습니다. 별도의 능동 동작 챌린지나 여러 프레임 후보 누적도 없습니다.
+
+## Runtime Demo 기본값
 
 | 항목 | 값 |
 |---|---:|
-| 라이브니스 | 켜짐, 레벨 0, 임계값 0.70 |
+| 전면 카메라 | 기본 사용 |
+| 라이브니스 | 켜짐 |
+| 라이브니스 레벨 | 0 |
+| 라이브니스 임계값 | 0.70 |
 | 식별 임계값 | 0.80 |
 | 1위·2위 불확실 구간 | 0.03 |
 | 품질 임계값 | 0.50 |
 | 밝기 | 0~255 |
-| yaw / pitch / roll | 각각 최대 10도 |
+| yaw / pitch / roll | 각각 절댓값 10도 이하 |
 | 양쪽 눈 감김 | 각각 0.80 이하 |
-| 얼굴 가림 | 기본 꺼짐, 임계값 0.50 |
+| 얼굴 가림 | 기본 꺼짐, 켤 경우 0.50 이하 |
 | 입 벌림 | 0.50 이하 |
 | 등록 얼굴 크기 | 80~1200px |
 | 등록 안정화 | 1200ms |
-| 프레임 분석 간격 | 180ms |
-| 인증 결과 표시 | 3500ms |
+| 분석 간격 | 180ms |
+| 인증 결과 유지 | 3500ms |
 | 인증 안정화 | **1프레임** |
 
-## 유지되는 기능
+## UI
 
-- Head Admin 얼굴 승인과 Android 화면잠금 복구 경로
-- 암호화된 사용자·릴레이 설정 저장, 승인·판정 로그
-- HTTPS 릴레이 단일 실행과 상태 점검
-- Runtime 비교의 I/O 스레드 실행, 제한 시간, 오래된 결과 폐기
-- Runtime 연결 상태 구독·자동 재연결과 카메라 정지 감시
-- 관리자 진단 카드와 프레임별 Runtime 호출 계측
-- Runtime 라이브니스, 라이브니스 레벨, 얼굴 가림 검사 설정
+- 카메라를 둥근 대형 카드로 구성하고 Face ID 스타일 추적 링을 검출된 가장 큰 얼굴 위치와 크기에 맞춰 부드럽게 이동시킵니다.
+- 등록 진행률은 링과 하단 유리 질감 상태 카드에 함께 표시합니다.
+- 승인·거절·검색 상태는 iOS 계열 파랑·초록·빨강 상태색과 캡슐 배지로 구분합니다.
+- 운영 화면과 관리자 화면의 상태 카드, 버튼, 사용자 목록을 큰 모서리·넉넉한 여백 중심으로 정리했습니다.
 
-## 중요한 호환 조건
+## 데이터와 호환성
 
-FFacio Runtime 서비스 권한은 `signature` 보호 수준입니다. **FFacio APK와 Runtime APK는 반드시 같은 인증서로 서명해야 합니다.** Runtime을 먼저 설치한 뒤 FFacio를 설치합니다.
+저장 정책과 사용자 레코드 스키마는 7입니다. 이 버전을 처음 실행하면 이전 얼굴 등록 데이터와 이전 얼굴 판정 설정을 폐기하고 Demo 기본값으로 초기화합니다. 릴레이 URL·토큰 등 얼굴 외 설정은 유지됩니다. 모든 사용자는 새 카메라·등록 흐름으로 다시 등록해야 합니다.
 
-기존 등록 데이터는 새 단일 템플릿 정책의 첫 실행 초기화에서 전부 삭제됩니다. 릴레이 설정은 유지되며, 사용자는 모두 다시 등록해야 합니다.
+FFacio Runtime 서비스는 `signature` 권한을 사용하므로 **FFacio APK와 Runtime APK를 같은 인증서로 서명해야 합니다.**
 
-## 빌드
+## 구조
 
-요구 환경은 JDK 17, Android SDK 36, 지원 기기 ABI `arm64-v8a` 또는 `armeabi-v7a`입니다.
+```text
+FFacio Compose UI / 사용자·관리자·릴레이 정책
+        ↓
+Fotoapparat NV21 카메라 파이프라인
+        ↓
+runtime-client (FaceSDK 호환 API + AIDL Binder client)
+        ↓
+FFacio Runtime APK / FFacioRuntimeService
+```
+
+FFacio APK에는 자체 OpenCV·ONNX·ArcFace·YuNet·SFace·MiniFASNet 엔진이나 얼굴 모델 파일이 포함되지 않습니다.
+
+## 빌드와 검증
 
 ```bash
+python3 scripts/verify_source_static.py
 cd android
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-Release 빌드는 Runtime 프로젝트와 FFacio 프로젝트에 같은 `FFACIO_KEYSTORE_*` 환경 변수를 사용해야 합니다. 실제 ARM 기기 통합 확인은 `scripts/verify_android_device.ps1`을 사용합니다.
-
-## 소스 정적 점검
-
-```bash
-python3 scripts/verify_source_static.py
-```
-
-이 검사는 XML과 소스 구조, Runtime 필수 호출, 폐기한 등록·인증 로직의 잔존 여부, 이전 자체 엔진 흔적, 모델·서명키 포함 여부와 주요 IPC 방어 코드를 확인합니다.
-
-세부 내용은 [docs/android.md](docs/android.md)와 [FFACIO_RUNTIME_REFACTOR_REPORT.md](FFACIO_RUNTIME_REFACTOR_REPORT.md)를 참고하세요.
+현재 검증 결과와 환경상 제외 항목은 [VERIFICATION_2026-07-17.md](VERIFICATION_2026-07-17.md)에 기록했습니다. 구현 세부 내용은 [docs/android.md](docs/android.md)와 [FFACIO_RUNTIME_REFACTOR_REPORT.md](FFACIO_RUNTIME_REFACTOR_REPORT.md)를 참고하세요.

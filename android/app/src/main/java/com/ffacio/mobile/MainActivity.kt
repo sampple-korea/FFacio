@@ -17,7 +17,6 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
-import android.util.Size as AndroidSize
 import android.view.Window
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityManager
@@ -25,13 +24,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
-import androidx.camera.core.Preview
-import androidx.camera.core.UseCase
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -108,14 +100,19 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import com.google.common.util.concurrent.ListenableFuture
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.kbyai.facesdk.FaceBox
-import com.kbyai.facesdk.FaceDetectionParam
 import com.kbyai.facesdk.FaceSDK
 import io.ffacio.sdk.FFacioRuntimeClient
+import io.fotoapparat.Fotoapparat
+import io.fotoapparat.parameter.Resolution
+import io.fotoapparat.parameter.ScaleType
+import io.fotoapparat.preview.Frame
+import io.fotoapparat.selector.back
+import io.fotoapparat.selector.front
+import io.fotoapparat.view.CameraView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -145,7 +142,7 @@ import kotlin.math.min
 private const val PREFS = "ffacio_store"
 private const val USERS_KEY = "users"
 private const val USER_STORE_POLICY_KEY = "user_store_policy_version"
-internal const val USER_STORE_POLICY_VERSION = 5
+internal const val USER_STORE_POLICY_VERSION = 7
 private const val DOOR_URL_KEY = "door_url"
 private const val DOOR_TOKEN_KEY = "door_token"
 private const val DOOR_ENABLED_KEY = "door_enabled"
@@ -153,7 +150,7 @@ private const val DOOR_RELAY_HEALTH_PATH = "/.well-known/ffacio-door-relay"
 private const val PASSIVE_LIVENESS_ENABLED_KEY = "passive_liveness_enabled"
 private const val RUNTIME_LIVENESS_LEVEL_KEY = "runtime_liveness_level"
 private const val OCCLUSION_CHECK_ENABLED_KEY = "occlusion_check_enabled"
-internal const val FACE_ENGINE_ID = "ffacio.runtime.template.v1"
+internal const val FACE_ENGINE_ID = "ffacio.runtime.demo.camera.v3"
 private const val MIN_RUNTIME_TEMPLATE_BYTES = 16
 private const val MAX_RUNTIME_TEMPLATE_BYTES = 64 * 1024
 private const val KEYSTORE_ALIAS = "ffacio_mobile_store_key_v3"
@@ -166,29 +163,12 @@ private const val STORE_PREFLIGHT_KEY = "__store_preflight"
 private const val MATCH_THRESHOLD = 0.80
 private const val MATCH_MARGIN = 0.03
 private const val ENROLL_DUPLICATE_THRESHOLD = 0.80
-private const val ANALYSIS_INTERVAL_MS = 180L
 private const val CAMERA_ANALYSIS_STALL_MS = 6500L
 private const val CAMERA_WATCHDOG_RETRY_COOLDOWN_MS = 6000L
 private const val CAMERA_WATCHDOG_MAX_REBIND_ATTEMPTS = 2
 private const val CAMERA_ANALYZER_FATAL_STALL_MS = 20_000L
 private const val RUNTIME_DECISION_TIMEOUT_MS = 8_000L
 private const val RUNTIME_DECISION_STALL_RECOVERY_MS = 10_000L
-private const val ANTISPOOF_THRESHOLD = 0.70f
-private const val RUNTIME_QUALITY_THRESHOLD = 0.50f
-private const val RUNTIME_EYE_CLOSED_THRESHOLD = 0.80f
-private const val RUNTIME_OCCLUSION_THRESHOLD = 0.50f
-private const val RUNTIME_MOUTH_OPEN_THRESHOLD = 0.50f
-private const val RUNTIME_MAX_YAW = 10.0f
-private const val RUNTIME_MAX_PITCH = 10.0f
-private const val RUNTIME_MAX_ROLL = 10.0f
-private const val RUNTIME_LUMINANCE_MIN = 0.0f
-private const val RUNTIME_LUMINANCE_MAX = 255.0f
-private const val RUNTIME_MIN_FACE_SIZE = 80
-private const val RUNTIME_MAX_FACE_SIZE = 1200
-private const val RUNTIME_MIN_FACE_AREA_RATIO = 0.03
-private const val ENROLL_AUTO_CAPTURE_STABLE_MS = 1200L
-internal const val AUTH_STABLE_FRAMES = 1
-private const val RUNTIME_LANDMARK_VALUE_COUNT = 136
 private const val AUTH_RESULT_HOLD_MS = 3500L
 private const val APPROVAL_LOG_LIMIT = 8
 private const val AUTH_DECISION_LOG_LIMIT = 8
@@ -196,7 +176,7 @@ private const val AUTH_DECISION_LOG_DEDUPE_MS = 2500L
 private const val ADMIN_SESSION_TIMEOUT_MS = 120_000L
 private const val ADMIN_FACE_AUTH_TIMEOUT_MS = 30_000L
 private const val ENROLLMENT_IDLE_TIMEOUT_MS = 60_000L
-private const val USER_STORE_SCHEMA_VERSION = 5
+private const val USER_STORE_SCHEMA_VERSION = 7
 
 class MainActivity : ComponentActivity() {
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
@@ -1662,7 +1642,7 @@ private fun FFacioApp(
                 return
             }
             guideState = FaceGuideState.Center
-            val enrollmentNow = SystemClock.elapsedRealtime()
+            val enrollmentNow = obs.frameTimestampMillis.takeIf { it > 0L } ?: SystemClock.elapsedRealtime()
             val ready = enrollmentStability.update(obs, enrollmentNow)
             enrollmentHoldProgress = enrollmentStability.progress(enrollmentNow)
             if (!ready) {
@@ -1671,29 +1651,48 @@ private fun FFacioApp(
                     runtimeObservationSummary(obs)
                 return
             }
-            val enrollmentTemplate = enrollmentStability.takeTemplate() ?: obs.template.copyOf()
+            val enrollmentCapture = enrollmentStability.takeCapture() ?: obs.enrollmentCapture?.copyOwned()
+            if (enrollmentCapture == null) {
+                resetEnrollmentCapture()
+                guideState = FaceGuideState.Rejected
+                status = "등록 프레임을 다시 확인해 주세요"
+                detail = "최종 등록용 카메라 프레임을 보관하지 못했습니다"
+                return
+            }
             enrollmentHoldProgress = 0.0f
             val userSnapshot = users.map { it.copyForRuntimeDecision() }
-            status = "Runtime 등록 확인 중"
-            detail = "현재 얼굴 템플릿을 등록 사용자와 확인하고 있습니다"
+            status = "Runtime 등록 최종 확인 중"
+            detail = "데모와 같이 최적 프레임을 다시 검출하고 템플릿을 추출하고 있습니다"
             val started = runRuntimeDecision(
                 computation = {
+                    var finalization: RuntimeEnrollmentFinalization? = null
                     try {
-                        if (!isUsableRuntimeTemplate(enrollmentTemplate)) {
+                        val runtimeEngine = engineProvider()
+                            ?: return@runRuntimeDecision EnrollmentRuntimeDecision.Rejected(
+                                EnrollmentFailure("FFacio Runtime 연결이 필요합니다", "Runtime 얼굴 엔진을 사용할 수 없습니다")
+                            )
+                        finalization = runtimeEngine.finalizeEnrollment(
+                            capture = enrollmentCapture,
+                            passiveLivenessEnabled = passiveLivenessEnabled,
+                            livenessLevel = runtimeLivenessLevel,
+                            occlusionCheckEnabled = occlusionCheckEnabled
+                        )
+                        if (!finalization.accepted || !isUsableRuntimeTemplate(finalization.template)) {
                             return@runRuntimeDecision EnrollmentRuntimeDecision.Rejected(
-                                EnrollmentFailure("얼굴 특징을 다시 추출해 주세요", "Runtime 템플릿이 비어 있거나 손상되었습니다")
+                                EnrollmentFailure(finalization.message, "최종 등록 조건을 다시 확인해 주세요")
                             )
                         }
-                        val duplicateSearch = findBestEnrollmentDuplicate(enrollmentTemplate, userSnapshot)
+                        val duplicateSearch = findBestEnrollmentDuplicate(finalization.template, userSnapshot)
                         EnrollmentRuntimeDecision.Ready(
                             name = cleanName,
-                            template = enrollmentTemplate.copyOf(),
+                            template = finalization.template.copyOf(),
                             duplicateName = duplicateSearch.userName,
                             duplicateScore = duplicateSearch.score,
                             failedComparisons = duplicateSearch.failedComparisons
                         )
                     } finally {
-                        enrollmentTemplate.fill(0)
+                        finalization?.wipe()
+                        enrollmentCapture.wipe()
                         userSnapshot.wipeTemplates()
                     }
                 },
@@ -1741,7 +1740,7 @@ private fun FFacioApp(
                 }
             )
             if (!started) {
-                enrollmentTemplate.fill(0)
+                enrollmentCapture.wipe()
                 userSnapshot.wipeTemplates()
                 resetEnrollmentCapture()
             }
@@ -1847,7 +1846,7 @@ private fun FFacioApp(
                 enabled = cameraCanUseForCurrentScreen(),
                 analysisEnabled = cameraCanAnalyze(),
                 cameraRetryNonce = cameraRetryNonce,
-                stageMessage = blockedReason() ?: idleReason() ?: "카메라 준비 중",
+                stageMessage = blockedReason() ?: idleReason() ?: status,
                 guideState = guideState,
                 faceBounds = faceBounds,
                 isEnrollmentMode = mode == AppMode.Enroll,
@@ -2161,103 +2160,101 @@ private fun CameraStage(
     val currentRuntimeLivenessLevel by rememberUpdatedState(runtimeLivenessLevel)
     val currentOcclusionCheckEnabled by rememberUpdatedState(occlusionCheckEnabled)
     val currentEnrollmentMode by rememberUpdatedState(isEnrollmentMode)
-    val previewView = remember {
-        PreviewView(context).apply {
-            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-            scaleType = PreviewView.ScaleType.FILL_CENTER
+    val cameraView = remember {
+        CameraView(context).apply {
             setBackgroundColor(Color.BLACK)
+            contentDescription = "FFacio 얼굴 인식 카메라"
         }
     }
-    DisposableEffect(enabled, cameraRetryNonce) {
-        var providerFuture: ListenableFuture<ProcessCameraProvider>? = null
-        var boundProvider: ProcessCameraProvider? = null
-        var boundUseCases: Array<UseCase> = emptyArray()
-        var disposed = false
-        val mirrorFrames = AtomicBoolean(true)
+    DisposableEffect(enabled, cameraRetryNonce, isEnrollmentMode) {
+        val sessionActive = AtomicBoolean(true)
+        var camera: Fotoapparat? = null
         if (enabled) {
-            providerFuture = ProcessCameraProvider.getInstance(context)
-            providerFuture.addListener({
-                runCatching {
-                    if (!active.get() || disposed) return@addListener
-                    val provider = providerFuture.get()
-                    if (disposed) return@addListener
-                    val preview = Preview.Builder().build().also {
-                        it.setSurfaceProvider(previewView.surfaceProvider)
-                    }
-                    val analysis = if (shouldBindCameraAnalysisUseCase(enabled, analysisEnabled)) {
-                        ImageAnalysis.Builder()
-                            .setTargetResolution(AndroidSize(640, 480))
-                            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                            .build()
-                            .also {
-                                it.setAnalyzer(analyzerExecutor) { proxy ->
-                                    if (!currentAnalysisEnabled) {
-                                        proxy.close()
-                                        return@setAnalyzer
-                                    }
-                                    analyzeProxy(
-                                        proxy = proxy,
-                                        engineProvider = engineProvider,
-                                        processing = processing,
-                                        decisionInFlight = decisionInFlight,
-                                        firstAnalyzedFrameLogged = firstAnalyzedFrameLogged,
-                                        lastAnalysisAt = lastAnalysisAt,
-                                        active = active,
-                                        context = context,
-                                        frontFacing = mirrorFrames.get(),
-                                        passiveLivenessEnabled = currentPassiveLivenessEnabled,
-                                        runtimeLivenessLevel = currentRuntimeLivenessLevel,
-                                        occlusionCheckEnabled = currentOcclusionCheckEnabled,
-                                        enrollmentMode = currentEnrollmentMode,
-                                        onObservation = onObservation
+            val packageManager = context.packageManager
+            val hasAnyCamera = packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY) ||
+                packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA)
+            if (!hasAnyCamera) {
+                onNoCameraHardware()
+            } else {
+                val frontFacing = packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_FRONT)
+                camera = runCatching {
+                    Fotoapparat.with(context)
+                        .into(cameraView)
+                        .lensPosition(if (frontFacing) front() else back())
+                        .previewScaleType(ScaleType.CenterCrop)
+                        .previewResolution {
+                            val targetWidth = if (isEnrollmentMode) {
+                                DEMO_CAPTURE_FRAME_WIDTH
+                            } else {
+                                DEMO_IDENTIFICATION_FRAME_WIDTH
+                            }
+                            val targetHeight = if (isEnrollmentMode) {
+                                DEMO_CAPTURE_FRAME_HEIGHT
+                            } else {
+                                DEMO_IDENTIFICATION_FRAME_HEIGHT
+                            }
+                            // Prefer the Demo's exact stream, but do not fail on a camera that omits it.
+                            firstOrNull { it.width == targetWidth && it.height == targetHeight }
+                                ?: minByOrNull { resolution ->
+                                    runtimeDemoResolutionCost(
+                                        width = resolution.width,
+                                        height = resolution.height,
+                                        targetWidth = targetWidth,
+                                        targetHeight = targetHeight
                                     )
                                 }
+                                ?: Resolution(targetWidth, targetHeight)
+                        }
+                        .frameProcessor { frame ->
+                            if (!sessionActive.get() || !currentAnalysisEnabled) return@frameProcessor
+                            analyzeRuntimeFrame(
+                                frame = frame,
+                                engineProvider = engineProvider,
+                                analyzerExecutor = analyzerExecutor,
+                                processing = processing,
+                                decisionInFlight = decisionInFlight,
+                                firstAnalyzedFrameLogged = firstAnalyzedFrameLogged,
+                                lastAnalysisAt = lastAnalysisAt,
+                                active = active,
+                                sessionActive = sessionActive,
+                                context = context,
+                                frontFacing = frontFacing,
+                                passiveLivenessEnabled = currentPassiveLivenessEnabled,
+                                runtimeLivenessLevel = currentRuntimeLivenessLevel,
+                                occlusionCheckEnabled = currentOcclusionCheckEnabled,
+                                enrollmentMode = currentEnrollmentMode,
+                                onObservation = onObservation
+                            )
+                        }
+                        .cameraErrorCallback { error ->
+                            Log.e("FFacio", "Runtime Demo camera pipeline error: ${error.javaClass.simpleName}: ${error.message.orEmpty()}")
+                            ContextCompat.getMainExecutor(context).execute {
+                                if (sessionActive.get() && active.get()) onCameraUnavailable()
                             }
-                    } else {
-                        null
+                        }
+                        .build()
+                        .also { it.start() }
+                }.onFailure { error ->
+                    Log.e("FFacio", "Could not start Runtime Demo camera pipeline", error)
+                    ContextCompat.getMainExecutor(context).execute {
+                        if (sessionActive.get() && active.get()) onCameraUnavailable()
                     }
-                    val selector = when {
-                        provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) -> CameraSelector.DEFAULT_FRONT_CAMERA
-                        provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) -> CameraSelector.DEFAULT_BACK_CAMERA
-                        else -> null
-                    }
-                    if (selector == null) {
-                        onNoCameraHardware()
-                    } else {
-                        mirrorFrames.set(selector == CameraSelector.DEFAULT_FRONT_CAMERA)
-                        if (disposed) return@addListener
-                        val useCases = if (analysis != null) arrayOf<UseCase>(preview, analysis) else arrayOf<UseCase>(preview)
-                        provider.bindToLifecycle(context as ComponentActivity, selector, *useCases)
-                        boundProvider = provider
-                        boundUseCases = useCases
-                    }
-                }.onFailure {
-                    onCameraUnavailable()
-                }
-            }, ContextCompat.getMainExecutor(context))
+                }.getOrNull()
+            }
         }
         onDispose {
-            disposed = true
-            boundUseCases.filterIsInstance<ImageAnalysis>().forEach { it.clearAnalyzer() }
-            val provider = boundProvider
-            val useCases = boundUseCases
-            if (provider != null && useCases.isNotEmpty()) {
-                runCatching { provider.unbind(*useCases) }
-            } else {
-                providerFuture?.addListener({
-                    runCatching {
-                        boundUseCases.filterIsInstance<ImageAnalysis>().forEach { it.clearAnalyzer() }
-                    }
-                }, ContextCompat.getMainExecutor(context))
-            }
+            sessionActive.set(false)
+            lastAnalysisAt.set(0L)
+            runCatching { camera?.stop() }
+            camera = null
         }
     }
 
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(32.dp))
+            .clip(RoundedCornerShape(34.dp))
             .background(ComposeColor.Black)
+            .border(1.dp, ComposeColor.White.copy(alpha = 0.16f), RoundedCornerShape(34.dp))
     ) {
         val enrollmentProgress = enrollmentHoldProgress.takeIf { enabled && isEnrollmentMode }
         BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -2282,7 +2279,7 @@ private fun CameraStage(
                 label = "face-guide-size"
             )
             val ringSize = with(density) { animatedGuideSizePx.toDp() }
-            AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+            AndroidView(factory = { cameraView }, modifier = Modifier.fillMaxSize())
             FaceGuideOverlay(
                 state = guideState,
                 enrollmentProgress = enrollmentProgress,
@@ -2295,6 +2292,113 @@ private fun CameraStage(
                         translationY = animatedGuideY - (containerHeightPx / 2.0f)
                     }
             )
+        }
+        if (enabled) {
+            Surface(
+                color = ComposeColor.White.copy(alpha = 0.90f),
+                shape = RoundedCornerShape(999.dp),
+                shadowElevation = 8.dp,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(if (isEnrollmentMode) ComposeColor(0xFF30D158) else ComposeColor(0xFF0A84FF))
+                    )
+                    Text(
+                        if (isEnrollmentMode) "얼굴 등록" else "얼굴 인증",
+                        color = ComposeColor(0xFF1D1D1F),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+            Surface(
+                color = ComposeColor(0xFF1C1C1E).copy(alpha = 0.84f),
+                shape = RoundedCornerShape(24.dp),
+                shadowElevation = 12.dp,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+                    .fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(7.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        Box(
+                            Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    when (guideState) {
+                                        FaceGuideState.Approved -> ComposeColor(0xFF30D158)
+                                        FaceGuideState.Rejected -> ComposeColor(0xFFFF453A)
+                                        else -> ComposeColor(0xFF64D2FF)
+                                    }
+                                )
+                        )
+                        Text(
+                            when {
+                                isAdminAuthMode -> "Head Admin 확인"
+                                isEnrollmentMode -> "Face ID 등록"
+                                else -> "Face ID 인증"
+                            },
+                            color = ComposeColor.White.copy(alpha = 0.72f),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    Text(
+                        stageMessage,
+                        color = ComposeColor.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Center
+                    )
+                    if (enrollmentProgress != null) {
+                        LinearProgressIndicator(
+                            progress = { enrollmentProgress.coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(999.dp)),
+                            color = ComposeColor(0xFF30D158),
+                            trackColor = ComposeColor.White.copy(alpha = 0.18f)
+                        )
+                        Text(
+                            "정면을 유지하면 가장 선명한 프레임으로 자동 등록됩니다",
+                            color = ComposeColor.White.copy(alpha = 0.62f),
+                            fontSize = 11.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    } else {
+                        Text(
+                            if (isAdminAuthMode) {
+                                "등록된 Head Admin 얼굴을 안전하게 비교합니다"
+                            } else {
+                                "가장 가까운 얼굴 한 명을 자동으로 추적합니다"
+                            },
+                            color = ComposeColor.White.copy(alpha = 0.62f),
+                            fontSize = 11.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
         }
         if (enabled && isAdminAuthMode) {
             Column(
@@ -2934,14 +3038,31 @@ private fun FFacioTheme(content: @Composable () -> Unit) {
     )
 }
 
-private fun analyzeProxy(
-    proxy: ImageProxy,
+private data class RuntimeFrameSnapshot(
+    val bytes: ByteArray,
+    val width: Int,
+    val height: Int,
+    val rotationDegrees: Int,
+    val capturedAtMillis: Long,
+)
+
+/**
+ * Runtime Demo-compatible frame handoff.
+ *
+ * Fotoapparat already supplies tightly packed NV21. We intentionally do not rebuild chroma
+ * planes, crop, or reinterpret row/pixel strides here: doing so was the source of incorrect
+ * eye, pose and landmark values in the previous CameraX pipeline.
+ */
+private fun analyzeRuntimeFrame(
+    frame: Frame,
     engineProvider: () -> MobileFaceEngine?,
+    analyzerExecutor: ExecutorService,
     processing: AtomicBoolean,
     decisionInFlight: AtomicBoolean,
     firstAnalyzedFrameLogged: AtomicBoolean,
     lastAnalysisAt: AtomicLong,
     active: AtomicBoolean,
+    sessionActive: AtomicBoolean,
     context: Context,
     frontFacing: Boolean,
     passiveLivenessEnabled: Boolean,
@@ -2950,114 +3071,83 @@ private fun analyzeProxy(
     enrollmentMode: Boolean,
     onObservation: (Observation) -> Unit
 ) {
-    if (decisionInFlight.get()) {
-        proxy.close()
-        return
-    }
+    if (!active.get() || !sessionActive.get() || decisionInFlight.get()) return
     val now = SystemClock.elapsedRealtime()
     val previous = lastAnalysisAt.get()
-    if (now - previous < ANALYSIS_INTERVAL_MS || !lastAnalysisAt.compareAndSet(previous, now)) {
-        proxy.close()
-        return
-    }
-    if (!processing.compareAndSet(false, true)) {
-        proxy.close()
-        return
-    }
-    if (!active.get()) {
-        proxy.close()
+    if (now - previous < ANALYSIS_INTERVAL_MS || !lastAnalysisAt.compareAndSet(previous, now)) return
+    if (!processing.compareAndSet(false, true)) return
+
+    val width = frame.size.width
+    val height = frame.size.height
+    val frameBytes = frame.image.clone()
+    val expected = width.toLong() * height.toLong() * 3L / 2L
+    if (width <= 0 || height <= 0 || (width and 1) != 0 || (height and 1) != 0 ||
+        expected > Int.MAX_VALUE || frameBytes.size != expected.toInt()
+    ) {
+        frameBytes.fill(0)
         processing.set(false)
+        ContextCompat.getMainExecutor(context).execute {
+            if (active.get() && sessionActive.get()) {
+                onObservation(Observation.fail("카메라 프레임 형식이 Runtime Demo와 일치하지 않습니다"))
+            }
+        }
         return
     }
+
+    val snapshot = RuntimeFrameSnapshot(
+        bytes = frameBytes,
+        width = width,
+        height = height,
+        rotationDegrees = frame.rotation,
+        capturedAtMillis = now,
+    )
     try {
-        val engine = engineProvider() ?: return
-        if (firstAnalyzedFrameLogged.compareAndSet(false, true)) {
-            Log.i("FFacio", "Runtime camera analysis frame received")
-        }
-        val obs = engine.observe(
-            proxy = proxy,
-            frontFacing = frontFacing,
-            passiveLivenessEnabled = passiveLivenessEnabled,
-            enrollmentMode = enrollmentMode,
-            livenessLevel = runtimeLivenessLevel,
-            occlusionCheckEnabled = occlusionCheckEnabled
-        )
-        ContextCompat.getMainExecutor(context).execute {
+        analyzerExecutor.execute {
             try {
-                if (active.get()) onObservation(obs)
+                if (!active.get() || !sessionActive.get()) return@execute
+                val engine = engineProvider() ?: return@execute
+                if (firstAnalyzedFrameLogged.compareAndSet(false, true)) {
+                    Log.i(
+                        "FFacio",
+                        "Runtime Demo camera frame received: ${snapshot.width}x${snapshot.height}, rotation=${snapshot.rotationDegrees}"
+                    )
+                }
+                val observation = engine.observe(
+                    frame = snapshot,
+                    frontFacing = frontFacing,
+                    passiveLivenessEnabled = passiveLivenessEnabled,
+                    enrollmentMode = enrollmentMode,
+                    livenessLevel = runtimeLivenessLevel,
+                    occlusionCheckEnabled = occlusionCheckEnabled
+                )
+                ContextCompat.getMainExecutor(context).execute {
+                    try {
+                        if (active.get() && sessionActive.get()) onObservation(observation)
+                    } finally {
+                        observation.template.fill(0)
+                        observation.enrollmentCapture?.wipe()
+                    }
+                }
+            } catch (error: Throwable) {
+                Log.e("FFacio", "Runtime Demo camera frame analysis failed", error)
+                ContextCompat.getMainExecutor(context).execute {
+                    if (active.get() && sessionActive.get()) {
+                        onObservation(Observation.fail(runtimeCallFailureMessage(error)))
+                    }
+                }
             } finally {
-                obs.template.fill(0)
+                snapshot.bytes.fill(0)
+                processing.set(false)
             }
         }
-    } catch (error: Exception) {
-        Log.e("FFacio", "Runtime camera frame analysis failed", error)
-        ContextCompat.getMainExecutor(context).execute {
-            if (active.get()) onObservation(Observation.fail(runtimeCallFailureMessage(error)))
-        }
-    } finally {
-        proxy.close()
+    } catch (error: Throwable) {
+        snapshot.bytes.fill(0)
         processing.set(false)
-    }
-}
-
-/** CameraX YUV_420_888 planes -> tightly packed NV21 for Runtime yuvToBitmap(). */
-private fun imageProxyToNv21(proxy: ImageProxy): ByteArray {
-    val crop = proxy.cropRect
-    val width = crop.width()
-    val height = crop.height()
-    require(width > 0 && height > 0 && width % 2 == 0 && height % 2 == 0) { "Invalid camera crop" }
-    require(crop.left % 2 == 0 && crop.top % 2 == 0) { "YUV crop origin must be chroma-aligned" }
-    require(proxy.planes.size >= 3) { "Expected YUV_420_888 planes" }
-    val output = ByteArray(width * height + width * height / 2)
-
-    fun copyPlane(planeIndex: Int, channelOffset: Int, outputStride: Int, planeWidth: Int, planeHeight: Int) {
-        val plane = proxy.planes[planeIndex]
-        val buffer = plane.buffer.duplicate()
-        val bufferStart = buffer.position()
-        val rowStride = plane.rowStride
-        val pixelStride = plane.pixelStride
-        val shift = if (planeIndex == 0) 0 else 1
-        val cropLeft = crop.left shr shift
-        val cropTop = crop.top shr shift
-        var outputOffset = channelOffset
-        for (row in 0 until planeHeight) {
-            val rowStart = (cropTop + row) * rowStride + cropLeft * pixelStride
-            for (column in 0 until planeWidth) {
-                val index = bufferStart + rowStart + column * pixelStride
-                require(index in bufferStart until buffer.limit()) { "Camera plane buffer is smaller than declared strides" }
-                output[outputOffset] = buffer.get(index)
-                outputOffset += outputStride
+        Log.e("FFacio", "Runtime camera analysis executor rejected a frame", error)
+        ContextCompat.getMainExecutor(context).execute {
+            if (active.get() && sessionActive.get()) {
+                onObservation(Observation.fail("카메라 분석 작업을 시작할 수 없습니다"))
             }
-        }
-    }
-
-    copyPlane(0, 0, 1, width, height)
-    val chromaWidth = width / 2
-    val chromaHeight = height / 2
-    val ySize = width * height
-    // NV21 is VU interleaved. CameraX planes are Y, U, V.
-    copyPlane(2, ySize, 2, chromaWidth, chromaHeight)
-    copyPlane(1, ySize + 1, 2, chromaWidth, chromaHeight)
-    return output
-}
-
-private fun runtimeNativeOrientation(rotationDegrees: Int, frontFacing: Boolean): Int {
-    val normalized = ((rotationDegrees % 360) + 360) % 360
-    return if (frontFacing) {
-        when (normalized) {
-            0 -> 2
-            90 -> 7
-            180 -> 4
-            270 -> 5
-            else -> 7
-        }
-    } else {
-        when (normalized) {
-            0 -> 1
-            90 -> 6
-            180 -> 3
-            270 -> 8
-            else -> 6
         }
     }
 }
@@ -3066,7 +3156,7 @@ private class MobileFaceEngine {
     fun hasPassiveLiveness(): Boolean = true
 
     fun observe(
-        proxy: ImageProxy,
+        frame: RuntimeFrameSnapshot,
         frontFacing: Boolean,
         passiveLivenessEnabled: Boolean,
         enrollmentMode: Boolean,
@@ -3077,19 +3167,15 @@ private class MobileFaceEngine {
         var bitmap: Bitmap? = null
         try {
             val convertStartedAt = SystemClock.elapsedRealtime()
-            val nv21 = imageProxyToNv21(proxy)
-            bitmap = try {
-                FaceSDK.yuv2Bitmap(
-                    nv21,
-                    proxy.cropRect.width(),
-                    proxy.cropRect.height(),
-                    runtimeNativeOrientation(proxy.imageInfo.rotationDegrees, frontFacing)
-                )
-            } finally {
-                nv21.fill(0)
-            } ?: return Observation.fail("Runtime이 카메라 이미지를 변환하지 못했습니다")
+            bitmap = FaceSDK.yuv2Bitmap(
+                frame.bytes,
+                frame.width,
+                frame.height,
+                runtimeNativeOrientation(frame.rotationDegrees, frontFacing)
+            ) ?: return Observation.fail("Runtime이 카메라 이미지를 변환하지 못했습니다")
             val convertMillis = SystemClock.elapsedRealtime() - convertStartedAt
 
+            // Exact Runtime Demo option set: liveness + eye + optional occlusion + mouth, no age/gender.
             val options = runtimeDetectionOptions(
                 passiveLivenessEnabled = passiveLivenessEnabled,
                 livenessLevel = livenessLevel,
@@ -3099,80 +3185,56 @@ private class MobileFaceEngine {
             val faces = FaceSDK.faceDetection(bitmap, options).orEmpty()
             val detectMillis = SystemClock.elapsedRealtime() - detectStartedAt
             if (faces.isEmpty()) return Observation.fail("얼굴을 찾을 수 없습니다")
-            // When several people are visible, consistently process only the largest face.
+
+            // User-requested exception to Demo single-face rejection: process only the largest face.
             val face = largestRuntimeFace(faces)
                 ?: return Observation.fail("얼굴을 찾을 수 없습니다")
             val bounds = faceBoundsFromRuntime(face, bitmap.width, bitmap.height)
                 ?: return Observation.fail("Runtime 얼굴 좌표가 올바르지 않습니다")
-            val faceWidth = (face.x2 - face.x1).coerceAtLeast(0)
-            val faceHeight = (face.y2 - face.y1).coerceAtLeast(0)
-            val faceSize = max(faceWidth, faceHeight)
-            val faceAreaRatio = faceWidth.toDouble() * faceHeight.toDouble() /
-                (bitmap.width.toDouble() * bitmap.height.toDouble()).coerceAtLeast(1.0)
+            val policyDecision = evaluateRuntimeDemoFace(
+                face = face,
+                frameWidth = bitmap.width,
+                frameHeight = bitmap.height,
+                enrollmentMode = enrollmentMode,
+                passiveLivenessEnabled = passiveLivenessEnabled,
+                occlusionCheckEnabled = occlusionCheckEnabled
+            )
+            if (!policyDecision.accepted) {
+                return Observation.fail(
+                    message = policyDecision.message,
+                    liveScore = policyDecision.liveScore,
+                    liveState = policyDecision.liveState,
+                    faceBounds = bounds
+                )
+            }
+
             if (enrollmentMode) {
-                // Runtime demo enrollment order: bounds/landmarks -> size -> center -> attributes -> liveness.
-                if (face.landmarks_68?.size != RUNTIME_LANDMARK_VALUE_COUNT) {
-                    return Observation.fail("얼굴 특징점을 안정적으로 찾지 못했습니다", faceBounds = bounds)
-                }
-                if (faceSize < RUNTIME_MIN_FACE_SIZE) {
-                    return Observation.fail("조금 더 가까이 와 주세요", faceBounds = bounds)
-                }
-                if (faceSize > RUNTIME_MAX_FACE_SIZE) {
-                    return Observation.fail("조금 뒤로 이동해 주세요", faceBounds = bounds)
-                }
-                if (!isRuntimeFaceCentered(face, bitmap.width, bitmap.height)) {
-                    return Observation.fail("얼굴을 화면 중앙에 맞춰 주세요", faceBounds = bounds)
-                }
-                if (!face.face_quality.isFinite() || face.face_quality < RUNTIME_QUALITY_THRESHOLD) {
-                    return Observation.fail("얼굴 품질이 낮습니다. 조명과 초점을 맞춰 주세요", faceBounds = bounds)
-                }
-                if (!face.face_luminance.isFinite() || face.face_luminance !in RUNTIME_LUMINANCE_MIN..RUNTIME_LUMINANCE_MAX) {
-                    return Observation.fail("얼굴 밝기를 조절해 주세요", faceBounds = bounds)
-                }
-                if (!face.yaw.isFinite() || !face.pitch.isFinite() || !face.roll.isFinite()) {
-                    return Observation.fail("얼굴 자세 값을 확인할 수 없습니다", faceBounds = bounds)
-                }
-                if (kotlin.math.abs(face.yaw) > RUNTIME_MAX_YAW ||
-                    kotlin.math.abs(face.pitch) > RUNTIME_MAX_PITCH ||
-                    kotlin.math.abs(face.roll) > RUNTIME_MAX_ROLL) {
-                    return Observation.fail("카메라를 정면으로 바라봐 주세요", faceBounds = bounds)
-                }
-                if (!face.left_eye_closed.isFinite() || !face.right_eye_closed.isFinite() ||
-                    face.left_eye_closed > RUNTIME_EYE_CLOSED_THRESHOLD ||
-                    face.right_eye_closed > RUNTIME_EYE_CLOSED_THRESHOLD) {
-                    return Observation.fail("눈을 뜨고 카메라를 바라봐 주세요", faceBounds = bounds)
-                }
-                if (occlusionCheckEnabled && (!face.face_occlusion.isFinite() || face.face_occlusion > RUNTIME_OCCLUSION_THRESHOLD)) {
-                    return Observation.fail("얼굴을 가리는 물체를 치워 주세요", faceBounds = bounds)
-                }
-                if (!face.mouth_opened.isFinite() || face.mouth_opened > RUNTIME_MOUTH_OPEN_THRESHOLD) {
-                    return Observation.fail("입을 다문 상태로 유지해 주세요", faceBounds = bounds)
-                }
-                if (passiveLivenessEnabled && (!face.liveness.isFinite() || face.liveness < ANTISPOOF_THRESHOLD)) {
-                    return Observation.fail(
-                        "사진이나 화면으로 보이는 얼굴입니다. 실제 얼굴을 보여주세요",
-                        liveScore = face.liveness.takeIf { it.isFinite() } ?: 0f,
-                        liveState = "runtime_rejected",
-                        faceBounds = bounds
-                    )
-                }
-            } else {
-                // Runtime demo authentication order: liveness first, then quality and minimum area.
-                if (passiveLivenessEnabled && (!face.liveness.isFinite() || face.liveness < ANTISPOOF_THRESHOLD)) {
-                    return Observation.fail(
-                        "사진이나 화면으로 보이는 얼굴입니다. 실제 얼굴을 보여주세요",
-                        liveScore = face.liveness.takeIf { it.isFinite() } ?: 0f,
-                        liveState = "runtime_rejected",
-                        faceBounds = bounds
-                    )
-                }
-                if (!face.face_quality.isFinite() || face.face_quality < RUNTIME_QUALITY_THRESHOLD ||
-                    faceAreaRatio < RUNTIME_MIN_FACE_AREA_RATIO) {
-                    return Observation.fail(
-                        if (faceAreaRatio < RUNTIME_MIN_FACE_AREA_RATIO) "조금 더 가까이 와 주세요" else "얼굴 품질이 낮습니다. 조명과 초점을 맞춰 주세요",
-                        faceBounds = bounds
-                    )
-                }
+                // Runtime Demo capture parity: keep the best original NV21 frame for 1.2 seconds,
+                // then convert, detect, inspect and extract once more during finalization.
+                return Observation(
+                    ok = true,
+                    message = "확인 중",
+                    template = ByteArray(0),
+                    liveScore = if (passiveLivenessEnabled) face.liveness else 1f,
+                    liveState = if (passiveLivenessEnabled) "runtime_live" else "disabled",
+                    faceBounds = bounds,
+                    quality = face.face_quality,
+                    luminance = face.face_luminance,
+                    yaw = face.yaw,
+                    pitch = face.pitch,
+                    roll = face.roll,
+                    frameTimestampMillis = frame.capturedAtMillis,
+                    enrollmentCapture = RuntimeEnrollmentCapture(
+                        bytes = frame.bytes.copyOf(),
+                        width = frame.width,
+                        height = frame.height,
+                        rotationDegrees = frame.rotationDegrees,
+                        frontFacing = frontFacing,
+                        quality = face.face_quality,
+                        capturedAtMillis = frame.capturedAtMillis
+                    ),
+                    timings = RuntimeCallTimings(convertMillis, detectMillis, 0L)
+                )
             }
 
             val templateStartedAt = SystemClock.elapsedRealtime()
@@ -3194,6 +3256,7 @@ private class MobileFaceEngine {
                 yaw = face.yaw,
                 pitch = face.pitch,
                 roll = face.roll,
+                frameTimestampMillis = frame.capturedAtMillis,
                 timings = RuntimeCallTimings(convertMillis, detectMillis, templateMillis)
             )
         } catch (error: Throwable) {
@@ -3204,35 +3267,105 @@ private class MobileFaceEngine {
         }
     }
 
+    fun finalizeEnrollment(
+        capture: RuntimeEnrollmentCapture,
+        passiveLivenessEnabled: Boolean,
+        livenessLevel: Int,
+        occlusionCheckEnabled: Boolean
+    ): RuntimeEnrollmentFinalization {
+        if (!FaceSDK.isReady()) {
+            return RuntimeEnrollmentFinalization.rejected("FFacio Runtime 연결이 준비되지 않았습니다")
+        }
+        var bitmap: Bitmap? = null
+        return try {
+            bitmap = FaceSDK.yuv2Bitmap(
+                capture.bytes,
+                capture.width,
+                capture.height,
+                runtimeNativeOrientation(capture.rotationDegrees, capture.frontFacing)
+            ) ?: return RuntimeEnrollmentFinalization.rejected("Runtime이 등록 이미지를 변환하지 못했습니다")
+            val faces = FaceSDK.faceDetection(
+                bitmap,
+                runtimeDetectionOptions(
+                    passiveLivenessEnabled = passiveLivenessEnabled,
+                    livenessLevel = livenessLevel,
+                    occlusionCheckEnabled = occlusionCheckEnabled
+                )
+            ).orEmpty()
+            val face = largestRuntimeFace(faces)
+                ?: return RuntimeEnrollmentFinalization.rejected("얼굴을 찾을 수 없습니다")
+            val decision = evaluateRuntimeDemoFace(
+                face = face,
+                frameWidth = bitmap.width,
+                frameHeight = bitmap.height,
+                enrollmentMode = true,
+                passiveLivenessEnabled = passiveLivenessEnabled,
+                occlusionCheckEnabled = occlusionCheckEnabled
+            )
+            if (!decision.accepted) {
+                return RuntimeEnrollmentFinalization.rejected(decision.message)
+            }
+            val template = FaceSDK.templateExtraction(bitmap, face)
+            if (!isUsableRuntimeTemplate(template)) {
+                template?.fill(0)
+                RuntimeEnrollmentFinalization.rejected("Runtime 얼굴 템플릿을 추출할 수 없습니다")
+            } else {
+                RuntimeEnrollmentFinalization(
+                    accepted = true,
+                    message = "등록 준비 완료",
+                    template = template,
+                    quality = face.face_quality
+                )
+            }
+        } catch (error: Throwable) {
+            Log.e("FFacio", "Runtime Demo enrollment finalization failed", error)
+            RuntimeEnrollmentFinalization.rejected(runtimeCallFailureMessage(error))
+        } finally {
+            bitmap?.recycle()
+        }
+    }
+
     fun close() = Unit
 }
 
-internal fun largestRuntimeFace(faces: List<FaceBox>): FaceBox? = faces.maxByOrNull { face ->
-    val width = (face.x2 - face.x1).coerceAtLeast(0)
-    val height = (face.y2 - face.y1).coerceAtLeast(0)
-    width.toLong() * height.toLong()
+internal data class RuntimeEnrollmentCapture(
+    val bytes: ByteArray,
+    val width: Int,
+    val height: Int,
+    val rotationDegrees: Int,
+    val frontFacing: Boolean,
+    val quality: Float,
+    val capturedAtMillis: Long
+) {
+    fun copyOwned(): RuntimeEnrollmentCapture = copy(bytes = bytes.copyOf())
+    fun wipe() = bytes.fill(0)
 }
 
-internal fun isRuntimeFaceCentered(face: FaceBox, frameWidth: Int, frameHeight: Int): Boolean {
-    if (frameWidth <= 0 || frameHeight <= 0) return false
-    val targetWidth = frameWidth * 2.0f / 3.0f
-    val targetHeight = min(targetWidth * 1.2f, frameHeight * 0.8f)
-    val left = (frameWidth - targetWidth) / 2.0f
-    val top = (frameHeight - targetHeight) / 2.0f
-    val right = (frameWidth + targetWidth) / 2.0f
-    val bottom = (frameHeight + targetHeight) / 2.0f
-    val centerX = (face.x1 + face.x2) / 2.0f
-    val centerY = (face.y1 + face.y2) / 2.0f
-    return centerX in left..right && centerY in top..bottom
+internal data class RuntimeEnrollmentFinalization(
+    val accepted: Boolean,
+    val message: String,
+    val template: ByteArray,
+    val quality: Float = 0.0f
+) {
+    fun wipe() = template.fill(0)
+
+    companion object {
+        fun rejected(message: String) = RuntimeEnrollmentFinalization(
+            accepted = false,
+            message = message,
+            template = ByteArray(0)
+        )
+    }
 }
 
 internal class EnrollmentStabilityTracker(private val stableMillis: Long) {
     private var validSince = 0L
     private var bestQuality = Float.NEGATIVE_INFINITY
-    private var bestTemplate: ByteArray? = null
+    private var bestCapture: RuntimeEnrollmentCapture? = null
 
     fun update(observation: Observation, now: Long): Boolean {
-        if (!observation.ok || !isUsableRuntimeTemplate(observation.template)) {
+        val capture = observation.enrollmentCapture
+        if (!observation.ok || capture == null || capture.bytes.isEmpty()) {
             reset()
             return false
         }
@@ -3241,8 +3374,8 @@ internal class EnrollmentStabilityTracker(private val stableMillis: Long) {
             validSince = now
         }
         if (observation.quality.isFinite() && observation.quality >= bestQuality) {
-            bestTemplate?.fill(0)
-            bestTemplate = observation.template.copyOf()
+            bestCapture?.wipe()
+            bestCapture = capture.copyOwned()
             bestQuality = observation.quality
         }
         return now - validSince >= stableMillis
@@ -3253,17 +3386,17 @@ internal class EnrollmentStabilityTracker(private val stableMillis: Long) {
         return ((now - validSince).toFloat() / stableMillis.coerceAtLeast(1L).toFloat()).coerceIn(0.0f, 1.0f)
     }
 
-    fun takeTemplate(): ByteArray? {
-        val result = bestTemplate
-        bestTemplate = null
+    fun takeCapture(): RuntimeEnrollmentCapture? {
+        val result = bestCapture
+        bestCapture = null
         validSince = 0L
         bestQuality = Float.NEGATIVE_INFINITY
         return result
     }
 
     fun reset() {
-        bestTemplate?.fill(0)
-        bestTemplate = null
+        bestCapture?.wipe()
+        bestCapture = null
         validSince = 0L
         bestQuality = Float.NEGATIVE_INFINITY
     }
@@ -3346,6 +3479,8 @@ internal data class Observation(
     val yaw: Float = 0.0f,
     val pitch: Float = 0.0f,
     val roll: Float = 0.0f,
+    val frameTimestampMillis: Long = 0L,
+    val enrollmentCapture: RuntimeEnrollmentCapture? = null,
     val timings: RuntimeCallTimings? = null
 ) {
     companion object {
@@ -3361,21 +3496,6 @@ internal data class RuntimeCallTimings(
     val templateMillis: Long
 ) {
     fun totalMillis(): Long = convertMillis + detectMillis + templateMillis
-}
-
-internal fun sanitizeRuntimeLivenessLevel(value: Int): Int = if (value == 1) 1 else 0
-
-internal fun runtimeDetectionOptions(
-    passiveLivenessEnabled: Boolean,
-    livenessLevel: Int,
-    occlusionCheckEnabled: Boolean
-): FaceDetectionParam = FaceDetectionParam().apply {
-    check_liveness = passiveLivenessEnabled
-    check_liveness_level = sanitizeRuntimeLivenessLevel(livenessLevel)
-    check_eye_closeness = true
-    check_face_occlusion = occlusionCheckEnabled
-    check_mouth_opened = true
-    estimate_age_gender = false
 }
 
 internal fun runtimeConnectionStateLabel(connected: Boolean, connecting: Boolean, ready: Boolean): String = when {

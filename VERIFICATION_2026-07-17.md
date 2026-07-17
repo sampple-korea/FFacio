@@ -1,74 +1,114 @@
 # 검증 기록 — 2026-07-17
 
-## 최종 소스 정책
+## 검증 대상
 
-- FFacio Runtime Binder 경로만 사용
-- 사용자당 대표 Runtime 템플릿 1개 저장·비교
-- 여러 얼굴 중 사각형 면적이 가장 큰 얼굴 1개만 처리
-- 인증 안정화 1프레임
-- 등록 안정화 1200ms 동안 가장 높은 품질의 템플릿 선택
-- 능동 고개 돌리기, 5장 다각도 등록, 자세 유지, 샘플 간 유사도 재검사, 보조 샘플 지지 판정 제거
-- 저장 정책·레코드 스키마 버전 5: 이전 얼굴 등록 데이터는 첫 실행 시 폐기
+- 앱 버전: `0.7.1-runtime-demo-parity-ios`
+- 저장 정책·레코드 스키마: 7
+- 입력 기준: 첨부된 `FFacio-Runtime-main-3.zip`의 Runtime Demo
+- 수정 대상: 첨부된 `FFacio-master-3.zip`
 
-## 통과한 검증
+## 통과한 검사
 
-1. `python3 scripts/verify_source_static.py`
-   - 전체 XML 파싱
-   - Kotlin/Java/Gradle 괄호·문자열·주석 구조 검사
-   - Runtime 필수 호출, 단일 템플릿 정책, 가장 큰 얼굴 선택, 1프레임 인증 표식 검사
-   - 폐기한 등록·인증 로직, 자체 ONNX/OpenCV 엔진, 모델 파일, 서명키·비밀값 부재 검사
-   - 저장 작업용 템플릿 독립 복사본과 종료 시 템플릿 정리 경로 검사
+### 1. 소스 fail-closed 감사
 
-2. Runtime Demo 기본값 자동 대조
-   - 라이브니스 0.70, 식별 0.80, 불확실 구간 0.03, 품질 0.50
-   - 밝기 0~255, yaw/pitch/roll 10도, 눈 0.80, 가림 0.50, 입 0.50
-   - 얼굴 크기 80~1200px, 등록 안정화 1200ms, 분석 간격 180ms, 결과 유지 3500ms
-   - 인증 안정화만 사용자 요구대로 Demo 기본 3이 아닌 1프레임
-   - 눈·입 속성 요청, 선택적 가림, 나이·성별 추정 끔 확인
+`python3 scripts/verify_source_static.py` 통과.
 
-3. Runtime IPC 계약 대조
-   - 앱의 AIDL 3개와 Runtime `client` 모듈의 AIDL이 바이트 단위로 일치
-   - `FFacioFaceParcel.java`, `FFacioOptionsParcel.java`가 Runtime 클라이언트와 바이트 단위로 일치
+검사 항목:
 
-4. AIDL/Java 실제 컴파일
-   - Android SDK 36 `aidl`로 Binder 소스 생성 성공
-   - JDK 17 `javac -Xlint:all`로 runtime-client Java 6개와 생성 Binder 소스 컴파일 성공
-   - 경고 없음
+- 전체 XML 파싱
+- Kotlin·Java·Gradle 괄호, 문자열, 주석 구조
+- Runtime 필수 호출과 Binder 모듈 포함 여부
+- Fotoapparat AAR 존재와 고정 SHA-256
+- CameraX·수동 NV21 변환 경로 부재
+- 저장 정책·스키마 7과 이전 데이터 초기화 경로
+- 가장 큰 얼굴 선택, 1200ms 등록, 1프레임 인증
+- 고개 챌린지·5장·다각도·보조 샘플 로직 표식 부재
+- 자체 ONNX/OpenCV 엔진, 모델 파일, 서명키, 알려진 비밀키 패턴 부재
+- 등록 프레임·템플릿 소유권과 정리 경로
 
-5. Android 리소스 실제 처리
-   - Build Tools 35.0.0 `aapt2 compile` 성공
-   - SDK 36을 사용한 매니페스트·리소스 `aapt2 link` 성공
-   - 생성한 리소스 전용 APK ZIP 무결성 통과
+### 2. Kotlin 구문·핵심 코드 컴파일 검사
 
-6. 독립 Kotlin 정책 실행
-   - 가장 큰 얼굴 선택과 동일 면적 우선순위
-   - 등록 중앙 영역, 1200ms 경계, 최고 품질 템플릿 선택
-   - 0.80 식별 경계와 0.03 모호성 경계
-   - 일부 Runtime 비교 실패 시 나머지 사용자 비교 지속
-   - 중복 얼굴 최고 점수 선택과 비교 실패 제외
-   - 인증 안정화 1프레임
+최종 `MainActivity.kt`와 `RuntimeDemoPolicy.kt`를 Kotlin 컴파일러의 파서에 입력해 `expecting`, `unexpected tokens`, 미종결 문자열·주석 같은 구문 진단이 0건인지 확인했습니다. Android/Compose 의존성이 없는 환경이므로 전체 파일은 미해결 참조에서 종료되며, 그 결과를 전체 앱 컴파일 성공으로 해석하지 않습니다.
 
-7. 회귀 테스트 실제 실행
-   - 저장소의 JUnit 테스트 79개가 참조하는 순수 정책 선언을 최종 `MainActivity.kt`에서 그대로 추출해 Kotlin/JVM 17로 컴파일
-   - 테스트 소스 7개를 변경 없이 함께 컴파일하고 경량 JUnit 호환 실행기로 79개 전부 실행: `passed=79, failed=0`
-   - 가장 큰 얼굴, 등록 안정화, 시간 역행, Runtime 옵션, 템플릿 호환성, 중복 비교, 부분 비교 실패, 비유한 점수, 임계값 경계, 저장용 템플릿 깊은 복사 등을 포함
+핵심 정책·등록 안정화·프레임 소유권 코드는 실제 Runtime `FaceBox.java`, `FaceDetectionParam.java`와 함께 Kotlin/JVM 17로 별도 컴파일·실행했습니다.
 
-8. Runtime 클라이언트 동작 점검
-   - 최종 Java 클래스에서 임시 파일 삭제 함수를 반사 호출해 1MiB 캐시 파일이 즉시 제거되는지 확인
-   - null/손상 Bitmap 입력 방어가 `IllegalArgumentException`으로 실패하는지 확인
-   - 프레임별 `RandomAccessFile`·동기식 파일 디스크 flush 경로 부재를 정적 검사에 추가
+```text
+KOTLIN_SYNTAX_DIAGNOSTICS=0
+RUNTIME_DEMO_POLICY_CHECKS_PASSED=39
+```
 
-9. 추가 결함 수정
-   - 매 프레임 임시 YUV/PNG 파일을 0으로 덮고 `fsync`하던 경로 제거
-   - Runtime Demo처럼 앱 전용 캐시 파일을 즉시 삭제하여 분석 지연을 줄임
-   - 저장 중 화면 종료와 템플릿 배열 변경이 경쟁하지 않도록 독립 저장 스냅샷 사용
-   - 화면 종료 시 보유 템플릿과 등록 안정화 템플릿 정리
-   - 손상된 사용자 항목 하나가 전체 사용자 로딩을 막지 않도록 개별 레코드 폐기
-   - 저장소를 다시 잠금 해제할 때 기존 인메모리 템플릿을 먼저 지워 교체 과정에서 생체 데이터가 중복 잔존하지 않도록 정리
-   - 저장 실패·취소·오래된 비동기 결과에서 새 템플릿 정리
+### 3. Runtime Demo 카메라 동일성
 
-## 환경상 제외한 검증
+- Demo와 앱의 `fotoapparat-2.7.0.aar` SHA-256 일치
+- 해시: `a9ce65824a2ff6ee05450c1b28d11b0bb668e5345e0c60303b184f3cd8fbbdff`
+- `frame.image`, width, height, rotation을 보존하는 NV21 경로 확인
+- 전면·후면 0/90/180/270도 orientation 8개 일치
+- `CenterCrop`과 전면 카메라 우선 설정 확인
+- CameraX 의존성과 `ImageProxy`, `ProcessCameraProvider`, `PreviewView`, 수동 NV21 변환 함수 부재 확인
 
-전체 Gradle `testDebugUnitTest`·`assembleDebug`는 소스 컴파일 오류가 확인된 것이 아니라, 이 환경의 비어 있는 Android Gradle Plugin 의존성 캐시와 불안정한 외부 저장소 응답 때문에 프로젝트 구성 의존성을 모두 확보하지 못해 완료하지 못했다. 오프라인 재시도에서도 누락된 AGP 전이 의존성이 명시적으로 확인됐다.
+### 4. Runtime Demo 정책 실행 검사
 
-따라서 이 기록은 Gradle 전체 앱 빌드 성공을 주장하지 않는다. 대신 이 환경에서 가능한 소스 정적 검사, Runtime 계약 일치, AIDL/Java 컴파일, Android 리소스 링크, 저장소 회귀 테스트 79개 실행, 독립 Kotlin 정책 실행, Runtime 클라이언트 동작 점검과 배포 ZIP 재검증을 수행했다.
+실제 `RuntimeDemoPolicy.kt`와 최종 `MainActivity.kt`에서 추출한 등록 프레임 소유권·안정화 클래스를 Kotlin/JVM 17로 컴파일했습니다. 실제 Runtime 클라이언트의 `FaceBox.java`, `FaceDetectionParam.java`를 함께 사용했습니다.
+
+실행 결과:
+
+```text
+RUNTIME_DEMO_POLICY_CHECKS_PASSED=39
+```
+
+포함 항목:
+
+- 분석 간격 180ms, 등록 1200ms, 인증 1프레임
+- orientation 8개
+- 라이브니스·눈·선택적 가림·입·나이/성별 옵션
+- Demo 임계값 경계
+- 중앙 정사각형 ROI와 이동 방향 안내
+- yaw·pitch·눈·입·라이브니스 실패 안내
+- 인증에서 등록 전용 눈·입·자세 조건 제외
+- 인증 최소 얼굴 면적 3%
+- 가장 큰 얼굴 선택
+- 정확한 해상도 미지원 시 종횡비 우선 fallback과 뒤집힌 동면적 스트림 배제
+- 최고 품질 원본 프레임 소유권 분리
+- 무효 프레임 안정화 초기화
+- 캡처·최종 템플릿 메모리 정리
+
+### 5. Runtime IPC 계약 대조
+
+앱 `runtime-client`와 첨부 Runtime 프로젝트 `client`의 다음 파일을 바이트 단위로 대조합니다.
+
+- AIDL 3개
+- `FFacioFaceParcel.java`
+- `FFacioOptionsParcel.java`
+- `FaceBox.java`
+- `FaceDetectionParam.java`
+
+차이가 있으면 최종 패키징 검증이 실패하도록 별도 대조 스크립트에서 검사합니다.
+
+### 6. 회귀 테스트 인벤토리
+
+JUnit 테스트 소스에 `@Test` 89개가 있으며 정적 감사가 89개 미만으로 줄어들면 실패합니다. 새 테스트에는 Demo orientation·등록 임계값·인증 조건 분리·정사각형 ROI·최적 원본 프레임 소유권과 메모리 정리가 포함됩니다.
+
+이 환경에서는 Gradle/JUnit 의존성을 모두 확보하지 못했으므로 89개 전체를 Gradle로 실행했다고 주장하지 않습니다. 대신 핵심 실제 정책 코드는 위 39개 독립 실행 검사를 통과했습니다.
+
+## 수정 중 발견해 해결한 차이
+
+- CameraX 수동 NV21 재조립과 Demo Fotoapparat NV21 입력 차이
+- 전면 회전·미러링 처리 경로 차이
+- Demo의 중앙 ROI는 세로로 긴 영역이 아니라 oriented frame 폭 2/3의 정사각형이라는 차이
+- FFacio가 매 유효 프레임마다 템플릿을 추출하던 차이
+- Demo는 안정화 구간의 최고 품질 원본 프레임을 최종 재검사한 뒤 한 번만 추출한다는 차이
+- 일부 기존 사용자 비교 실패가 전체 등록을 실패시키던 문제
+- 유사 얼굴을 강제 차단하던 문제
+- 저장 실패·취소·화면 종료 시 프레임 또는 템플릿 소유권 정리 문제
+- 손상된 사용자 한 명이 전체 저장소 로딩에 영향을 줄 수 있던 문제
+
+## 환경상 제외한 검사
+
+`android/gradlew`는 Gradle 8.13 배포본을 `services.gradle.org`에서 받아야 하지만 현재 실행 환경의 DNS/다운로드 경로로 배포본을 확보하지 못했습니다. 따라서 다음 항목은 완료됐다고 표시하지 않습니다.
+
+- 전체 `testDebugUnitTest`
+- `lintDebug`
+- `assembleDebug`
+- 실제 ARM 기기 카메라·Runtime 통합 실행
+
+최종 ZIP에는 빌드 성공을 암시하는 APK나 조작된 로그를 포함하지 않습니다. 실제 배포 전에는 같은 인증서로 서명한 Runtime APK와 FFacio APK를 ARM Android 기기에 설치해 등록·인증·추적을 확인해야 합니다.
