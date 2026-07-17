@@ -110,14 +110,14 @@ class ApprovalLogTest {
     }
 
     @Test
-    fun relayFailureIsNotRenderedAsSuccessfulApproval() {
+    fun smartThingsFailureIsNotRenderedAsSuccessfulApproval() {
         assertEquals(true, approvalResultSucceeded("승인"))
         assertEquals(true, approvalResultSucceeded("문 열림 요청 완료"))
         assertEquals(false, approvalResultSucceeded("문 제어 실패"))
     }
 
     @Test
-    fun relayPendingIsNotRenderedAsFinalSuccess() {
+    fun smartThingsPendingIsNotRenderedAsFinalSuccess() {
         assertEquals("…", accessFeedbackSymbol(AccessFeedbackKind.DoorPending))
         assertEquals("환영합니다, 민수님", accessFeedbackTitle(AccessFeedback(AccessFeedbackKind.DoorPending, "민수")))
         assertEquals("✓", accessFeedbackSymbol(AccessFeedbackKind.DoorSucceeded))
@@ -137,12 +137,13 @@ class ApprovalLogTest {
     }
 
     @Test
-    fun doorRelayConfiguredRequiresUrlAndToken() {
-        assertEquals(true, doorRelayConfigured("https://relay.example/open", "token"))
-        assertEquals(false, doorRelayConfigured("http://relay.example/open", "token"))
-        assertEquals(false, doorRelayConfigured("not a url", "token"))
-        assertEquals(false, doorRelayConfigured("", "token"))
-        assertEquals(false, doorRelayConfigured("https://relay.example/open", ""))
+    fun smartThingsConfigurationRequiresValidDeviceIdAndToken() {
+        val deviceId = "01234567-89ab-cdef-0123-456789abcdef"
+        assertEquals(true, smartThingsDoorConfigured(deviceId, "token"))
+        assertEquals(false, smartThingsDoorConfigured("https://relay.example/open", "token"))
+        assertEquals(false, smartThingsDoorConfigured("not a device id", "token"))
+        assertEquals(false, smartThingsDoorConfigured("", "token"))
+        assertEquals(false, smartThingsDoorConfigured(deviceId, ""))
     }
 
     @Test

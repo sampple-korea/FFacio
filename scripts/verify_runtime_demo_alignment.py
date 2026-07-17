@@ -116,7 +116,7 @@ def main() -> int:
     print(f"Runtime Demo alignment passed: {len(pairs)} byte-identical IPC files")
     print(f"Fotoapparat SHA-256: {hashlib.sha256(app_aar.read_bytes()).hexdigest()}")
     print(f"Runtime Demo defaults checked: {len(expected_defaults)}")
-    print("Intentional differences: largest-face selection; authentication stability=1 frame")
+    print("Intentional differences: largest-face selection; authentication stability=1 frame; only severe pose blocks; eye/mouth attributes are diagnostic; duplicate enrollment is fail-closed")
     return 0
 
 

@@ -70,7 +70,7 @@ class AuthenticationMatchingTest {
     }
 
     @Test
-    fun enrollmentComparisonFailureDoesNotBlockOtherUsersOrRegistration() {
+    fun enrollmentComparisonRetriesOnceAndCompletesWhenRuntimeRecovers() {
         val probe = runtimeTemplate(10)
         var calls = 0
         val result = findBestEnrollmentDuplicate(
@@ -84,7 +84,31 @@ class AuthenticationMatchingTest {
             threshold = 0.80
         )
 
-        assertEquals("valid", result.userName)
+        assertEquals("broken", result.userName)
+        assertEquals(0, result.failedComparisons)
+        assertTrue(result.comparisonComplete)
+    }
+
+    @Test
+    fun enrollmentFailsClosedWhenExistingTemplateCannotBeCompared() {
+        val probe = runtimeTemplate(10)
+        val wrongSize = UserTemplate(
+            name = "wrong-size",
+            template = ByteArray(64) { 1 },
+            engineId = FACE_ENGINE_ID,
+            templateSize = 64
+        )
+        val result = findBestEnrollmentDuplicate(probe, listOf(wrongSize), ::fakeRuntimeSimilarity)
+        assertFalse(result.comparisonComplete)
+        assertEquals(1, result.failedComparisons)
+    }
+
+    @Test
+    fun enrollmentFailsClosedAfterBothDuplicateComparisonAttemptsFail() {
+        val result = findBestEnrollmentDuplicate(runtimeTemplate(10), listOf(user("same", 10))) { _, _ ->
+            error("binder unavailable")
+        }
+        assertFalse(result.comparisonComplete)
         assertEquals(1, result.failedComparisons)
     }
 
@@ -101,6 +125,13 @@ class AuthenticationMatchingTest {
         assertEquals(null, result.userName)
         assertTrue(result.score < 0.80)
         assertEquals(0, result.failedComparisons)
+    }
+
+    @Test
+    fun authenticationFailsClosedWhenAnyEligibleComparisonFails() {
+        assertTrue(authenticationComparisonComplete(Match(0, 0.9, 0.4, successfulComparisons = 2, failedComparisons = 0)))
+        assertFalse(authenticationComparisonComplete(Match(0, 0.9, 0.4, successfulComparisons = 1, failedComparisons = 1)))
+        assertFalse(authenticationComparisonComplete(Match(-1, -1.0, -1.0, successfulComparisons = 0, failedComparisons = 0)))
     }
 
     @Test
@@ -146,6 +177,18 @@ class AuthenticationMatchingTest {
     }
 
     @Test
+    fun authenticationCountsTemplateSizeMismatchAsFailure() {
+        val result = match(
+            runtimeTemplate(10),
+            listOf(UserTemplate("wrong-size", ByteArray(64), FACE_ENGINE_ID, 64)),
+            ::fakeRuntimeSimilarity
+        )
+        assertEquals(0, result.successfulComparisons)
+        assertEquals(1, result.failedComparisons)
+        assertFalse(authenticationComparisonComplete(result))
+    }
+
+    @Test
     fun exactThresholdAndMarginAreAccepted() {
         assertTrue(acceptsAuthenticationCandidate(score = 0.80, secondScore = 0.77))
     }
@@ -172,4 +215,49 @@ class AuthenticationMatchingTest {
 
     private fun fakeRuntimeSimilarity(first: ByteArray, second: ByteArray): Double =
         1.0 - abs((first[0].toInt() and 0xff) - (second[0].toInt() and 0xff)) / 100.0
+    @Test
+    fun userNamesAreNormalizedValidatedAndUnique() {
+        val existing = listOf(compatibleUser("홍  길동"))
+        assertEquals("홍 길동", normalizeUserName("  홍   길동  "))
+        assertTrue(userNameValid("홍 길동"))
+        assertFalse(userNameValid(""))
+        assertFalse(userNameValid("bad\u0000name"))
+        assertFalse(userNameValid("가".repeat(MAX_USER_NAME_LENGTH + 1)))
+        assertTrue(registeredNameExists(" 홍 길동 ", existing))
+        assertFalse(registeredNameExists("다른 사람", existing))
+    }
+
+
+    @Test
+    fun comparisonScoresOutsideUnitRangeFailClosed() {
+        val probe = testTemplate(10)
+        val users = listOf(testUser("candidate", 10))
+
+        val aboveOne = match(probe, users) { _, _ -> 1.01 }
+        assertEquals(0, aboveOne.successfulComparisons)
+        assertEquals(1, aboveOne.failedComparisons)
+        assertFalse(authenticationComparisonComplete(aboveOne))
+        assertFalse(acceptsAuthenticationCandidate(1.01, -1.0))
+
+        val belowZero = match(probe, users) { _, _ -> -0.01 }
+        assertEquals(0, belowZero.successfulComparisons)
+        assertEquals(1, belowZero.failedComparisons)
+        assertFalse(authenticationComparisonComplete(belowZero))
+        assertFalse(acceptsAuthenticationCandidate(-0.01, -1.0))
+    }
+
+    @Test
+    fun duplicateComparisonOutsideUnitRangeIsRetriedThenBlocksSave() {
+        val probe = testTemplate(10)
+        var calls = 0
+        val result = findBestEnrollmentDuplicate(
+            template = probe,
+            users = listOf(testUser("candidate", 10)),
+            comparator = { _, _ -> calls += 1; 1.2 }
+        )
+        assertEquals(2, calls)
+        assertFalse(result.comparisonComplete)
+        assertEquals(1, result.failedComparisons)
+    }
+
 }

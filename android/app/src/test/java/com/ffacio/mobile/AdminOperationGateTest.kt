@@ -46,12 +46,19 @@ class AdminOperationGateTest {
         assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.ResetStore, listOf(headAdmin)))
         assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.ArmDoor, listOf(headAdmin)))
         assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.DisarmDoor, listOf(headAdmin)))
-        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.UnlockDoor, listOf(headAdmin)))
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.UnlockSmartThingsToken, listOf(headAdmin)))
         assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.UnlockStore, listOf(headAdmin)))
-        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.TestDoorRelay, listOf(headAdmin)))
+        assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.TestSmartThingsDoor, listOf(headAdmin)))
         assertTrue(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.SetPassiveLiveness, listOf(headAdmin)))
         assertFalse(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.SetHeadAdmin, listOf(headAdmin)))
         assertFalse(canAuthorizeAdminActionWithHeadAdminFace(AdminAction.ClearHeadAdmin, listOf(headAdmin)))
+        assertFalse(
+            canAuthorizeAdminActionWithHeadAdminFace(
+                AdminAction.OpenAdmin,
+                listOf(headAdmin),
+                passiveLivenessEnabled = false
+            )
+        )
     }
 
     @Test
@@ -66,7 +73,7 @@ class AdminOperationGateTest {
         assertFalse(requiresAndroidLockForAdminAction(AdminAction.StartEnroll, listOf(headAdmin)))
         assertFalse(requiresAndroidLockForAdminAction(AdminAction.ResetStore, listOf(headAdmin)))
         assertFalse(requiresAndroidLockForAdminAction(AdminAction.DisarmDoor, listOf(headAdmin)))
-        assertFalse(requiresAndroidLockForAdminAction(AdminAction.TestDoorRelay, listOf(headAdmin)))
+        assertFalse(requiresAndroidLockForAdminAction(AdminAction.TestSmartThingsDoor, listOf(headAdmin)))
         assertFalse(requiresAndroidLockForAdminAction(AdminAction.SetPassiveLiveness, listOf(headAdmin)))
         assertTrue(requiresAndroidLockForAdminAction(AdminAction.SetHeadAdmin, listOf(headAdmin)))
         assertTrue(requiresAndroidLockForAdminAction(AdminAction.ClearHeadAdmin, listOf(headAdmin)))
@@ -80,7 +87,7 @@ class AdminOperationGateTest {
         assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.ResetStore, isAdminScreen = true))
         assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.ArmDoor, isAdminScreen = true))
         assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.DisarmDoor, isAdminScreen = true))
-        assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.TestDoorRelay, isAdminScreen = true))
+        assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.TestSmartThingsDoor, isAdminScreen = true))
         assertTrue(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.SetPassiveLiveness, isAdminScreen = true))
         assertFalse(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.SetHeadAdmin, isAdminScreen = true))
         assertFalse(shouldRunAdminActionImmediatelyInAdminSession(AdminAction.ClearHeadAdmin, isAdminScreen = true))
@@ -142,6 +149,21 @@ class AdminOperationGateTest {
         assertEquals(320.0f, fallback.centerX, 0.01f)
         assertEquals(240.0f, fallback.centerY, 0.01f)
         assertEquals(260.0f, fallback.sizePx, 0.01f)
+    }
+
+    @Test
+    fun previewRectangleUsesCenterCropCoordinatesAndClipsToViewport() {
+        val rect = faceRectInPreview(
+            bounds = FaceBounds(80f, 120f, 160f, 200f, 640f, 480f),
+            containerWidth = 1080f,
+            containerHeight = 1080f
+        )!!
+        // 640x480 center-crops to a square at scale 2.25, with -180 horizontal offset.
+        assertEquals(0f, rect.left, 0.01f)
+        assertEquals(270f, rect.top, 0.01f)
+        assertEquals(360f, rect.right, 0.01f)
+        assertEquals(720f, rect.bottom, 0.01f)
+        assertNull(faceRectInPreview(null, 1080f, 1080f))
     }
 
     @Test

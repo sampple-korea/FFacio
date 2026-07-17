@@ -1,6 +1,19 @@
 # FFacio Android Release Notes
 
-## Android 0.8.1-runtime-demo-parity-ios
+> 아래 항목은 버전별 역사 기록입니다. 과거의 임의 HTTPS relay 연동은 0.8.2에서 제거됐으며, 현재 구현은 SmartThings 공식 `lock` capability의 상태·명령 API만 사용합니다.
+
+## Android 0.8.2-secure-smartthings-tracking
+
+- Restores fail-closed duplicate-face blocking across every stored Runtime template, including one retry for transient Binder failures and rejection on incomplete comparisons.
+- Adds a CenterCrop-correct live face rectangle while retaining the Face ID-style guide ring; camera-area guidance text is no longer duplicated.
+- Keeps eye and mouth attributes diagnostic-only, while rejecting only clearly severe yaw, pitch, or roll during enrollment and authentication.
+- Replaces the arbitrary relay URL/token contract with fixed SmartThings device status and command endpoints, Bearer authentication, the production `lock` capability, and the `unlock` command payload.
+- Validates SmartThings capability access before arming, encrypts the token with Android Keystore, disables cleartext traffic and redirects, caps response size, and fails closed on liveness or incomplete template comparison.
+- Restores fail-closed duplicate-face registration, case-insensitive unique display names, live CenterCrop face-box tracking, severe-pose rejection, and removes duplicate guidance text from the enabled camera preview.
+- Rejects Runtime probability/similarity values outside 0.0..1.0, binds AES-GCM ciphertext to its preference key with AAD, validates SmartThings token/header input, and rolls back partially persisted door credentials.
+- Bumps the biometric policy and user schema to 8 so prior templates and settings cannot silently mix with the restored security policy.
+
+## Android 0.7.1-runtime-demo-parity-ios
 
 - Replaces the CameraX YUV_420_888 plane conversion with the exact Fotoapparat 2.7.0 NV21 camera path used by the Runtime Demo.
 - Uses the Demo front-camera EXIF orientation and mirror mapping, 1280×720 enrollment request, 640×480 balanced authentication request, and CenterCrop preview coordinates.

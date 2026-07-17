@@ -9,9 +9,10 @@ import kotlin.math.max
  * Single source of truth for the Runtime Demo-compatible camera and face policy.
  *
  * Keep these values aligned with Runtime Demo DemoSettings/RegistrationPipeline/CameraActivityKt.
- * FFacio intentionally differs only in two requested places:
- * 1) the largest face is selected when several faces are visible;
- * 2) authentication accepts one stable frame.
+ * FFacio keeps the Runtime Demo camera/options/template flow, while applying the product
+ * requirements that are unsafe or impractical to copy literally: the largest face is selected,
+ * authentication accepts one stable frame, unreliable eye/mouth attributes never block, and only
+ * clearly severe head rotation is rejected.
  */
 internal const val ANALYSIS_INTERVAL_MS = 180L
 internal const val DEMO_CAPTURE_FRAME_WIDTH = 1280
@@ -20,12 +21,12 @@ internal const val DEMO_IDENTIFICATION_FRAME_WIDTH = 640
 internal const val DEMO_IDENTIFICATION_FRAME_HEIGHT = 480
 internal const val ANTISPOOF_THRESHOLD = 0.70f
 internal const val RUNTIME_QUALITY_THRESHOLD = 0.50f
-internal const val RUNTIME_EYE_CLOSED_THRESHOLD = 0.80f
 internal const val RUNTIME_OCCLUSION_THRESHOLD = 0.50f
-internal const val RUNTIME_MOUTH_OPEN_THRESHOLD = 0.50f
-internal const val RUNTIME_MAX_YAW = 10.0f
-internal const val RUNTIME_MAX_PITCH = 10.0f
-internal const val RUNTIME_MAX_ROLL = 10.0f
+// The Demo exposes 10-degree pose settings, but those values caused false rejection on this
+// camera/runtime combination. Pose is still enforced fail-closed at deliberately severe angles.
+internal const val RUNTIME_SEVERE_MAX_YAW = 35.0f
+internal const val RUNTIME_SEVERE_MAX_PITCH = 30.0f
+internal const val RUNTIME_SEVERE_MAX_ROLL = 30.0f
 internal const val RUNTIME_LUMINANCE_MIN = 0.0f
 internal const val RUNTIME_LUMINANCE_MAX = 255.0f
 internal const val RUNTIME_MIN_FACE_SIZE = 80
@@ -34,6 +35,9 @@ internal const val RUNTIME_MIN_FACE_AREA_RATIO = 0.03
 internal const val ENROLL_AUTO_CAPTURE_STABLE_MS = 1200L
 internal const val AUTH_STABLE_FRAMES = 1
 internal const val RUNTIME_LANDMARK_VALUE_COUNT = 136
+
+internal fun runtimeUnitScoreValid(value: Float): Boolean =
+    value.isFinite() && value in 0.0f..1.0f
 
 /**
  * Selects a safe fallback when the exact Runtime Demo preview size is unavailable.
@@ -139,7 +143,7 @@ internal fun evaluateRuntimeDemoFace(
         runtimeDemoCenterGuidance(face, frameWidth, frameHeight)?.let { guidance ->
             return RuntimeDemoFaceDecision(false, guidance)
         }
-        if (!face.face_quality.isFinite() || face.face_quality < RUNTIME_QUALITY_THRESHOLD) {
+        if (!runtimeUnitScoreValid(face.face_quality) || face.face_quality < RUNTIME_QUALITY_THRESHOLD) {
             return RuntimeDemoFaceDecision(false, "얼굴이 흐리거나 조건이 좋지 않습니다. 흔들림을 줄이고 선명하게 촬영하세요")
         }
         if (!face.face_luminance.isFinite() ||
@@ -154,41 +158,19 @@ internal fun evaluateRuntimeDemoFace(
                 }
             )
         }
-        if (!face.yaw.isFinite() || kotlin.math.abs(face.yaw) > RUNTIME_MAX_YAW) {
-            return RuntimeDemoFaceDecision(
-                false,
-                if (face.yaw.isFinite() && face.yaw > 0f) {
-                    "얼굴을 왼쪽으로 돌려 정면을 맞춰 주세요"
-                } else {
-                    "얼굴을 오른쪽으로 돌려 정면을 맞춰 주세요"
-                }
-            )
+        severePoseGuidance(face)?.let { guidance ->
+            return RuntimeDemoFaceDecision(false, guidance)
         }
-        if (!face.pitch.isFinite() || kotlin.math.abs(face.pitch) > RUNTIME_MAX_PITCH) {
-            return RuntimeDemoFaceDecision(
-                false,
-                if (face.pitch.isFinite() && face.pitch > 0f) "고개를 조금 들어 주세요" else "고개를 조금 내려 주세요"
-            )
-        }
-        if (!face.roll.isFinite() || kotlin.math.abs(face.roll) > RUNTIME_MAX_ROLL) {
-            return RuntimeDemoFaceDecision(false, "고개 기울기를 바로잡아 수평을 맞춰 주세요")
-        }
-        if (!face.left_eye_closed.isFinite() || face.left_eye_closed > RUNTIME_EYE_CLOSED_THRESHOLD) {
-            return RuntimeDemoFaceDecision(false, "왼쪽 눈을 떠 주세요")
-        }
-        if (!face.right_eye_closed.isFinite() || face.right_eye_closed > RUNTIME_EYE_CLOSED_THRESHOLD) {
-            return RuntimeDemoFaceDecision(false, "오른쪽 눈을 떠 주세요")
-        }
+        // Runtime eye/mouth probabilities are retained for diagnostics but are intentionally not
+        // registration gates. They produced repeated false "open your eyes" failures even when the
+        // Demo camera feed itself was healthy.
         if (occlusionCheckEnabled &&
-            (!face.face_occlusion.isFinite() || face.face_occlusion > RUNTIME_OCCLUSION_THRESHOLD)
+            (!runtimeUnitScoreValid(face.face_occlusion) || face.face_occlusion > RUNTIME_OCCLUSION_THRESHOLD)
         ) {
             return RuntimeDemoFaceDecision(false, "얼굴을 가리는 물체를 치워 주세요")
         }
-        if (!face.mouth_opened.isFinite() || face.mouth_opened > RUNTIME_MOUTH_OPEN_THRESHOLD) {
-            return RuntimeDemoFaceDecision(false, "입을 다물어 주세요")
-        }
         if (passiveLivenessEnabled &&
-            (!face.liveness.isFinite() || face.liveness < ANTISPOOF_THRESHOLD)
+            (!runtimeUnitScoreValid(face.liveness) || face.liveness < ANTISPOOF_THRESHOLD)
         ) {
             return RuntimeDemoFaceDecision(
                 accepted = false,
@@ -198,9 +180,9 @@ internal fun evaluateRuntimeDemoFace(
             )
         }
     } else {
-        // CameraActivityKt authentication policy: liveness, quality and area only.
+        // Runtime Demo authentication gates plus FFacio severe-pose and optional-occlusion safety checks.
         if (passiveLivenessEnabled &&
-            (!face.liveness.isFinite() || face.liveness < ANTISPOOF_THRESHOLD)
+            (!runtimeUnitScoreValid(face.liveness) || face.liveness < ANTISPOOF_THRESHOLD)
         ) {
             return RuntimeDemoFaceDecision(
                 accepted = false,
@@ -209,11 +191,19 @@ internal fun evaluateRuntimeDemoFace(
                 liveState = "runtime_rejected"
             )
         }
-        if (!face.face_quality.isFinite() || face.face_quality < RUNTIME_QUALITY_THRESHOLD) {
+        if (!runtimeUnitScoreValid(face.face_quality) || face.face_quality < RUNTIME_QUALITY_THRESHOLD) {
             return RuntimeDemoFaceDecision(false, "얼굴 품질이 낮습니다. 조명과 초점을 맞춰 주세요")
         }
         if (faceAreaRatio < RUNTIME_MIN_FACE_AREA_RATIO) {
             return RuntimeDemoFaceDecision(false, "조금 더 가까이 와 주세요")
+        }
+        severePoseGuidance(face)?.let { guidance ->
+            return RuntimeDemoFaceDecision(false, guidance)
+        }
+        if (occlusionCheckEnabled &&
+            (!runtimeUnitScoreValid(face.face_occlusion) || face.face_occlusion > RUNTIME_OCCLUSION_THRESHOLD)
+        ) {
+            return RuntimeDemoFaceDecision(false, "얼굴을 가리는 물체를 치워 주세요")
         }
     }
     return RuntimeDemoFaceDecision(
@@ -222,6 +212,22 @@ internal fun evaluateRuntimeDemoFace(
         liveScore = if (passiveLivenessEnabled) face.liveness else 1f,
         liveState = if (passiveLivenessEnabled) "runtime_live" else "disabled"
     )
+}
+
+internal fun severePoseGuidance(face: FaceBox): String? {
+    if (!face.yaw.isFinite() || !face.pitch.isFinite() || !face.roll.isFinite()) {
+        return "얼굴 방향을 안정적으로 확인하지 못했습니다"
+    }
+    if (abs(face.yaw) > RUNTIME_SEVERE_MAX_YAW) {
+        return "고개가 너무 돌아가 있습니다. 얼굴을 정면으로 맞춰 주세요"
+    }
+    if (abs(face.pitch) > RUNTIME_SEVERE_MAX_PITCH) {
+        return "고개가 너무 숙여지거나 들려 있습니다. 얼굴을 정면으로 맞춰 주세요"
+    }
+    if (abs(face.roll) > RUNTIME_SEVERE_MAX_ROLL) {
+        return "고개가 너무 기울어져 있습니다. 얼굴을 수평으로 맞춰 주세요"
+    }
+    return null
 }
 
 internal fun runtimeDemoCenterGuidance(face: FaceBox, frameWidth: Int, frameHeight: Int): String? {

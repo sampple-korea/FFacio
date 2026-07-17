@@ -46,53 +46,44 @@ class RuntimeDemoAlignmentTest {
     }
 
     @Test
-    fun enrollmentUsesDemoPoseAndEyeThresholds() {
-        val turned = evaluateRuntimeDemoFace(
-            face = validFace().apply { yaw = 10.01f },
-            frameWidth = 640,
-            frameHeight = 480,
-            enrollmentMode = true,
-            passiveLivenessEnabled = true,
-            occlusionCheckEnabled = false
-        )
-        assertFalse(turned.accepted)
-        assertEquals("얼굴을 왼쪽으로 돌려 정면을 맞춰 주세요", turned.message)
-
-        val closedEye = evaluateRuntimeDemoFace(
-            face = validFace().apply { left_eye_closed = 0.81f },
-            frameWidth = 640,
-            frameHeight = 480,
-            enrollmentMode = true,
-            passiveLivenessEnabled = true,
-            occlusionCheckEnabled = false
-        )
-        assertFalse(closedEye.accepted)
-        assertEquals("왼쪽 눈을 떠 주세요", closedEye.message)
-    }
-
-    @Test
-    fun authenticationMatchesDemoAndDoesNotGateOnPoseEyesOrMouth() {
+    fun moderatePoseAndEyeMouthAttributesDoNotFalseRejectEnrollment() {
         val decision = evaluateRuntimeDemoFace(
             face = validFace().apply {
-                yaw = 80f
-                pitch = -70f
-                roll = 50f
+                yaw = 20f
+                pitch = -15f
+                roll = 18f
                 left_eye_closed = 1f
                 right_eye_closed = 1f
                 mouth_opened = 1f
             },
             frameWidth = 640,
             frameHeight = 480,
-            enrollmentMode = false,
+            enrollmentMode = true,
             passiveLivenessEnabled = true,
-            occlusionCheckEnabled = true
+            occlusionCheckEnabled = false
         )
-
         assertTrue(decision.accepted)
     }
 
     @Test
-    fun authenticationUsesDemoLivenessQualityAndAreaOnly() {
+    fun clearlySevereHeadRotationIsRejectedForEnrollmentAndAuthentication() {
+        val enrollment = evaluateRuntimeDemoFace(
+            validFace().apply { yaw = RUNTIME_SEVERE_MAX_YAW + 0.1f }, 640, 480,
+            enrollmentMode = true, passiveLivenessEnabled = true, occlusionCheckEnabled = false
+        )
+        assertFalse(enrollment.accepted)
+        assertTrue(enrollment.message.contains("너무 돌아가"))
+
+        val authentication = evaluateRuntimeDemoFace(
+            validFace().apply { roll = RUNTIME_SEVERE_MAX_ROLL + 0.1f }, 640, 480,
+            enrollmentMode = false, passiveLivenessEnabled = true, occlusionCheckEnabled = false
+        )
+        assertFalse(authentication.accepted)
+        assertTrue(authentication.message.contains("너무 기울어"))
+    }
+
+    @Test
+    fun authenticationUsesDemoCoreGatesPlusSeverePoseSafety() {
         val spoof = evaluateRuntimeDemoFace(
             validFace().apply { liveness = 0.69f }, 640, 480,
             enrollmentMode = false, passiveLivenessEnabled = true, occlusionCheckEnabled = false
@@ -174,4 +165,21 @@ class RuntimeDemoAlignmentTest {
         mouth_opened = 0.1f
         liveness = 0.95f
     }
+
+    @Test
+    fun runtimeProbabilityScoresOutsideUnitRangeAreRejected() {
+        assertFalse(runtimeUnitScoreValid(Float.NaN))
+        assertFalse(runtimeUnitScoreValid(-0.01f))
+        assertFalse(runtimeUnitScoreValid(1.01f))
+        assertTrue(runtimeUnitScoreValid(0.0f))
+        assertTrue(runtimeUnitScoreValid(1.0f))
+
+        val badLiveness = validFace().apply { liveness = 1.01f }
+        assertFalse(evaluateRuntimeDemoFace(badLiveness, 640, 480, false, true, false).accepted)
+        val badQuality = validFace().apply { face_quality = 1.01f }
+        assertFalse(evaluateRuntimeDemoFace(badQuality, 640, 480, false, true, false).accepted)
+        val badOcclusion = validFace().apply { face_occlusion = 1.01f }
+        assertFalse(evaluateRuntimeDemoFace(badOcclusion, 640, 480, false, true, true).accepted)
+    }
+
 }

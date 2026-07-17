@@ -43,9 +43,9 @@ REQUIRED_MAIN_MARKERS = (
     "withTimeout(RUNTIME_DECISION_TIMEOUT_MS)",
     "RUNTIME_DECISION_STALL_RECOVERY_MS",
     "runtimeDecisionToken",
-    "USER_STORE_SCHEMA_VERSION = 7",
-    "USER_STORE_POLICY_VERSION = 7",
-    'FACE_ENGINE_ID = "ffacio.runtime.demo.camera.v3"',
+    "USER_STORE_SCHEMA_VERSION = 8",
+    "USER_STORE_POLICY_VERSION = 8",
+    'FACE_ENGINE_ID = "ffacio.runtime.demo.camera.v4"',
     "resetLegacyUserStoreForSingleTemplatePolicy",
     ".putBoolean(PASSIVE_LIVENESS_ENABLED_KEY, true)",
     ".putInt(RUNTIME_LIVENESS_LEVEL_KEY, 0)",
@@ -53,6 +53,29 @@ REQUIRED_MAIN_MARKERS = (
     "users.indices.filter { index -> users[index].isCompatible() }",
     "largestRuntimeFace",
     "findBestEnrollmentDuplicate",
+    "duplicateCheckComplete",
+    "registeredNameExists",
+    "userNameValid",
+    "Duplicate user name",
+    "authenticationComparisonComplete",
+    "runtimeSimilarityScoreValid",
+    "canIssueSmartThingsUnlock",
+    "canAuthorizeAdminActionWithHeadAdminFace(action, users, passiveLivenessEnabled)",
+    "TrackedFaceBoxOverlay",
+    "faceRectInPreview",
+    "smartThingsCommandsUrl",
+    "smartThingsAccessTokenValid",
+    "SMARTTHINGS_MAX_TOKEN_LENGTH",
+    "smartThingsStatusUrl",
+    '"capability":"lock"',
+    '"command":"unlock"',
+    "instanceFollowRedirects = false",
+    "SMARTTHINGS_MAX_RESPONSE_BYTES",
+    'setRequestProperty("Authorization", "Bearer ${token.trim()}")',
+    "checkSmartThingsDoorAccess",
+    "SMARTTHINGS_CONFIG_VERSION = 2",
+    "disableSmartThingsDoorPersisted",
+    "clearPersistedSmartThingsCredentials",
     "ownedTemplates.forEach { it.fill(0) }",
     "EnrollmentStabilityTracker",
     "RuntimeEnrollmentCapture",
@@ -64,6 +87,9 @@ REQUIRED_MAIN_MARKERS = (
     "SystemClock.elapsedRealtime()",
     "CoroutineStart.UNDISPATCHED",
     "persistenceSnapshot.wipeTemplates()",
+    "cipher.updateAAD(associatedData)",
+    "plainText.fill(0)",
+    "require(user.isCompatible())",
     "array.optJSONObject(i) ?: continue",
     "users.forEach { it.wipe() }",
 )
@@ -75,13 +101,13 @@ REQUIRED_POLICY_MARKERS = (
     "DEMO_IDENTIFICATION_FRAME_WIDTH = 640",
     "DEMO_IDENTIFICATION_FRAME_HEIGHT = 480",
     "ANTISPOOF_THRESHOLD = 0.70f",
+    "runtimeUnitScoreValid",
     "RUNTIME_QUALITY_THRESHOLD = 0.50f",
-    "RUNTIME_EYE_CLOSED_THRESHOLD = 0.80f",
     "RUNTIME_OCCLUSION_THRESHOLD = 0.50f",
-    "RUNTIME_MOUTH_OPEN_THRESHOLD = 0.50f",
-    "RUNTIME_MAX_YAW = 10.0f",
-    "RUNTIME_MAX_PITCH = 10.0f",
-    "RUNTIME_MAX_ROLL = 10.0f",
+    "RUNTIME_SEVERE_MAX_YAW = 35.0f",
+    "RUNTIME_SEVERE_MAX_PITCH = 30.0f",
+    "RUNTIME_SEVERE_MAX_ROLL = 30.0f",
+    "severePoseGuidance",
     "RUNTIME_MIN_FACE_SIZE = 80",
     "RUNTIME_MAX_FACE_SIZE = 1200",
     "RUNTIME_MIN_FACE_AREA_RATIO = 0.03",
@@ -110,6 +136,9 @@ OBSOLETE_ENROLLMENT_MARKERS = (
     "availableSamples",
     "좌우 얼굴 돌리기",
     "다각도",
+    "doorRelayConfigured",
+    "doorRelayHealthCheckUrl",
+    "doorRelayPayloadJson",
 )
 
 SECRET_PATTERNS = (
@@ -233,8 +262,17 @@ def main() -> int:
         if marker in main_text:
             fail(f"retired enrollment/authentication logic remains: {marker}")
 
+    camera_stage_start = main_text.index("private fun CameraStage(")
+    camera_stage_end = main_text.index("private fun TrackedFaceBoxOverlay(", camera_stage_start)
+    camera_stage_text = main_text[camera_stage_start:camera_stage_end]
+    for duplicate_message in ('if (isEnrollmentMode) "얼굴 등록" else "얼굴 인증"', '"Head Admin 인증 중"'):
+        if duplicate_message in camera_stage_text:
+            fail(f"duplicate guidance remains inside enabled camera stage: {duplicate_message}")
+    if camera_stage_text.count("Text(\n                stageMessage") != 1 or "if (!enabled)" not in camera_stage_text:
+        fail("camera stage fallback message is not restricted to the disabled-camera state")
+
     app_gradle_text = read(APP_GRADLE)
-    for marker in ('versionCode 35', 'versionName "0.8.1-runtime-demo-parity-ios"'):
+    for marker in ('versionCode 36', 'versionName "0.8.2-secure-smartthings-tracking"'):
         if marker not in app_gradle_text:
             fail(f"expected final app version marker missing: {marker}")
     for marker in ("androidx.camera", "ImageProxy", "imageProxyToNv21", "ProcessCameraProvider", "PreviewView"):
@@ -300,8 +338,8 @@ def main() -> int:
 
     test_files = [p for p in ROOT.rglob("*Test.kt") if p.is_file() and not is_excluded(p)]
     test_count = sum(read(path).count("@Test") for path in test_files)
-    if test_count < 89:
-        fail(f"regression test inventory shrank unexpectedly: {test_count} < 89")
+    if test_count < 102:
+        fail(f"regression test inventory shrank unexpectedly: {test_count} < 102")
 
     digest = hashlib.sha256(MAIN.read_bytes()).hexdigest()
     print(f"Source audit passed: {len(source_files)} Kotlin/Java/Gradle files, MainActivity SHA-256 {digest}")
