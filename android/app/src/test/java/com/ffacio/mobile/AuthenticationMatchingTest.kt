@@ -105,9 +105,11 @@ class AuthenticationMatchingTest {
 
     @Test
     fun enrollmentFailsClosedAfterBothDuplicateComparisonAttemptsFail() {
-        val result = findBestEnrollmentDuplicate(runtimeTemplate(10), listOf(user("same", 10))) { _, _ ->
-            error("binder unavailable")
-        }
+        val result = findBestEnrollmentDuplicate(
+            runtimeTemplate(10),
+            listOf(user("same", 10)),
+            comparator = { _, _ -> error("binder unavailable") }
+        )
         assertFalse(result.comparisonComplete)
         assertEquals(1, result.failedComparisons)
     }
@@ -217,7 +219,7 @@ class AuthenticationMatchingTest {
         1.0 - abs((first[0].toInt() and 0xff) - (second[0].toInt() and 0xff)) / 100.0
     @Test
     fun userNamesAreNormalizedValidatedAndUnique() {
-        val existing = listOf(compatibleUser("홍  길동"))
+        val existing = listOf(user("홍  길동", 10))
         assertEquals("홍 길동", normalizeUserName("  홍   길동  "))
         assertTrue(userNameValid("홍 길동"))
         assertFalse(userNameValid(""))
@@ -230,8 +232,8 @@ class AuthenticationMatchingTest {
 
     @Test
     fun comparisonScoresOutsideUnitRangeFailClosed() {
-        val probe = testTemplate(10)
-        val users = listOf(testUser("candidate", 10))
+        val probe = runtimeTemplate(10)
+        val users = listOf(user("candidate", 10))
 
         val aboveOne = match(probe, users) { _, _ -> 1.01 }
         assertEquals(0, aboveOne.successfulComparisons)
@@ -248,11 +250,11 @@ class AuthenticationMatchingTest {
 
     @Test
     fun duplicateComparisonOutsideUnitRangeIsRetriedThenBlocksSave() {
-        val probe = testTemplate(10)
+        val probe = runtimeTemplate(10)
         var calls = 0
         val result = findBestEnrollmentDuplicate(
             template = probe,
-            users = listOf(testUser("candidate", 10)),
+            users = listOf(user("candidate", 10)),
             comparator = { _, _ -> calls += 1; 1.2 }
         )
         assertEquals(2, calls)
