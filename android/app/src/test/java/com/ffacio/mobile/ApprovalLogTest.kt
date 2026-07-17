@@ -137,14 +137,15 @@ class ApprovalLogTest {
     }
 
     @Test
-    fun smartThingsConfigurationRequiresValidDeviceIdAndToken() {
+    fun itsokeyConfigurationRequiresValidDeviceIdAndRuntimeService() {
         val deviceId = "01234567-89ab-cdef-0123-456789abcdef"
-        val accessToken = "0123456789abcdef0123456789abcdef"
-        assertEquals(true, smartThingsDoorConfigured(deviceId, accessToken))
-        assertEquals(false, smartThingsDoorConfigured("https://relay.example/open", accessToken))
-        assertEquals(false, smartThingsDoorConfigured("not a device id", accessToken))
-        assertEquals(false, smartThingsDoorConfigured("", accessToken))
+        val runtimeService = "itsokey-runtime-service"
+        assertEquals(true, smartThingsDoorConfigured(deviceId, runtimeService))
+        assertEquals(false, smartThingsDoorConfigured("https://relay.example/open", runtimeService))
+        assertEquals(false, smartThingsDoorConfigured("not a device id", runtimeService))
+        assertEquals(false, smartThingsDoorConfigured("", runtimeService))
         assertEquals(false, smartThingsDoorConfigured(deviceId, ""))
+        assertEquals(false, smartThingsDoorConfigured(deviceId, "0123456789abcdef0123456789abcdef"))
     }
 
     @Test
