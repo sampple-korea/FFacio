@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="io.ffacio.itsokeyruntime.permission.BIND_RUNTIME" />
+    <queries>
+        <package android:name="io.ffacio.itsokeyruntime" />
+        <intent>
+            <action android:name="io.ffacio.itsokeyruntime.action.BIND" />
+        </intent>
+        <intent>
+            <action android:name="io.ffacio.itsokeyruntime.action.LOGIN" />
+        </intent>
+    </queries>
+</manifest>

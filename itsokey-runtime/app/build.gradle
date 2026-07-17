@@ -1,0 +1,65 @@
+plugins { id "com.android.application" }
+
+def releaseStorePath = providers.gradleProperty("ffacioStoreFile").orNull ?:
+    System.getenv("FFACIO_ANDROID_KEYSTORE") ?:
+    System.getenv("FFACIO_KEYSTORE_PATH")
+def releaseStorePassword = providers.gradleProperty("ffacioStorePassword").orNull ?:
+    System.getenv("FFACIO_ANDROID_KEYSTORE_PASSWORD") ?:
+    System.getenv("FFACIO_KEYSTORE_PASSWORD")
+def releaseKeyAlias = providers.gradleProperty("ffacioKeyAlias").orNull ?:
+    System.getenv("FFACIO_ANDROID_KEY_ALIAS") ?:
+    System.getenv("FFACIO_KEY_ALIAS")
+def releaseKeyPassword = providers.gradleProperty("ffacioKeyPassword").orNull ?:
+    System.getenv("FFACIO_ANDROID_KEY_PASSWORD") ?:
+    System.getenv("FFACIO_KEY_PASSWORD")
+def releaseStoreType = providers.gradleProperty("ffacioStoreType").orNull ?:
+    System.getenv("FFACIO_KEYSTORE_TYPE") ?:
+    "PKCS12"
+def hasReleaseSigning = [releaseStorePath, releaseStorePassword, releaseKeyAlias, releaseKeyPassword]
+    .every { it != null && it.toString().trim() }
+
+android {
+    namespace "io.ffacio.itsokeyruntime"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "io.ffacio.itsokeyruntime"
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseStorePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+                storeType releaseStoreType
+            }
+        }
+    }
+
+    buildFeatures { aidl true }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    testImplementation "junit:junit:4.13.2"
+}

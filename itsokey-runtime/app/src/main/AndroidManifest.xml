@@ -1,0 +1,44 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <permission
+        android:name="io.ffacio.itsokeyruntime.permission.BIND_RUNTIME"
+        android:protectionLevel="signature" />
+
+    <application
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:usesCleartextTraffic="false"
+        android:label="ITSOKEY Runtime"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:name=".LoginActivity"
+            android:exported="true"
+            android:permission="io.ffacio.itsokeyruntime.permission.BIND_RUNTIME"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="io.ffacio.itsokeyruntime.action.LOGIN" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".ItsokeyRuntimeService"
+            android:exported="true"
+            android:permission="io.ffacio.itsokeyruntime.permission.BIND_RUNTIME">
+            <intent-filter>
+                <action android:name="io.ffacio.itsokeyruntime.action.BIND" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

@@ -1,0 +1,73 @@
+name: Build ITSOKEY Runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/android-ci.yml'
+      - 'app/**'
+      - 'runtime-client/**'
+      - 'build.gradle'
+      - 'settings.gradle'
+      - 'gradle.properties'
+      - 'gradle/**'
+      - 'tools/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Verify reconstructed protocol
+        run: python3 tools/verify_source.py
+
+      - name: Unit test and compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon clean \
+            :app:testDebugUnitTest \
+            :runtime-client:assembleRelease \
+            :app:assembleDebug \
+            --stacktrace
+
+      - name: Collect source and compile-test artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/source
+          cp app/build/outputs/apk/debug/app-debug.apk artifacts/ITSOKEY-Runtime-debug.apk
+          find runtime-client/build/outputs/aar -name '*-release.aar' -print -quit | \
+            xargs -I{} cp '{}' artifacts/ITSOKEY-Runtime-client-release.aar
+          rsync -a --exclude '.git' --exclude 'build' --exclude '.gradle' --exclude 'artifacts' ./ artifacts/source/
+          (cd artifacts/source && zip -qr ../ITSOKEY-Runtime-source.zip .)
+          rm -rf artifacts/source
+          (cd artifacts && sha256sum *.apk *.aar *.zip > SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ITSOKEY-Runtime-compile-test
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
