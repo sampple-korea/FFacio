@@ -109,6 +109,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.kbyai.facesdk.FaceBox
 import com.kbyai.facesdk.FaceSDK
 import io.ffacio.sdk.FFacioRuntimeClient
+import io.ffacio.itsokeyruntime.client.ItsokeyRuntimeClient
 import io.fotoapparat.Fotoapparat
 import io.fotoapparat.parameter.Resolution
 import io.fotoapparat.parameter.ScaleType
@@ -118,8 +119,6 @@ import io.fotoapparat.selector.front
 import io.fotoapparat.view.CameraView
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 import java.security.KeyStore
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -150,14 +149,15 @@ private const val SMARTTHINGS_DEVICE_ID_KEY = "smartthings_device_id"
 private const val SMARTTHINGS_ACCESS_TOKEN_KEY = "smartthings_access_token"
 private const val SMARTTHINGS_ENABLED_KEY = "smartthings_enabled"
 private const val SMARTTHINGS_CONFIG_VERSION_KEY = "smartthings_config_version"
-private const val SMARTTHINGS_CONFIG_VERSION = 2
+private const val SMARTTHINGS_CONFIG_VERSION = 3
+private const val ITSOKEY_DEVICE_ID_KEY = "itsokey_device_id"
+private const val ITSOKEY_DEVICE_LABEL_KEY = "itsokey_device_label"
+private const val ITSOKEY_ENABLED_KEY = "itsokey_enabled"
+private const val ITSOKEY_RUNTIME_SENTINEL = "itsokey-runtime-service"
+private const val ITSOKEY_RPC_TIMEOUT_MS = 12_000L
 private const val LEGACY_DOOR_URL_KEY = "door_url"
 private const val LEGACY_DOOR_TOKEN_KEY = "door_token"
 private const val LEGACY_DOOR_ENABLED_KEY = "door_enabled"
-private const val SMARTTHINGS_API_BASE = "https://api.smartthings.com/v1"
-private const val SMARTTHINGS_COMPONENT = "main"
-private const val SMARTTHINGS_LOCK_CAPABILITY = "lock"
-private const val SMARTTHINGS_MAX_RESPONSE_BYTES = 64 * 1024
 internal const val SMARTTHINGS_MAX_TOKEN_LENGTH = 4096
 private const val PASSIVE_LIVENESS_ENABLED_KEY = "passive_liveness_enabled"
 private const val RUNTIME_LIVENESS_LEVEL_KEY = "runtime_liveness_level"
@@ -199,6 +199,8 @@ class MainActivity : ComponentActivity() {
     private val lastAnalysisAt = AtomicLong(0L)
     private val active = AtomicBoolean(true)
     private lateinit var prefs: SharedPreferences
+    private lateinit var itsokeyRuntimeClient: ItsokeyRuntimeClient
+    private var itsokeyConfigGeneration by mutableIntStateOf(0)
     private var modelLoadState by mutableStateOf<ModelLoadState>(ModelLoadState.Loading)
     @Volatile private var engine: MobileFaceEngine? = null
     private var runtimeStateListener: FaceSDK.ConnectionStateListener? = null
@@ -208,6 +210,7 @@ class MainActivity : ComponentActivity() {
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        itsokeyRuntimeClient = ItsokeyRuntimeClient(this)
 
         setContent {
             FFacioTheme {
@@ -221,7 +224,9 @@ class MainActivity : ComponentActivity() {
                     processing = processing,
                     firstAnalyzedFrameLogged = firstAnalyzedFrameLogged,
                     lastAnalysisAt = lastAnalysisAt,
-                    active = active
+                    active = active,
+                    itsokeyRuntimeClient = itsokeyRuntimeClient,
+                    itsokeyConfigGeneration = itsokeyConfigGeneration
                 )
             }
         }
@@ -248,9 +253,20 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        itsokeyRuntimeClient.bind(null)
         if (!FaceSDK.isReady() && !FaceSDK.isConnecting()) {
             connectRuntime(forceReconnect = false)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        itsokeyConfigGeneration += 1
+    }
+
+    override fun onStop() {
+        itsokeyRuntimeClient.unbind()
+        super.onStop()
     }
 
     private fun connectRuntime(forceReconnect: Boolean) {
@@ -295,6 +311,7 @@ class MainActivity : ComponentActivity() {
         engine?.close()
         engine = null
         FaceSDK.disconnect()
+        itsokeyRuntimeClient.close()
         analyzerExecutor.shutdownNow()
         doorExecutor.shutdownNow()
         super.onDestroy()
@@ -322,7 +339,9 @@ private fun FFacioApp(
     processing: AtomicBoolean,
     firstAnalyzedFrameLogged: AtomicBoolean,
     lastAnalysisAt: AtomicLong,
-    active: AtomicBoolean
+    active: AtomicBoolean,
+    itsokeyRuntimeClient: ItsokeyRuntimeClient,
+    itsokeyConfigGeneration: Int
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -341,10 +360,10 @@ private fun FFacioApp(
     var adminPromptInFlight by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var enrollmentName by remember { mutableStateOf("") }
-    var smartThingsDeviceId by remember { mutableStateOf(prefs.getString(SMARTTHINGS_DEVICE_ID_KEY, "") ?: "") }
-    var smartThingsAccessToken by remember { mutableStateOf("") }
+    var smartThingsDeviceId by remember { mutableStateOf(prefs.getString(ITSOKEY_DEVICE_ID_KEY, "") ?: "") }
+    var smartThingsAccessToken by remember { mutableStateOf(ITSOKEY_RUNTIME_SENTINEL) }
     var doorConfigError by remember { mutableStateOf<Throwable?>(null) }
-    var doorArmed by remember { mutableStateOf(prefs.getBoolean(SMARTTHINGS_ENABLED_KEY, false)) }
+    var doorArmed by remember { mutableStateOf(prefs.getBoolean(ITSOKEY_ENABLED_KEY, false)) }
     var doorTestInFlight by remember { mutableStateOf(false) }
     var doorTestRequestId by remember { mutableLongStateOf(0L) }
     val startsWithLegacyUserStore = remember {
@@ -563,7 +582,7 @@ private fun FFacioApp(
                     appScreen = AppScreen.Admin
                     authResultHoldUntil = 0L
                     status = "관리자 설정"
-                    detail = "등록 사용자, SmartThings 도어락, 보안 옵션을 관리할 수 있습니다"
+                    detail = "등록 사용자, ITSOKEY 도어락, 보안 옵션을 관리할 수 있습니다"
                 }
                 AdminAction.StartEnroll -> {
                     storageBusy = true
@@ -775,7 +794,7 @@ private fun FFacioApp(
                 AdminAction.ResetStore -> {
                     storageBusy = true
                     status = "로컬 템플릿 저장소를 초기화하는 중입니다"
-                    detail = "암호화 키와 저장된 SmartThings token을 함께 폐기합니다"
+                    detail = "암호화 키와 저장된 ITSOKEY token을 함께 폐기합니다"
                     appScope.launch {
                         val reset = withContext(Dispatchers.IO) {
                             runCatching {
@@ -788,6 +807,9 @@ private fun FFacioApp(
                                     .remove(SMARTTHINGS_DEVICE_ID_KEY)
                                     .remove(SMARTTHINGS_ACCESS_TOKEN_KEY)
                                     .remove(SMARTTHINGS_ENABLED_KEY)
+                                    .remove(ITSOKEY_DEVICE_ID_KEY)
+                                    .remove(ITSOKEY_DEVICE_LABEL_KEY)
+                                    .remove(ITSOKEY_ENABLED_KEY)
                                     .remove("$SMARTTHINGS_ACCESS_TOKEN_KEY$SECURE_SUFFIX")
                                     .remove("$SMARTTHINGS_ACCESS_TOKEN_KEY$LEGACY_SECURE_SUFFIX")
                                     .remove("$SMARTTHINGS_ACCESS_TOKEN_KEY$OLDER_SECURE_SUFFIX")
@@ -823,7 +845,7 @@ private fun FFacioApp(
                         lastAuthDecisionLogAt = 0L
                         confirmDelete = false
                         smartThingsDeviceId = ""
-                        smartThingsAccessToken = ""
+                        smartThingsAccessToken = ITSOKEY_RUNTIME_SENTINEL
                         doorConfigError = null
                         doorArmed = false
                         invalidateSmartThingsTest()
@@ -835,31 +857,22 @@ private fun FFacioApp(
                 }
                 AdminAction.ArmDoor -> {
                     val deviceId = smartThingsDeviceId.trim()
-                    val accessToken = smartThingsAccessToken.trim()
                     storageBusy = true
-                    status = "SmartThings 기기 접근과 잠금 상태를 확인하는 중입니다"
-                    detail = "검증이 끝나면 access token을 Android Keystore로 암호화해 저장합니다"
+                    status = "ITSOKEY 로그인과 선택한 도어락을 확인하는 중입니다"
+                    detail = "토큰은 ITSOKEY Runtime 앱의 Android Keystore에만 보관됩니다"
                     appScope.launch {
                         val saved = withContext(Dispatchers.IO) {
                             runCatching {
                                 if (!passiveLivenessEnabled) error("문 열림에는 Runtime 라이브니스가 반드시 필요합니다")
-                                if (deviceId.isEmpty()) error("SmartThings Device ID가 필요합니다")
-                                if (accessToken.isEmpty()) error("SmartThings access token이 필요합니다")
-                                if (!smartThingsDoorConfigured(deviceId, accessToken)) error("SmartThings Device ID와 access token 형식을 확인해 주세요")
-                                val accessCheck = checkSmartThingsDoorAccess(deviceId, accessToken)
+                                if (deviceId.isEmpty()) error("ITSOKEY 도어락을 먼저 선택하세요")
+                                if (!smartThingsDoorConfigured(deviceId, ITSOKEY_RUNTIME_SENTINEL)) error("ITSOKEY 기기 ID 형식을 확인해 주세요")
+                                val accessCheck = checkItsokeyDoorAccess(itsokeyRuntimeClient, deviceId)
                                 if (!accessCheck.accepted) error(accessCheck.message)
-                                securePutString(context, prefs, SMARTTHINGS_ACCESS_TOKEN_KEY, accessToken)
                                 if (!prefs.edit()
-                                        .putString(SMARTTHINGS_DEVICE_ID_KEY, deviceId)
-                                        .putBoolean(SMARTTHINGS_ENABLED_KEY, true)
+                                        .putString(ITSOKEY_DEVICE_ID_KEY, deviceId)
+                                        .putBoolean(ITSOKEY_ENABLED_KEY, true)
                                         .commit()
-                                ) {
-                                    val rolledBack = clearPersistedSmartThingsCredentials(prefs)
-                                    if (!rolledBack) {
-                                        error("SmartThings 설정 저장과 보안 롤백이 모두 실패했습니다")
-                                    }
-                                    error("SmartThings Device ID와 활성화 상태를 저장하지 못했습니다")
-                                }
+                                ) error("ITSOKEY 도어락 설정을 저장하지 못했습니다")
                                 accessCheck.message
                             }
                         }
@@ -868,20 +881,20 @@ private fun FFacioApp(
                         if (saved.isSuccess) {
                             appScreen = AppScreen.Admin
                             smartThingsDeviceId = deviceId
-                            smartThingsAccessToken = accessToken
+                            smartThingsAccessToken = ITSOKEY_RUNTIME_SENTINEL
                             doorConfigError = null
                             doorArmed = true
-                            status = "SmartThings 도어락 활성화 완료"
-                            detail = "${saved.getOrThrow()} · 얼굴 인증·Runtime 라이브니스·전체 템플릿 비교를 통과한 뒤 unlock 명령을 보냅니다"
+                            status = "ITSOKEY 도어락 활성화 완료"
+                            detail = "${saved.getOrThrow()} · 얼굴 인증과 Runtime 라이브니스를 통과하면 OPEN 명령을 보냅니다"
                         } else {
                             doorArmed = false
                             val rollbackSaved = disableSmartThingsDoorPersisted(prefs)
                             doorConfigError = saved.exceptionOrNull()
-                            status = "SmartThings 설정을 저장할 수 없습니다"
+                            status = "ITSOKEY 설정을 활성화할 수 없습니다"
                             detail = if (rollbackSaved) {
-                                saved.exceptionOrNull()?.message ?: "암호화된 SmartThings access token 저장에 실패했습니다"
+                                saved.exceptionOrNull()?.message ?: "ITSOKEY Runtime 연결을 확인하세요"
                             } else {
-                                "SmartThings 설정 저장과 비활성화 상태 저장이 모두 실패했습니다. 앱을 재시작해 설정 상태를 확인해 주세요"
+                                "설정 저장과 비활성화 상태 저장이 모두 실패했습니다"
                             }
                         }
                     }
@@ -892,44 +905,20 @@ private fun FFacioApp(
                         doorArmed = false
                         invalidateSmartThingsTest()
                         doorConfigError = null
-                        status = "SmartThings 도어락 비활성화 완료"
-                        detail = "얼굴 인증은 계속 진행하지만 SmartThings unlock 명령은 보내지 않습니다"
+                        status = "ITSOKEY 도어락 비활성화 완료"
+                        detail = "얼굴 인증은 계속 진행하지만 OPEN 명령은 보내지 않습니다"
                     } else {
-                        doorConfigError = IllegalStateException("SmartThings 비활성화 상태를 저장하지 못했습니다")
-                        status = "SmartThings 도어락을 끌 수 없습니다"
-                        detail = "저장소 업데이트에 실패해 문 열림 설정을 유지했습니다"
+                        doorConfigError = IllegalStateException("ITSOKEY 비활성화 상태를 저장하지 못했습니다")
+                        status = "ITSOKEY 도어락을 끌 수 없습니다"
+                        detail = "저장소 업데이트에 실패했습니다"
                     }
                 }
                 AdminAction.UnlockSmartThingsToken -> {
-                    storageBusy = true
-                    status = "SmartThings token을 여는 중입니다"
-                    detail = "기기 인증으로 암호화된 토큰을 확인합니다"
-                    appScope.launch {
-                        val loaded = withContext(Dispatchers.IO) {
-                            runCatching { secureGetString(context, prefs, SMARTTHINGS_ACCESS_TOKEN_KEY, "", failClosed = true) }
-                        }
-                        if (!active.get()) return@launch
-                        storageBusy = false
-                        if (loaded.isSuccess) {
-                            appScreen = AppScreen.Admin
-                            smartThingsAccessToken = loaded.getOrDefault("")
-                            doorArmed = prefs.getBoolean(SMARTTHINGS_ENABLED_KEY, false) &&
-                                passiveLivenessEnabled &&
-                                smartThingsDoorConfigured(smartThingsDeviceId, smartThingsAccessToken)
-                            if (!doorArmed && prefs.getBoolean(SMARTTHINGS_ENABLED_KEY, false)) {
-                                disableSmartThingsDoorPersisted(prefs)
-                            }
-                            doorConfigError = null
-                            status = "SmartThings token 잠금 해제 완료"
-                            detail = if (doorArmed) "인증 성공 시 SmartThings lock capability의 unlock 명령을 보냅니다" else "필요하면 SmartThings 도어락 스위치를 다시 활성화하세요"
-                        } else {
-                            doorArmed = false
-                            disableSmartThingsDoorPersisted(prefs)
-                            doorConfigError = loaded.exceptionOrNull()
-                            status = "SmartThings token을 열 수 없습니다"
-                            detail = "토큰을 다시 입력하고 기기 인증 후 활성화하세요"
-                        }
-                    }
+                    appScreen = AppScreen.Admin
+                    doorConfigError = null
+                    smartThingsAccessToken = ITSOKEY_RUNTIME_SENTINEL
+                    status = "ITSOKEY Runtime에서 로그인 정보를 관리합니다"
+                    detail = "연결·로그인·기기 변경 버튼에서 ITSOKEY 설정을 다시 확인하세요"
                 }
                 AdminAction.TestSmartThingsDoor -> {
                     appScreen = AppScreen.Admin
@@ -952,7 +941,7 @@ private fun FFacioApp(
                         doorArmed = false
                         status = if (saved) "Runtime 라이브니스 꺼짐" else "실제 얼굴 체크 설정을 저장할 수 없습니다"
                         detail = if (saved) {
-                            "보안을 위해 SmartThings 문 열림도 함께 비활성화했습니다"
+                            "보안을 위해 ITSOKEY 문 열림도 함께 비활성화했습니다"
                         } else {
                             "Runtime 라이브니스 설정을 저장하지 못했습니다. 앱을 재시작해 상태를 확인해 주세요"
                         }
@@ -975,7 +964,7 @@ private fun FFacioApp(
                     detail = if (nextEnabled) {
                         "Runtime 라이브니스와 품질·유사도 기준을 사용합니다"
                     } else {
-                        "라이브니스가 꺼져 SmartThings 문 열림도 함께 비활성화했습니다"
+                        "라이브니스가 꺼져 ITSOKEY 문 열림도 함께 비활성화했습니다"
                     }
                 }
                 AdminAction.SetRuntimeLivenessLevel -> {
@@ -1127,16 +1116,18 @@ private fun FFacioApp(
             runtimeLivenessLevel = 0
             occlusionCheckEnabled = false
         }
-        val tokenLoad = withContext(Dispatchers.IO) {
+        val itsokeyLoad = withContext(Dispatchers.IO) {
             runCatching {
                 migrateSmartThingsConfiguration(prefs)
-                secureGetString(context, prefs, SMARTTHINGS_ACCESS_TOKEN_KEY, "", failClosed = true)
+                prefs.getString(ITSOKEY_DEVICE_ID_KEY, "").orEmpty()
             }
         }
-        tokenLoad.onSuccess {
+        itsokeyLoad.onSuccess { selectedDeviceId ->
             doorConfigError = null
-            smartThingsAccessToken = it
-            doorArmed = prefs.getBoolean(SMARTTHINGS_ENABLED_KEY, false) && passiveLivenessEnabled && smartThingsDoorConfigured(smartThingsDeviceId, it)
+            smartThingsDeviceId = selectedDeviceId
+            smartThingsAccessToken = ITSOKEY_RUNTIME_SENTINEL
+            doorArmed = prefs.getBoolean(ITSOKEY_ENABLED_KEY, false) &&
+                passiveLivenessEnabled && smartThingsDoorConfigured(selectedDeviceId, ITSOKEY_RUNTIME_SENTINEL)
         }.onFailure {
             doorConfigError = it
             doorArmed = false
@@ -1147,11 +1138,19 @@ private fun FFacioApp(
         initialStoreLoaded = true
     }
 
+    LaunchedEffect(itsokeyConfigGeneration) {
+        smartThingsDeviceId = prefs.getString(ITSOKEY_DEVICE_ID_KEY, "").orEmpty()
+        smartThingsAccessToken = ITSOKEY_RUNTIME_SENTINEL
+        doorArmed = prefs.getBoolean(ITSOKEY_ENABLED_KEY, false) &&
+            passiveLivenessEnabled && smartThingsDoorConfigured(smartThingsDeviceId, ITSOKEY_RUNTIME_SENTINEL)
+        invalidateSmartThingsTest()
+    }
+
     LaunchedEffect(modelLoadState, initialStoreLoaded, storeError) {
         runtimeDecisionGeneration.incrementAndGet()
         if (!initialStoreLoaded) {
             status = "로컬 저장소를 확인하고 있습니다"
-            detail = "암호화된 사용자와 SmartThings 설정을 불러오는 중입니다"
+            detail = "암호화된 사용자와 ITSOKEY 설정을 불러오는 중입니다"
             return@LaunchedEffect
         }
         if (storeError != null) {
@@ -1182,20 +1181,18 @@ private fun FFacioApp(
     }
 
     testSmartThingsDoorAccess = {
-        if (canTestSmartThingsDoorConfig(smartThingsDeviceId, smartThingsAccessToken, doorTestInFlight, canMutate = !storageBusy)) {
+        if (canTestSmartThingsDoorConfig(smartThingsDeviceId, ITSOKEY_RUNTIME_SENTINEL, doorTestInFlight, canMutate = !storageBusy)) {
             val deviceId = smartThingsDeviceId.trim()
-            val accessToken = smartThingsAccessToken.trim()
             val requestId = doorTestRequestId + 1L
             doorTestRequestId = requestId
             doorTestInFlight = true
-            status = "SmartThings 기기 접근과 잠금 상태를 확인하는 중입니다"
-            detail = "이 테스트는 unlock 명령을 보내지 않습니다"
+            status = "ITSOKEY 로그인과 기기 접근을 확인하는 중입니다"
+            detail = "이 테스트는 실제 OPEN 명령을 보내지 않습니다"
             appScope.launch {
                 val checked = withContext(Dispatchers.IO) {
                     runCatching {
-                        if (deviceId.isEmpty()) error("SmartThings Device ID가 필요합니다")
-                        if (accessToken.isEmpty()) error("SmartThings access token이 필요합니다")
-                        val result = checkSmartThingsDoorAccess(deviceId, accessToken)
+                        if (deviceId.isEmpty()) error("ITSOKEY 도어락을 먼저 선택하세요")
+                        val result = checkItsokeyDoorAccess(itsokeyRuntimeClient, deviceId)
                         if (!result.accepted) error(result.message)
                         result.message
                     }
@@ -1203,11 +1200,11 @@ private fun FFacioApp(
                 if (!active.get() || requestId != doorTestRequestId || appScreen != AppScreen.Admin) return@launch
                 doorTestInFlight = false
                 checked.onSuccess { message ->
-                    status = "SmartThings 연결 정상"
+                    status = "ITSOKEY 연결 정상"
                     detail = message
                 }.onFailure {
-                    status = "SmartThings 연결 확인 실패"
-                    detail = it.message ?: "Device ID, token 읽기 권한, lock capability를 확인하세요"
+                    status = "ITSOKEY 연결 확인 실패"
+                    detail = it.message ?: "Runtime 앱의 로그인과 선택한 도어락 권한을 확인하세요"
                 }
             }
         }
@@ -1523,13 +1520,12 @@ private fun FFacioApp(
         if (adminPromptInFlight || appScreen != AppScreen.Operation) return
         if (doorExecutor.isShutdown) return
         val deviceId = smartThingsDeviceId.trim()
-        val accessToken = smartThingsAccessToken.trim()
-        if (!smartThingsDoorConfigured(deviceId, accessToken)) {
+        if (!smartThingsDoorConfigured(deviceId, ITSOKEY_RUNTIME_SENTINEL)) {
             doorArmed = false
             disableSmartThingsDoorPersisted(prefs)
             accessFeedback = AccessFeedback(AccessFeedbackKind.AuthOnly, user.name)
             status = welcomeStatus(user.name)
-            detail = "SmartThings Device ID와 access token을 확인해 주세요"
+            detail = "ITSOKEY 연결 화면에서 사용할 도어락을 선택해 주세요"
             return
         }
         if (!passiveLivenessEnabled) {
@@ -1537,16 +1533,16 @@ private fun FFacioApp(
             disableSmartThingsDoorPersisted(prefs)
             accessFeedback = AccessFeedback(AccessFeedbackKind.AuthOnly, user.name)
             status = welcomeStatus(user.name)
-            detail = "Runtime 라이브니스가 꺼져 SmartThings unlock을 보내지 않았습니다"
+            detail = "Runtime 라이브니스가 꺼져 ITSOKEY OPEN 명령을 보내지 않았습니다"
             return
         }
         if (!processDoorRequestGate.tryStart(doorArmed = doorArmed, nowMillis = SystemClock.elapsedRealtime())) return
         accessFeedback = AccessFeedback(AccessFeedbackKind.DoorPending, user.name)
         status = welcomeStatus(user.name)
-        detail = "인증 승인 · SmartThings unlock 명령을 전송하고 있습니다"
+        detail = "인증 승인 · ITSOKEY Runtime으로 OPEN 명령을 전송하고 있습니다"
         try {
             doorExecutor.execute {
-                val result = unlockSmartThingsDoor(deviceId, accessToken)
+                val result = unlockItsokeyDoor(itsokeyRuntimeClient, deviceId)
                 processDoorRequestGate.finish()
                 ContextCompat.getMainExecutor(context).execute {
                     if (!active.get()) return@execute
@@ -1556,17 +1552,17 @@ private fun FFacioApp(
                         if (result.accepted) AccessFeedbackKind.DoorSucceeded else AccessFeedbackKind.DoorFailed,
                         user.name
                     )
-                    recordApproval(user.name, if (result.accepted) "SmartThings unlock 수락" else "SmartThings unlock 실패")
-                    status = if (result.accepted) "SmartThings unlock 명령 수락" else "SmartThings 문 제어 실패"
+                    recordApproval(user.name, if (result.accepted) "ITSOKEY OPEN 수락" else "ITSOKEY OPEN 실패")
+                    status = if (result.accepted) "ITSOKEY OPEN 명령 수락" else "ITSOKEY 문 제어 실패"
                     detail = result.message
                 }
             }
         } catch (_: Throwable) {
             processDoorRequestGate.finish()
             accessFeedback = AccessFeedback(AccessFeedbackKind.DoorFailed, user.name)
-            recordApproval(user.name, "SmartThings unlock 실패")
-            status = "SmartThings 문 제어 실패"
-            detail = "unlock 요청 작업을 시작할 수 없습니다"
+            recordApproval(user.name, "ITSOKEY OPEN 실패")
+            status = "ITSOKEY 문 제어 실패"
+            detail = "OPEN 요청 작업을 시작할 수 없습니다"
         }
     }
 
@@ -1674,8 +1670,8 @@ private fun FFacioApp(
         if (!shouldOpenDoor) recordApproval(user.name, "승인")
         status = welcomeStatus(user.name)
         detail = when {
-            shouldOpenDoor -> "인증 승인 · SmartThings 결과를 기다리고 있습니다"
-            !doorConfigured -> "SmartThings Device ID와 access token 설정 후 문 제어를 사용할 수 있습니다"
+            shouldOpenDoor -> "인증 승인 · ITSOKEY 결과를 기다리고 있습니다"
+            !doorConfigured -> "ITSOKEY 연결 화면에서 로그인하고 도어락을 선택하면 문 제어를 사용할 수 있습니다"
             !passiveLivenessEnabled || obs.liveState != "runtime_live" -> "라이브니스 확인이 없어 문 열림은 실행하지 않았습니다"
             else -> "인증 승인 · 최근 승인 로그에 기록했습니다"
         }
@@ -2057,8 +2053,8 @@ private fun FFacioApp(
                     },
                     onDoorArmed = onDoorArmed@{
                         if (doorTestInFlight) {
-                            status = "SmartThings 확인 중입니다"
-                            detail = "연결 확인이 끝난 뒤 SmartThings 설정을 변경하세요"
+                            status = "ITSOKEY 확인 중입니다"
+                            detail = "연결 확인이 끝난 뒤 설정을 변경하세요"
                             return@onDoorArmed
                         }
                         if (it && !passiveLivenessEnabled) {
@@ -2067,16 +2063,12 @@ private fun FFacioApp(
                             detail = "문 열림 기능은 실제 얼굴 확인이 켜진 상태에서만 활성화할 수 있습니다"
                         } else if (it && smartThingsDeviceId.trim().isEmpty()) {
                             doorArmed = false
-                            status = "SmartThings Device ID가 필요합니다"
-                            detail = "문 열림을 활성화하려면 SmartThings Device ID를 먼저 입력하세요"
-                        } else if (it && smartThingsAccessToken.trim().isEmpty()) {
+                            status = "ITSOKEY 도어락 선택이 필요합니다"
+                            detail = "연결·기기 변경에서 사용할 도어락을 선택하세요"
+                        } else if (it && !smartThingsDoorConfigured(smartThingsDeviceId, ITSOKEY_RUNTIME_SENTINEL)) {
                             doorArmed = false
-                            status = "SmartThings access token이 필요합니다"
-                            detail = "문 열림을 활성화하려면 Bearer 토큰을 입력하세요"
-                        } else if (it && !smartThingsDoorConfigured(smartThingsDeviceId, smartThingsAccessToken)) {
-                            doorArmed = false
-                            status = "올바른 SmartThings 설정이 필요합니다"
-                            detail = "SmartThings Device ID 형식과 access token을 확인하세요"
+                            status = "ITSOKEY 설정을 확인하세요"
+                            detail = "선택한 기기 ID 형식이 올바르지 않습니다"
                         } else if (it) {
                             performAdminAction(AdminAction.ArmDoor)
                         } else {
@@ -2085,6 +2077,9 @@ private fun FFacioApp(
                     },
                     onTestSmartThingsDoor = {
                         performAdminAction(AdminAction.TestSmartThingsDoor)
+                    },
+                    onOpenItsokeySettings = {
+                        context.startActivity(Intent(context, ItsokeySettingsActivity::class.java))
                     },
                     onPassiveLivenessEnabled = passiveToggle@{
                         pendingPassiveLivenessEnabled = it
@@ -2731,6 +2726,7 @@ private fun ControlPanel(
     onSmartThingsAccessToken: (String) -> Unit,
     onDoorArmed: (Boolean) -> Unit,
     onTestSmartThingsDoor: () -> Unit,
+    onOpenItsokeySettings: () -> Unit,
     onPassiveLivenessEnabled: (Boolean) -> Unit,
     onRuntimeLivenessLevel: (Int) -> Unit,
     onOcclusionCheckEnabled: (Boolean) -> Unit,
@@ -2869,7 +2865,7 @@ private fun ControlPanel(
             if (blockedReason != null || canUnlockSmartThingsToken) {
                 Surface(color = ComposeColor(0xFFFFF4E5), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(blockedReason ?: "SmartThings token을 다시 확인하세요", color = ComposeColor(0xFF8A4B00), fontWeight = FontWeight.Bold)
+                        Text(blockedReason ?: "ITSOKEY 연결 설정을 다시 확인하세요", color = ComposeColor(0xFF8A4B00), fontWeight = FontWeight.Bold)
                         if (canRetryBlocked) {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                 Button(onClick = onRetry, modifier = Modifier.weight(1f)) { Text("다시 확인") }
@@ -2898,7 +2894,7 @@ private fun ControlPanel(
                                 enabled = canMutate,
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF0071E3))
-                            ) { Text("SmartThings token 다시 열기") }
+                            ) { Text("ITSOKEY 연결 설정 복구") }
                         }
                     }
                 }
@@ -2987,7 +2983,7 @@ private fun ControlPanel(
                     Text("FFacio Runtime 라이브니스", color = ComposeColor(0xFF1D1D1F))
                 }
                 if (!passiveLivenessEnabled) {
-                    Text("라이브니스가 꺼진 동안 얼굴 인증은 가능하지만 SmartThings 문 열림은 보안상 비활성화됩니다", color = ComposeColor(0xFFD70015), fontSize = 13.sp)
+                    Text("라이브니스가 꺼진 동안 얼굴 인증은 가능하지만 ITSOKEY 문 열림은 보안상 비활성화됩니다", color = ComposeColor(0xFFD70015), fontSize = 13.sp)
                 }
                 if (passiveLivenessEnabled) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -3022,46 +3018,40 @@ private fun ControlPanel(
                 )
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Switch(checked = doorArmed, onCheckedChange = onDoorArmed, enabled = canMutate && !doorTestInFlight)
-                    Text("인증 성공 시 SmartThings 도어락 해제", color = ComposeColor(0xFF1D1D1F))
+                    Text("인증 성공 시 ITSOKEY 도어락 해제", color = ComposeColor(0xFF1D1D1F))
                 }
             if (doorArmed && smartThingsDeviceId.trim().isEmpty()) {
-                Text("SmartThings Device ID를 입력해야 문 열림이 활성화됩니다", color = ComposeColor(0xFFFF3B30), fontSize = 13.sp)
+                Text("ITSOKEY Device ID를 입력해야 문 열림이 활성화됩니다", color = ComposeColor(0xFFFF3B30), fontSize = 13.sp)
             }
-            OutlinedTextField(
-                value = smartThingsDeviceId,
-                onValueChange = onSmartThingsDeviceId,
-                enabled = canMutate && !doorArmed && !doorTestInFlight,
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Uri,
-                    imeAction = ImeAction.Next
-                ),
-                label = { Text("SmartThings Device ID") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedTextField(
-                value = smartThingsAccessToken,
-                onValueChange = onSmartThingsAccessToken,
-                enabled = canMutate && !doorArmed && !doorTestInFlight,
-                label = { Text("SmartThings access token") },
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Password,
-                    imeAction = ImeAction.Done
-                ),
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
+            Button(
+                onClick = onOpenItsokeySettings,
+                enabled = canMutate && !doorTestInFlight,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF007A8D))
+            ) {
+                Text(if (smartThingsDeviceId.isBlank()) "ITSOKEY 로그인·도어락 선택" else "ITSOKEY 연결·기기 변경")
+            }
+            Surface(color = ComposeColor(0xFFF5F5F7), shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("선택한 ITSOKEY 도어락", color = ComposeColor(0xFF1D1D1F), fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (smartThingsDeviceId.isBlank()) "선택되지 않음" else "기기 ID: $smartThingsDeviceId",
+                        color = if (smartThingsDeviceId.isBlank()) ComposeColor(0xFFD70015) else ComposeColor(0xFF6E6E73),
+                        fontSize = 13.sp
+                    )
+                    Text("로그인 토큰은 별도 ITSOKEY Runtime 앱의 Android Keystore에 저장됩니다", color = ComposeColor(0xFF6E6E73), fontSize = 12.sp)
+                }
+            }
             Button(
                 onClick = onTestSmartThingsDoor,
-                enabled = canTestSmartThingsDoorConfig(smartThingsDeviceId, smartThingsAccessToken, doorTestInFlight, canMutate),
+                enabled = canTestSmartThingsDoorConfig(smartThingsDeviceId, ITSOKEY_RUNTIME_SENTINEL, doorTestInFlight, canMutate),
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF1D1D1F))
             ) {
-                Text(if (doorTestInFlight) "SmartThings 확인 중" else "SmartThings 기기·상태 확인")
+                Text(if (doorTestInFlight) "ITSOKEY 확인 중" else "ITSOKEY 로그인·기기 접근 확인")
             }
             Text(
-                "테스트는 unlock 명령을 보내지 않고, 지정한 기기의 lock capability 상태만 조회합니다. 토큰이 만료되면 새 토큰으로 갱신해야 합니다.",
+                "확인 버튼은 실제 문을 열지 않습니다. 시험 열기는 ITSOKEY 연결 화면에서 명시적으로 실행할 수 있습니다.",
                 color = ComposeColor(0xFF6E6E73),
                 fontSize = 13.sp
             )
@@ -4516,31 +4506,28 @@ internal fun accessFeedbackTitle(feedback: AccessFeedback): String = when (feedb
 
 private fun accessFeedbackMessage(feedback: AccessFeedback): String = when (feedback.kind) {
     AccessFeedbackKind.AuthOnly -> "얼굴 인증이 완료되었습니다"
-    AccessFeedbackKind.DoorPending -> "인증 승인 · SmartThings unlock 결과를 기다리고 있습니다"
-    AccessFeedbackKind.DoorSucceeded -> "SmartThings가 unlock 명령을 수락했습니다"
-    AccessFeedbackKind.DoorFailed -> "얼굴 인증은 통과했지만 SmartThings 요청이 실패했습니다"
+    AccessFeedbackKind.DoorPending -> "인증 승인 · ITSOKEY unlock 결과를 기다리고 있습니다"
+    AccessFeedbackKind.DoorSucceeded -> "ITSOKEY가 unlock 명령을 수락했습니다"
+    AccessFeedbackKind.DoorFailed -> "얼굴 인증은 통과했지만 ITSOKEY 요청이 실패했습니다"
 }
 
 internal fun accessFeedbackPublicMessage(feedback: AccessFeedback): String = when (feedback.kind) {
     AccessFeedbackKind.AuthOnly -> "얼굴 인증이 완료되었습니다"
-    AccessFeedbackKind.DoorPending -> "인증 승인 · SmartThings unlock 결과를 기다리고 있습니다"
-    AccessFeedbackKind.DoorSucceeded -> "SmartThings가 unlock 명령을 수락했습니다"
-    AccessFeedbackKind.DoorFailed -> "얼굴 인증은 통과했지만 SmartThings 요청이 실패했습니다"
+    AccessFeedbackKind.DoorPending -> "인증 승인 · ITSOKEY unlock 결과를 기다리고 있습니다"
+    AccessFeedbackKind.DoorSucceeded -> "ITSOKEY가 unlock 명령을 수락했습니다"
+    AccessFeedbackKind.DoorFailed -> "얼굴 인증은 통과했지만 ITSOKEY 요청이 실패했습니다"
 }
 
 internal fun welcomeStatus(userName: String): String = "환영합니다, ${userName}님"
 
 private fun disableSmartThingsDoorPersisted(prefs: SharedPreferences): Boolean =
-    prefs.edit().putBoolean(SMARTTHINGS_ENABLED_KEY, false).commit()
+    prefs.edit().putBoolean(ITSOKEY_ENABLED_KEY, false).commit()
 
 private fun clearPersistedSmartThingsCredentials(prefs: SharedPreferences): Boolean =
     prefs.edit()
-        .remove(SMARTTHINGS_DEVICE_ID_KEY)
-        .remove(SMARTTHINGS_ACCESS_TOKEN_KEY)
-        .remove("$SMARTTHINGS_ACCESS_TOKEN_KEY$SECURE_SUFFIX")
-        .remove("$SMARTTHINGS_ACCESS_TOKEN_KEY$LEGACY_SECURE_SUFFIX")
-        .remove("$SMARTTHINGS_ACCESS_TOKEN_KEY$OLDER_SECURE_SUFFIX")
-        .putBoolean(SMARTTHINGS_ENABLED_KEY, false)
+        .remove(ITSOKEY_DEVICE_ID_KEY)
+        .remove(ITSOKEY_DEVICE_LABEL_KEY)
+        .putBoolean(ITSOKEY_ENABLED_KEY, false)
         .commit()
 
 private fun migrateSmartThingsConfiguration(prefs: SharedPreferences) {
@@ -4548,151 +4535,59 @@ private fun migrateSmartThingsConfiguration(prefs: SharedPreferences) {
     val migrated = prefs.edit()
         .remove(SMARTTHINGS_DEVICE_ID_KEY)
         .remove(SMARTTHINGS_ACCESS_TOKEN_KEY)
+        .remove(SMARTTHINGS_ENABLED_KEY)
         .remove("$SMARTTHINGS_ACCESS_TOKEN_KEY$SECURE_SUFFIX")
         .remove("$SMARTTHINGS_ACCESS_TOKEN_KEY$LEGACY_SECURE_SUFFIX")
         .remove("$SMARTTHINGS_ACCESS_TOKEN_KEY$OLDER_SECURE_SUFFIX")
         .remove(LEGACY_DOOR_URL_KEY)
         .remove(LEGACY_DOOR_TOKEN_KEY)
         .remove(LEGACY_DOOR_ENABLED_KEY)
-        .remove("$LEGACY_DOOR_TOKEN_KEY$SECURE_SUFFIX")
-        .remove("$LEGACY_DOOR_TOKEN_KEY$LEGACY_SECURE_SUFFIX")
-        .remove("$LEGACY_DOOR_TOKEN_KEY$OLDER_SECURE_SUFFIX")
-        .putBoolean(SMARTTHINGS_ENABLED_KEY, false)
+        .putBoolean(ITSOKEY_ENABLED_KEY, false)
         .putInt(SMARTTHINGS_CONFIG_VERSION_KEY, SMARTTHINGS_CONFIG_VERSION)
         .commit()
-    check(migrated) { "SmartThings 설정 마이그레이션을 저장하지 못했습니다" }
+    check(migrated) { "도어락 설정 마이그레이션을 저장하지 못했습니다" }
 }
 
 internal fun smartThingsDeviceIdValid(deviceId: String): Boolean {
     val value = deviceId.trim()
-    return value.length in 8..128 && value.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]*"))
+    return value.length in 1..128 && value.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]*"))
 }
 
-internal fun smartThingsAccessTokenValid(accessToken: String): Boolean {
-    val value = accessToken.trim()
-    return value == accessToken &&
-        value.length in 16..SMARTTHINGS_MAX_TOKEN_LENGTH &&
-        value.none { it.isWhitespace() || it.isISOControl() }
-}
+internal fun smartThingsAccessTokenValid(accessToken: String): Boolean =
+    accessToken == ITSOKEY_RUNTIME_SENTINEL
 
 internal fun smartThingsDoorConfigured(deviceId: String, accessToken: String): Boolean =
-    smartThingsDeviceIdValid(deviceId) && smartThingsAccessTokenValid(accessToken)
-
-internal fun smartThingsStatusUrl(deviceId: String): String {
-    require(smartThingsDeviceIdValid(deviceId)) { "SmartThings Device ID 형식이 올바르지 않습니다" }
-    return "$SMARTTHINGS_API_BASE/devices/${deviceId.trim()}/components/$SMARTTHINGS_COMPONENT/capabilities/$SMARTTHINGS_LOCK_CAPABILITY/status"
-}
-
-internal fun smartThingsCommandsUrl(deviceId: String): String {
-    require(smartThingsDeviceIdValid(deviceId)) { "SmartThings Device ID 형식이 올바르지 않습니다" }
-    return "$SMARTTHINGS_API_BASE/devices/${deviceId.trim()}/commands"
-}
-
-internal fun smartThingsUnlockPayloadJson(): String =
-    """{"commands":[{"component":"main","capability":"lock","command":"unlock","arguments":[]}]}"""
+    smartThingsDeviceIdValid(deviceId) && accessToken == ITSOKEY_RUNTIME_SENTINEL
 
 internal data class SmartThingsDoorResult(val accepted: Boolean, val message: String)
 
-internal fun smartThingsHttpFailureMessage(responseCode: Int): String = when (responseCode) {
-    400 -> "SmartThings 요청 형식이 올바르지 않습니다"
-    401 -> "SmartThings access token이 만료되었거나 올바르지 않습니다"
-    403 -> "token에 이 기기 또는 잠금 제어 권한이 없습니다"
-    404 -> "SmartThings 기기나 lock capability를 찾을 수 없습니다"
-    409, 422 -> "이 기기는 현재 unlock 명령을 지원하거나 실행할 수 없습니다"
-    429 -> "SmartThings 요청 한도를 초과했습니다. 잠시 후 다시 시도해 주세요"
-    in 500..599 -> "SmartThings 서버에서 오류 응답을 보냈습니다"
-    else -> "SmartThings가 요청을 수락하지 않았습니다 (HTTP $responseCode)"
+private fun checkItsokeyDoorAccess(client: ItsokeyRuntimeClient, deviceId: String): SmartThingsDoorResult = runCatching {
+    require(smartThingsDeviceIdValid(deviceId)) { "ITSOKEY 기기 ID 형식이 올바르지 않습니다" }
+    if (!client.isRuntimeInstalled) error("ITSOKEY Runtime 앱이 설치되어 있지 않습니다")
+    val response = JSONObject(client.getDevice(deviceId.trim(), ITSOKEY_RPC_TIMEOUT_MS))
+    if (!response.optBoolean("ok", false)) {
+        return@runCatching SmartThingsDoorResult(false, response.optString("message", "ITSOKEY 기기에 접근할 수 없습니다"))
+    }
+    val data = response.opt("data")
+    val label = when (data) {
+        is JSONObject -> listOf(data.optString("spaceName"), data.optString("deviceName"), data.optString("name"))
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
+        else -> ""
+    }
+    SmartThingsDoorResult(true, if (label.isBlank()) "ITSOKEY 로그인·기기 접근 정상" else "ITSOKEY 연결 정상 · $label")
+}.getOrElse { error ->
+    SmartThingsDoorResult(false, error.message ?: "ITSOKEY Runtime에 연결할 수 없습니다")
 }
 
-internal fun smartThingsNetworkFailureMessage(error: Throwable): String = when (error) {
-    is java.net.UnknownHostException -> "SmartThings 서버 주소를 찾을 수 없습니다"
-    is java.net.SocketTimeoutException -> "SmartThings 응답 시간이 초과되었습니다"
-    is javax.net.ssl.SSLException -> "SmartThings HTTPS 인증서를 확인할 수 없습니다"
-    else -> "SmartThings에 연결할 수 없습니다"
+private fun unlockItsokeyDoor(client: ItsokeyRuntimeClient, deviceId: String): SmartThingsDoorResult = runCatching {
+    require(smartThingsDeviceIdValid(deviceId)) { "ITSOKEY 기기 ID 형식이 올바르지 않습니다" }
+    val response = JSONObject(client.openDevice(deviceId.trim(), ITSOKEY_RPC_TIMEOUT_MS))
+    if (response.optBoolean("ok", false)) {
+        SmartThingsDoorResult(true, "ITSOKEY가 OPEN 명령을 수락했습니다")
+    } else {
+        SmartThingsDoorResult(false, response.optString("message", "ITSOKEY가 OPEN 명령을 거절했습니다"))
+    }
+}.getOrElse { error ->
+    SmartThingsDoorResult(false, error.message ?: "ITSOKEY Runtime에 연결할 수 없습니다")
 }
-
-internal fun parseSmartThingsLockState(body: String): String? = runCatching {
-    JSONObject(body).optJSONObject("lock")?.optString("value")?.takeIf { it.isNotBlank() }
-}.getOrNull()
-
-internal fun smartThingsCommandAccepted(body: String): Boolean = runCatching {
-    val results = JSONObject(body).optJSONArray("results") ?: return@runCatching false
-    if (results.length() == 0) return@runCatching false
-    (0 until results.length()).all { index ->
-        val status = results.optJSONObject(index)?.optString("status").orEmpty().uppercase(Locale.US)
-        status == "ACCEPTED" || status == "COMPLETED"
-    }
-}.getOrDefault(false)
-
-private fun readHttpBodyLimited(connection: HttpURLConnection, responseCode: Int): String {
-    val stream = if (responseCode in 200..299) connection.inputStream else connection.errorStream
-    if (stream == null) return ""
-    return stream.use { input ->
-        val buffer = ByteArray(4096)
-        val output = java.io.ByteArrayOutputStream()
-        while (true) {
-            val count = input.read(buffer)
-            if (count < 0) break
-            if (output.size() + count > SMARTTHINGS_MAX_RESPONSE_BYTES) {
-                throw IllegalStateException("SmartThings 응답이 허용 크기를 초과했습니다")
-            }
-            output.write(buffer, 0, count)
-        }
-        output.toString(Charsets.UTF_8.name())
-    }
-}
-
-private fun checkSmartThingsDoorAccess(deviceId: String, token: String): SmartThingsDoorResult = runCatching {
-    require(smartThingsDoorConfigured(deviceId, token)) { "SmartThings 설정이 완전하지 않습니다" }
-    val conn = (URL(smartThingsStatusUrl(deviceId)).openConnection() as HttpURLConnection).apply {
-        requestMethod = "GET"
-        instanceFollowRedirects = false
-        connectTimeout = 5000
-        readTimeout = 5000
-        doOutput = false
-        setRequestProperty("Accept", "application/json")
-        setRequestProperty("Authorization", "Bearer ${token.trim()}")
-    }
-    try {
-        val responseCode = conn.responseCode
-        val body = readHttpBodyLimited(conn, responseCode)
-        if (responseCode == 200) {
-            val state = parseSmartThingsLockState(body)
-                ?: return@runCatching SmartThingsDoorResult(false, "lock capability 응답에서 잠금 상태를 읽지 못했습니다")
-            SmartThingsDoorResult(true, "SmartThings 연결 정상 · 현재 잠금 상태: $state")
-        } else {
-            SmartThingsDoorResult(false, smartThingsHttpFailureMessage(responseCode))
-        }
-    } finally {
-        conn.disconnect()
-    }
-}.getOrElse { SmartThingsDoorResult(false, smartThingsNetworkFailureMessage(it)) }
-
-private fun unlockSmartThingsDoor(deviceId: String, token: String): SmartThingsDoorResult = runCatching {
-    require(smartThingsDoorConfigured(deviceId, token)) { "SmartThings 설정이 완전하지 않습니다" }
-    val conn = (URL(smartThingsCommandsUrl(deviceId)).openConnection() as HttpURLConnection).apply {
-        requestMethod = "POST"
-        instanceFollowRedirects = false
-        connectTimeout = 5000
-        readTimeout = 5000
-        doOutput = true
-        setRequestProperty("Accept", "application/json")
-        setRequestProperty("Content-Type", "application/json;charset=utf-8")
-        setRequestProperty("Authorization", "Bearer ${token.trim()}")
-    }
-    try {
-        val body = smartThingsUnlockPayloadJson().toByteArray(Charsets.UTF_8)
-        conn.outputStream.use { it.write(body) }
-        val responseCode = conn.responseCode
-        val responseBody = readHttpBodyLimited(conn, responseCode)
-        if (responseCode in 200..299 && smartThingsCommandAccepted(responseBody)) {
-            SmartThingsDoorResult(true, "SmartThings가 unlock 명령을 수락했습니다. 실제 잠금 상태 반영은 기기에서 이어집니다")
-        } else if (responseCode in 200..299) {
-            SmartThingsDoorResult(false, "SmartThings 응답에 수락된 unlock 결과가 없습니다")
-        } else {
-            SmartThingsDoorResult(false, smartThingsHttpFailureMessage(responseCode))
-        }
-    } finally {
-        conn.disconnect()
-    }
-}.getOrElse { SmartThingsDoorResult(false, smartThingsNetworkFailureMessage(it)) }

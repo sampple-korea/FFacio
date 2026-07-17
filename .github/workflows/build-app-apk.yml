@@ -1,4 +1,4 @@
-name: Build signed FFacio APK
+name: Build signed FFacio + ITSOKEY Runtime
 
 on:
   workflow_dispatch:
@@ -8,6 +8,9 @@ on:
     paths:
       - '.github/workflows/build-app-apk.yml'
       - 'android/**'
+      - 'itsokey-runtime/**'
+      - 'scripts/**'
+      - 'ITSOKEY_*.md'
 
 permissions:
   contents: write
@@ -15,7 +18,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -28,26 +31,62 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
 
-      - name: Restore signing key
+      - name: Restore shared signing key
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.FFACIO_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.FFACIO_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.FFACIO_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.FFACIO_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
           test -n "$KEYSTORE_BASE64"
+          test -n "$STORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/dev-siro.p12"
           chmod 600 "$RUNNER_TEMP/dev-siro.p12"
+          keytool -list -v \
+            -keystore "$RUNNER_TEMP/dev-siro.p12" \
+            -storetype PKCS12 \
+            -storepass "$STORE_PASSWORD" \
+            -alias "$KEY_ALIAS" | tee signing-certificate.txt
 
-      - name: Run unit tests
+      - name: Verify reconstructed ITSOKEY protocol source
         shell: bash
-        working-directory: android
-        run: |
-          chmod +x ./gradlew
-          ./gradlew :app:testDebugUnitTest --stacktrace
+        run: python3 itsokey-runtime/tools/verify_source.py
 
-      - name: Build signed release APK
+      - name: Build and test ITSOKEY Runtime
+        shell: bash
+        working-directory: itsokey-runtime
+        env:
+          FFACIO_KEYSTORE_PATH: ${{ runner.temp }}/dev-siro.p12
+          FFACIO_KEYSTORE_PASSWORD: ${{ secrets.FFACIO_KEYSTORE_PASSWORD }}
+          FFACIO_KEY_ALIAS: ${{ secrets.FFACIO_KEY_ALIAS }}
+          FFACIO_KEY_PASSWORD: ${{ secrets.FFACIO_KEY_PASSWORD }}
+          FFACIO_KEYSTORE_TYPE: PKCS12
+        run: |
+          set -euo pipefail
+          gradle --no-daemon clean \
+            :app:testDebugUnitTest \
+            :runtime-client:assembleRelease \
+            :app:assembleRelease \
+            --stacktrace
+          test -f app/build/outputs/apk/release/app-release.apk
+
+      - name: Verify FFacio source integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_source_static.py
+          python3 scripts/verify_itsokey_integration.py
+
+      - name: Build and test FFacio
         shell: bash
         working-directory: android
         env:
@@ -55,44 +94,68 @@ jobs:
           FFACIO_KEYSTORE_PASSWORD: ${{ secrets.FFACIO_KEYSTORE_PASSWORD }}
           FFACIO_KEY_ALIAS: ${{ secrets.FFACIO_KEY_ALIAS }}
           FFACIO_KEY_PASSWORD: ${{ secrets.FFACIO_KEY_PASSWORD }}
+          FFACIO_KEYSTORE_TYPE: PKCS12
         run: |
-          ./gradlew :app:assembleRelease --stacktrace
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon clean \
+            :app:testDebugUnitTest \
+            :itsokey-runtime-client:assembleRelease \
+            :app:assembleRelease \
+            --stacktrace
+          test -f app/build/outputs/apk/release/app-release.apk
 
-      - name: Verify APK signature and package role
+      - name: Verify packages and identical signatures
         shell: bash
         run: |
-          BUILD_TOOLS_DIR="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
+          set -euo pipefail
+          BUILD_TOOLS_DIR="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
           APKSIGNER="$BUILD_TOOLS_DIR/apksigner"
           AAPT="$BUILD_TOOLS_DIR/aapt"
-          test -x "$APKSIGNER"
-          test -x "$AAPT"
+          FFACIO_APK=android/app/build/outputs/apk/release/app-release.apk
+          ITSOKEY_APK=itsokey-runtime/app/build/outputs/apk/release/app-release.apk
 
-          APK=android/app/build/outputs/apk/release/app-release.apk
-          test -f "$APK"
+          "$APKSIGNER" verify --verbose --print-certs "$FFACIO_APK" | tee ffacio-signature.txt
+          "$APKSIGNER" verify --verbose --print-certs "$ITSOKEY_APK" | tee itsokey-signature.txt
+          "$AAPT" dump badging "$FFACIO_APK" | tee ffacio-badging.txt
+          "$AAPT" dump badging "$ITSOKEY_APK" | tee itsokey-badging.txt
 
-          VERIFY_OUTPUT="$($APKSIGNER verify --verbose --print-certs "$APK")"
-          printf '%s\n' "$VERIFY_OUTPUT"
-          # Runtime APK와 같은 dev-siro 인증서여야 signature 권한으로 연결됩니다.
-          printf '%s\n' "$VERIFY_OUTPUT" | grep -qi \
-            'e1344975a288ec785ab12841ca8719b2115eadf41ae6f6e7ab8770979b7fa2b9'
+          grep -q "package: name='com.ffacio.mobile'" ffacio-badging.txt
+          grep -q "launchable-activity: name='com.ffacio.mobile.MainActivity'" ffacio-badging.txt
+          grep -q "package: name='io.ffacio.itsokeyruntime'" itsokey-badging.txt
+          grep -q "launchable-activity: name='io.ffacio.itsokeyruntime.MainActivity'" itsokey-badging.txt
 
-          BADGING="$($AAPT dump badging "$APK")"
-          printf '%s\n' "$BADGING"
-          printf '%s\n' "$BADGING" | grep -q "package: name='com.ffacio.mobile'"
-          printf '%s\n' "$BADGING" | grep -q "launchable-activity: name='com.ffacio.mobile.MainActivity'"
+          FFACIO_SHA="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' ffacio-signature.txt | head -n 1 | tr -d '[:space:]')"
+          ITSOKEY_SHA="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' itsokey-signature.txt | head -n 1 | tr -d '[:space:]')"
+          test -n "$FFACIO_SHA"
+          test "$FFACIO_SHA" = "$ITSOKEY_SHA"
+          test "$FFACIO_SHA" = "e1344975a288ec785ab12841ca8719b2115eadf41ae6f6e7ab8770979b7fa2b9"
+          printf 'Shared signer SHA-256: %s\n' "$FFACIO_SHA" | tee shared-signature.txt
 
-      - name: Collect APK
+      - name: Package APKs and separate source ZIPs
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p artifacts
-          cp android/app/build/outputs/apk/release/app-release.apk artifacts/FFacio-Android-release.apk
-          cd artifacts
-          sha256sum *.apk > SHA256SUMS.txt
+          cp android/app/build/outputs/apk/release/app-release.apk artifacts/FFacio-ITSOKEY-release.apk
+          cp itsokey-runtime/app/build/outputs/apk/release/app-release.apk artifacts/ITSOKEY-Runtime-release.apk
+          find itsokey-runtime/runtime-client/build/outputs/aar -name '*-release.aar' -print -quit | \
+            xargs -I{} cp '{}' artifacts/ITSOKEY-Runtime-client-release.aar
 
-      - name: Upload APK bundle
+          zip -qr artifacts/ITSOKEY-Runtime-source.zip itsokey-runtime \
+            -x '*/build/*' '*/.gradle/*' '*/.idea/*' '*/local.properties'
+          zip -qr artifacts/FFacio-ITSOKEY-source.zip . \
+            -x '.git/*' 'itsokey-runtime/*' 'artifacts/*' '*/build/*' '*/.gradle/*' '*/.idea/*' '*/local.properties'
+
+          cp ffacio-signature.txt itsokey-signature.txt shared-signature.txt \
+             ffacio-badging.txt itsokey-badging.txt signing-certificate.txt artifacts/
+          (cd artifacts && sha256sum * > SHA256SUMS.txt)
+          ls -lh artifacts
+
+      - name: Upload build bundle
         uses: actions/upload-artifact@v4
         with:
-          name: FFacio-Android-release
+          name: FFacio-ITSOKEY-signed-build
           path: artifacts/*
           if-no-files-found: error
           retention-days: 30
@@ -107,6 +170,6 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
           else
             gh release create "$GITHUB_REF_NAME" artifacts/* \
-              --title "FFacio Android $GITHUB_REF_NAME" \
+              --title "FFacio + ITSOKEY Runtime $GITHUB_REF_NAME" \
               --generate-notes
           fi

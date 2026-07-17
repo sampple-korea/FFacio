@@ -63,17 +63,13 @@ REQUIRED_MAIN_MARKERS = (
     "canAuthorizeAdminActionWithHeadAdminFace(action, users, passiveLivenessEnabled)",
     "TrackedFaceBoxOverlay",
     "faceRectInPreview",
-    "smartThingsCommandsUrl",
-    "smartThingsAccessTokenValid",
-    "SMARTTHINGS_MAX_TOKEN_LENGTH",
-    "smartThingsStatusUrl",
-    '"capability":"lock"',
-    '"command":"unlock"',
-    "instanceFollowRedirects = false",
-    "SMARTTHINGS_MAX_RESPONSE_BYTES",
-    'setRequestProperty("Authorization", "Bearer ${token.trim()}")',
-    "checkSmartThingsDoorAccess",
-    "SMARTTHINGS_CONFIG_VERSION = 2",
+    "ITSOKEY_RUNTIME_SENTINEL",
+    "ITSOKEY_RPC_TIMEOUT_MS",
+    "ItsokeyRuntimeClient",
+    "checkItsokeyDoorAccess",
+    "unlockItsokeyDoor",
+    "client.getDevice",
+    "client.openDevice",
     "disableSmartThingsDoorPersisted",
     "clearPersistedSmartThingsCredentials",
     "ownedTemplates.forEach { it.fill(0) }",
@@ -272,7 +268,7 @@ def main() -> int:
         fail("camera stage fallback message is not restricted to the disabled-camera state")
 
     app_gradle_text = read(APP_GRADLE)
-    for marker in ('versionCode 36', 'versionName "0.8.2-secure-smartthings-tracking"'):
+    for marker in ('versionCode 37', 'versionName "0.9.0-itsokey-runtime"'):
         if marker not in app_gradle_text:
             fail(f"expected final app version marker missing: {marker}")
     for marker in ("androidx.camera", "ImageProxy", "imageProxyToNv21", "ProcessCameraProvider", "PreviewView"):
@@ -296,6 +292,8 @@ def main() -> int:
         'android.permission.CAMERA',
         'io.ffacio.sdk.permission.BIND_RUNTIME',
         'com.kbyai.faceattribute',
+        'io.ffacio.itsokeyruntime',
+        'io.ffacio.itsokeyruntime.permission.BIND_RUNTIME',
         'android:allowBackup="false"',
         'android:usesCleartextTraffic="false"',
     ):

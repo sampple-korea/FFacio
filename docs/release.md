@@ -1,3 +1,5 @@
+> **0.9.0 안내:** 현재 문 제어는 SmartThings가 아니라 별도 ITSOKEY Runtime Binder로 이전되었습니다. 이 문서의 SmartThings 내용은 이전 버전 역사 기록입니다. 현재 구현은 `../ITSOKEY_INTEGRATION.md`를 참고하세요.
+
 # FFacio Android Release Notes
 
 > 아래 항목은 버전별 역사 기록입니다. 과거의 임의 HTTPS relay 연동은 0.8.2에서 제거됐으며, 현재 구현은 SmartThings 공식 `lock` capability의 상태·명령 API만 사용합니다.

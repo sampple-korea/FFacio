@@ -1,3 +1,5 @@
+> **0.9.0 안내:** 현재 문 제어는 SmartThings가 아니라 별도 ITSOKEY Runtime Binder로 이전되었습니다. 이 문서의 SmartThings 내용은 이전 버전 역사 기록입니다. 현재 구현은 `../ITSOKEY_INTEGRATION.md`를 참고하세요.
+
 # FFacio Android Runtime 구현
 
 ## 책임 분리

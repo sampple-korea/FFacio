@@ -1,3 +1,5 @@
+> **0.9.0 안내:** 현재 문 제어는 SmartThings가 아니라 별도 ITSOKEY Runtime Binder로 이전되었습니다. 이 문서의 SmartThings 내용은 이전 버전 역사 기록입니다. 현재 구현은 `../ITSOKEY_INTEGRATION.md`를 참고하세요.
+
 # SmartThings 도어락 연동
 
 FFacio는 임의의 릴레이 URL을 호출하지 않습니다. 관리 화면에서 SmartThings Device ID와 access token을 저장하면, 얼굴 인증 성공 뒤 SmartThings REST API의 기기 명령 엔드포인트로 `main` 컴포넌트의 `lock` capability에 `unlock` 명령을 보냅니다.

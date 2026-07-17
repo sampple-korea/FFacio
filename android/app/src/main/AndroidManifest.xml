@@ -2,10 +2,18 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="io.ffacio.sdk.permission.BIND_RUNTIME" />
+    <uses-permission android:name="io.ffacio.itsokeyruntime.permission.BIND_RUNTIME" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <queries>
         <package android:name="com.kbyai.faceattribute" />
+        <package android:name="io.ffacio.itsokeyruntime" />
+        <intent>
+            <action android:name="io.ffacio.itsokeyruntime.action.BIND" />
+        </intent>
+        <intent>
+            <action android:name="io.ffacio.itsokeyruntime.action.LOGIN" />
+        </intent>
     </queries>
 
     <application
@@ -15,6 +23,10 @@
         android:fullBackupContent="false"
         android:label="FFacio"
         android:theme="@style/FFacioTheme">
+        <activity
+            android:name=".ItsokeySettingsActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
