@@ -2,7 +2,7 @@
 
 ## 검증 대상
 
-- 앱 버전: `0.7.1-runtime-demo-parity-ios`
+- 앱 버전: `0.8.1-runtime-demo-parity-ios`
 - 저장 정책·레코드 스키마: 7
 - 입력 기준: 첨부된 `FFacio-Runtime-main-3.zip`의 Runtime Demo
 - 수정 대상: 첨부된 `FFacio-master-3.zip`

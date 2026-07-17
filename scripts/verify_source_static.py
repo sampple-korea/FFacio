@@ -234,7 +234,7 @@ def main() -> int:
             fail(f"retired enrollment/authentication logic remains: {marker}")
 
     app_gradle_text = read(APP_GRADLE)
-    for marker in ('versionCode 34', 'versionName "0.7.1-runtime-demo-parity-ios"'):
+    for marker in ('versionCode 35', 'versionName "0.8.1-runtime-demo-parity-ios"'):
         if marker not in app_gradle_text:
             fail(f"expected final app version marker missing: {marker}")
     for marker in ("androidx.camera", "ImageProxy", "imageProxyToNv21", "ProcessCameraProvider", "PreviewView"):

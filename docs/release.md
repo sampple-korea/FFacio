@@ -1,6 +1,6 @@
 # FFacio Android Release Notes
 
-## Android 0.7.1-runtime-demo-parity-ios
+## Android 0.8.1-runtime-demo-parity-ios
 
 - Replaces the CameraX YUV_420_888 plane conversion with the exact Fotoapparat 2.7.0 NV21 camera path used by the Runtime Demo.
 - Uses the Demo front-camera EXIF orientation and mirror mapping, 1280×720 enrollment request, 640×480 balanced authentication request, and CenterCrop preview coordinates.

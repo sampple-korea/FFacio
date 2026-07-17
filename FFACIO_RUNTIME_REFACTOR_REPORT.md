@@ -2,7 +2,7 @@
 
 ## 적용 버전
 
-- 앱 버전: `0.7.1-runtime-demo-parity-ios`
+- 앱 버전: `0.8.1-runtime-demo-parity-ios`
 - 저장 정책·레코드 스키마: 7
 - 카메라: Runtime Demo와 동일한 Fotoapparat 2.7.0 NV21 흐름
 - 얼굴 엔진: FFacio Runtime Binder 경로만 사용

@@ -1,4 +1,4 @@
-# FFacio Android 0.7.1 — Runtime Demo 완전 정렬·iOS 스타일 UI
+# FFacio Android 0.8.1 — Runtime Demo 완전 정렬·iOS 스타일 UI
 
 FFacio는 카메라 기반 출입 인증, 사용자·Head Admin 관리와 HTTPS 문 릴레이를 담당하는 Android 앱입니다. 얼굴 검출, 속성 분석, NV21 변환, 템플릿 추출과 비교는 별도 설치되는 **FFacio Runtime**(`com.kbyai.faceattribute`)을 Binder/AIDL로 호출합니다.
 
