@@ -32,14 +32,15 @@ java = "\n".join(p.read_text(errors="ignore") for p in root.rglob("*.java"))
 require('https://v2.api.itsokey.kr' in java, "ITSOKEY base URL missing")
 for forbidden in ['http://v2.api.itsokey.kr', 'api.itsokey.com', 'SMARTTHINGS_ACCESS_TOKEN']:
     require(forbidden not in java, f"Forbidden legacy string found: {forbidden}")
-for endpoint in ['/api/widget/oauth/generated.do', '/api/widget/devices.do', '/api/widget/oauth/refresh.do', '/api/widget/device/', '/control.do']:
+for endpoint in ['/api/oauth/me.do', '/api/widget/oauth/generated.do', '/api/widget/devices.do', '/api/widget/oauth/refresh.do', '/api/widget/device/', '/control.do']:
     require(endpoint in java, f"Required endpoint missing: {endpoint}")
 for unsupported in ['/api/device/me.do', '/api/device/control.do', '/api/oauth/refresh.do']:
     require(unsupported not in java, f"Unsupported legacy endpoint remains: {unsupported}")
 require('KeyProperties.KEY_ALGORITHM_AES' in java and 'AES/GCM/NoPadding' in java, "Keystore AES-GCM session storage missing")
 require('ALLOWED_PACKAGES' in java and 'Binder.getCallingUid()' in java, "Caller validation missing")
 require('browser_fallback_url' in java and 'sessionStorage.getItem' in java, "Web login compatibility handling missing")
-require('generateWidgetSession(session)' in java, "Web session is not exchanged for widget credentials")
+require('generateWidgetSession(memberSession)' in java, "Web session is not exchanged for widget credentials")
+require('loadMemberInformation(session)' in java, "Official post-login member lookup is missing")
 
 secret_patterns = [
     r'ghp_[A-Za-z0-9]{20,}',
@@ -56,4 +57,4 @@ if errors:
     for error in errors:
         print("-", error)
     sys.exit(1)
-print("PASS runtime source checks=22")
+print("PASS runtime source checks=24")

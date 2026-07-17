@@ -1,4 +1,4 @@
-# FFacio Android 0.9.0 — FFacio Runtime + ITSOKEY Runtime
+# FFacio Android 0.9.1 — FFacio Runtime + ITSOKEY Runtime
 
 FFacio는 카메라 기반 출입 인증, 사용자·Head Admin 관리와 ITSOKEY 도어락 연동을 담당하는 Android 앱입니다.
 
@@ -100,4 +100,4 @@ android/app/build/outputs/apk/debug/app-debug.apk
 - [docs/android.md](docs/android.md)
 - [docs/runtime-migration.md](docs/runtime-migration.md)
 
-`docs/smartthings-door-lock.md`와 과거 release 기록은 이전 버전의 역사 자료이며 현재 0.9.0의 문 제어 구현에는 적용되지 않습니다.
+`docs/smartthings-door-lock.md`와 과거 release 기록은 이전 버전의 역사 자료이며 현재 0.9.1의 문 제어 구현에는 적용되지 않습니다.

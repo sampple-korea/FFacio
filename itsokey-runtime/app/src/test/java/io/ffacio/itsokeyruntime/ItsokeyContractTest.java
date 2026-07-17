@@ -9,6 +9,7 @@ import org.junit.Test;
 public class ItsokeyContractTest {
     @Test public void endpointsMatchObservedAppContract() {
         assertEquals("https://v2.api.itsokey.kr", ItsokeyApiClient.BASE_URL);
+        assertEquals("/api/oauth/me.do", ItsokeyApiClient.MEMBER_PATH);
         assertEquals("/api/widget/oauth/generated.do", ItsokeyApiClient.GENERATE_PATH);
         assertEquals("/api/widget/devices.do", ItsokeyApiClient.DEVICES_PATH);
         assertEquals("/api/widget/device/", ItsokeyApiClient.CONTROL_PATH_PREFIX);

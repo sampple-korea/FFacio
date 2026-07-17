@@ -268,7 +268,7 @@ def main() -> int:
         fail("camera stage fallback message is not restricted to the disabled-camera state")
 
     app_gradle_text = read(APP_GRADLE)
-    for marker in ('versionCode 37', 'versionName "0.9.0-itsokey-runtime"'):
+    for marker in ('versionCode 38', 'versionName "0.9.1-itsokey-runtime"'):
         if marker not in app_gradle_text:
             fail(f"expected final app version marker missing: {marker}")
     for marker in ("androidx.camera", "ImageProxy", "imageProxyToNv21", "ProcessCameraProvider", "PreviewView"):

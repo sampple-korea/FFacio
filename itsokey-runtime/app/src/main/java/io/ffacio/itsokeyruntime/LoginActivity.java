@@ -204,7 +204,10 @@ public final class LoginActivity extends Activity {
             executor.execute(() -> {
                 try {
                     ItsokeyApiClient api = new ItsokeyApiClient(sessionStore);
-                    ItsokeySession widgetSession = api.generateWidgetSession(session);
+                    statusOnUiThread("ITSOKEY 회원정보 확인 중");
+                    ItsokeySession memberSession = api.loadMemberInformation(session);
+                    statusOnUiThread("ITSOKEY 위젯 세션 발급 중");
+                    ItsokeySession widgetSession = api.generateWidgetSession(memberSession);
                     if (!widgetSession.usable()) throw new IllegalStateException("ITSOKEY 위젯 토큰 발급에 실패했습니다");
                     sessionStore.save(widgetSession);
                     String verification = api.verifySession();
@@ -225,6 +228,10 @@ public final class LoginActivity extends Activity {
         result.putExtra("result", verification);
         setResult(RESULT_OK, result);
         finish();
+    }
+
+    private void statusOnUiThread(String message) {
+        runOnUiThread(() -> status.setText(message));
     }
 
     private void finishCanceled(String message) {

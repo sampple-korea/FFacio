@@ -12,6 +12,7 @@ import java.util.Locale;
 
 final class ItsokeyApiClient {
     static final String BASE_URL = "https://v2.api.itsokey.kr";
+    static final String MEMBER_PATH = "/api/oauth/me.do";
     // Confirmed from ITSOKEY Android 2.2.6 widget Retrofit contract.
     static final String GENERATE_PATH = "/api/widget/oauth/generated.do";
     static final String DEVICES_PATH = "/api/widget/devices.do";
@@ -59,6 +60,32 @@ final class ItsokeyApiClient {
             throw new IllegalStateException("위젯 토큰 발급 응답 형식이 올바르지 않습니다");
         }
         return sessionFromAuthorization((JSONObject) raw, memberSession.memberJson, System.currentTimeMillis(), 0L);
+    }
+
+    /** Completes the same post-login member lookup performed by the official
+     * ITSOKEY 2.2.6 app before any widget token is requested. The WebView writes
+     * OAuth tokens before it writes the member object, so doing this explicitly
+     * prevents the native bridge from racing the web login completion. */
+    ItsokeySession loadMemberInformation(ItsokeySession webSession) throws Exception {
+        if (webSession == null || !webSession.usable()) {
+            throw new LoginRequiredException("ITSOKEY 로그인이 필요합니다");
+        }
+        HttpResult result = request("GET", MEMBER_PATH, null, webSession.accessAuthorization());
+        if (!result.httpSuccess()) {
+            throw new IllegalStateException(httpMessage(result));
+        }
+        Object raw = extractSuccessfulData(result.body, "MEMBER_LOAD_FAILED");
+        if (!(raw instanceof JSONObject)) {
+            throw new IllegalStateException("ITSOKEY 회원정보 응답 형식이 올바르지 않습니다");
+        }
+        return new ItsokeySession(
+                webSession.tokenType,
+                webSession.accessToken,
+                webSession.refreshToken,
+                webSession.accessExpiresAt,
+                webSession.refreshExpiresAt,
+                raw.toString()
+        );
     }
 
     String refreshSession() {
@@ -192,7 +219,7 @@ final class ItsokeyApiClient {
             connection.setReadTimeout(30_000);
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("Accept-Language", Locale.getDefault().toLanguageTag());
-            connection.setRequestProperty("User-Agent", "ITSOKEYRuntime/1.0 Android");
+            connection.setRequestProperty("User-Agent", "ITSOKEYRuntime/1.0.1 Android");
             if (authorization != null && !authorization.trim().isEmpty()) {
                 connection.setRequestProperty("Authorization", authorization.trim());
             }
