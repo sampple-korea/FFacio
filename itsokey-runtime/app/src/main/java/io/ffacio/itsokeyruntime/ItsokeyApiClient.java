@@ -12,6 +12,7 @@ import java.util.Locale;
 
 final class ItsokeyApiClient {
     static final String BASE_URL = "https://v2.api.itsokey.kr";
+    static final String AUTHORIZE_PATH = "/api/oauth/authorize.do";
     static final String MEMBER_PATH = "/api/oauth/me.do";
     // Confirmed from ITSOKEY Android 2.2.6 widget Retrofit contract.
     static final String GENERATE_PATH = "/api/widget/oauth/generated.do";
@@ -27,6 +28,42 @@ final class ItsokeyApiClient {
 
     ItsokeyApiClient(SecureSessionStore sessionStore) {
         this.sessionStore = sessionStore;
+    }
+
+    /** Mirrors the official ITSOKEY 2.2.6 EMAIL login sequence. Credentials are
+     * used only for this HTTPS request and are never written to local storage. */
+    ItsokeySession loginWithCredentials(String email, String password) throws Exception {
+        String normalizedEmail = email == null ? "" : email.trim();
+        if (!validEmail(normalizedEmail)) {
+            throw new IllegalArgumentException("ITSOKEY 이메일 형식이 올바르지 않습니다");
+        }
+        if (password == null || password.isEmpty()) {
+            throw new IllegalArgumentException("ITSOKEY 비밀번호를 입력하세요");
+        }
+        JSONObject payload = new JSONObject()
+                .put("type", "EMAIL")
+                .put("email", normalizedEmail)
+                .put("password", password);
+        HttpResult authorization = request("POST", AUTHORIZE_PATH, payload.toString(), null);
+        if (!authorization.httpSuccess()) {
+            throw new IllegalStateException(httpMessage(authorization));
+        }
+        Object raw = extractSuccessfulData(authorization.body, "LOGIN_FAILED");
+        if (!(raw instanceof JSONObject)) {
+            throw new IllegalStateException("ITSOKEY 로그인 응답 형식이 올바르지 않습니다");
+        }
+        ItsokeySession memberSession = sessionFromAuthorization(
+                (JSONObject) raw, "", System.currentTimeMillis(), 0L);
+        if (!memberSession.usable()) {
+            throw new IllegalStateException("ITSOKEY 로그인 응답에 토큰이 없습니다");
+        }
+        memberSession = loadMemberInformation(memberSession);
+        ItsokeySession widgetSession = generateWidgetSession(memberSession);
+        if (!widgetSession.usable()) {
+            throw new IllegalStateException("ITSOKEY 위젯 토큰 발급에 실패했습니다");
+        }
+        sessionStore.save(widgetSession);
+        return widgetSession;
     }
 
     String sessionInfo() {
@@ -63,9 +100,7 @@ final class ItsokeyApiClient {
     }
 
     /** Completes the same post-login member lookup performed by the official
-     * ITSOKEY 2.2.6 app before any widget token is requested. The WebView writes
-     * OAuth tokens before it writes the member object, so doing this explicitly
-     * prevents the native bridge from racing the web login completion. */
+     * ITSOKEY 2.2.6 app before any widget token is requested. */
     ItsokeySession loadMemberInformation(ItsokeySession webSession) throws Exception {
         if (webSession == null || !webSession.usable()) {
             throw new LoginRequiredException("ITSOKEY 로그인이 필요합니다");
@@ -219,7 +254,7 @@ final class ItsokeyApiClient {
             connection.setReadTimeout(30_000);
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("Accept-Language", Locale.getDefault().toLanguageTag());
-            connection.setRequestProperty("User-Agent", "ITSOKEYRuntime/1.0.1 Android");
+            connection.setRequestProperty("User-Agent", "ITSOKEYRuntime/1.0.2 Android");
             if (authorization != null && !authorization.trim().isEmpty()) {
                 connection.setRequestProperty("Authorization", authorization.trim());
             }
@@ -363,6 +398,16 @@ final class ItsokeyApiClient {
         return !trimmed.isEmpty()
                 && trimmed.length() <= 128
                 && trimmed.matches("[A-Za-z0-9._:-]+");
+    }
+
+    static boolean validEmail(String value) {
+        if (value == null) return false;
+        String trimmed = value.trim();
+        int at = trimmed.indexOf('@');
+        return at > 0 && at == trimmed.lastIndexOf('@') && at < trimmed.length() - 3
+                && trimmed.indexOf('.', at + 2) > at + 1
+                && trimmed.length() <= 254
+                && !trimmed.contains(" ") && !trimmed.contains("\n") && !trimmed.contains("\r");
     }
 
     private static JSONObject findDevice(Object value, String wanted, int depth) {

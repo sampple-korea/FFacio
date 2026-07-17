@@ -4,23 +4,19 @@
 
 ## 로그인
 
-Runtime은 공식 웹 로그인 화면을 WebView에서 엽니다.
+Runtime은 공식 앱과 동일한 이메일 로그인 API 순서를 사용합니다.
 
-```text
-https://v2.api.itsokey.kr/signIn
+```http
+POST /api/oauth/authorize.do
+Content-Type: application/json
+
+{"type":"EMAIL","email":"...","password":"..."}
+
+GET /api/oauth/me.do
+Authorization: Bearer {memberAccessToken}
 ```
 
-웹 화면의 카카오 OAuth 흐름이 성공하면 같은 origin의 `localStorage`에 다음 값이 저장됩니다.
-
-```text
-accessToken
-accessTokenExpired
-refreshToken
-refreshTokenExpired
-member
-```
-
-Runtime은 값을 읽은 뒤 Android Keystore AES-GCM으로 암호화 저장하고, FFacio에는 토큰을 전달하지 않습니다.
+이메일과 비밀번호는 인증 요청에만 사용하고 저장하지 않습니다. 회원정보 확인 후 발급된 위젯 세션만 Android Keystore AES-GCM으로 암호화 저장하며, FFacio에는 토큰을 전달하지 않습니다.
 
 ## 기기 목록
 
@@ -70,5 +66,7 @@ Authorization: Bearer {refreshToken}
   - `fetchDeviceInformation()` → `/api/device/{id}.do`
   - `deviceControl()` → `/api/widget/device/{deviceIdx}/control.do`
 - `assets/public/assets/index.219ba976.js`
+  - `authorize()` → `/api/oauth/authorize.do` (`type: EMAIL`)
+  - `getInformation()` → `/api/oauth/me.do`
   - `refreshToken()` → `/api/widget/oauth/refresh.do`
   - access token을 `Authorization: Bearer`로 전송

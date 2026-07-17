@@ -9,12 +9,20 @@ import org.junit.Test;
 public class ItsokeyContractTest {
     @Test public void endpointsMatchObservedAppContract() {
         assertEquals("https://v2.api.itsokey.kr", ItsokeyApiClient.BASE_URL);
+        assertEquals("/api/oauth/authorize.do", ItsokeyApiClient.AUTHORIZE_PATH);
         assertEquals("/api/oauth/me.do", ItsokeyApiClient.MEMBER_PATH);
         assertEquals("/api/widget/oauth/generated.do", ItsokeyApiClient.GENERATE_PATH);
         assertEquals("/api/widget/devices.do", ItsokeyApiClient.DEVICES_PATH);
         assertEquals("/api/widget/device/", ItsokeyApiClient.CONTROL_PATH_PREFIX);
         assertEquals("/control.do", ItsokeyApiClient.CONTROL_PATH_SUFFIX);
         assertEquals("/api/widget/oauth/refresh.do", ItsokeyApiClient.REFRESH_PATH);
+    }
+
+    @Test public void emailValidationRejectsMalformedCredentialInput() {
+        assertTrue(ItsokeyApiClient.validEmail("member@example.com"));
+        assertFalse(ItsokeyApiClient.validEmail("member"));
+        assertFalse(ItsokeyApiClient.validEmail("member @example.com"));
+        assertFalse(ItsokeyApiClient.validEmail("member@example"));
     }
 
     @Test public void deviceIdValidationAcceptsObservedStringIdsOnly() {
@@ -34,12 +42,4 @@ public class ItsokeyContractTest {
         assertEquals("Bearer def", prefixed.refreshAuthorization());
     }
 
-    @Test public void webExpiryTreatsAuthorizationValuesAsDurations() {
-        long before = System.currentTimeMillis();
-        long parsed = SecureSessionStore.parseWebExpiry("3600000");
-        long after = System.currentTimeMillis();
-        assertTrue(parsed >= before + 3_570_000L);
-        assertTrue(parsed <= after + 3_570_000L);
-        assertEquals(1_700_000_000_000L, SecureSessionStore.parseWebExpiry("1700000000000"));
-    }
 }

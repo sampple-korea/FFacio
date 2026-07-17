@@ -1,44 +1,33 @@
 package io.ffacio.itsokeyruntime;
 
 import android.app.Activity;
-import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.graphics.Color;
-import android.net.Uri;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
+import android.text.InputType;
 import android.view.Gravity;
-import android.view.View;
 import android.view.ViewGroup;
-import android.webkit.CookieManager;
-import android.webkit.SslErrorHandler;
-import android.webkit.WebChromeClient;
-import android.webkit.WebResourceRequest;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
+import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
-import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import android.net.http.SslError;
-
 public final class LoginActivity extends Activity {
-    private static final String LOGIN_URL = "https://v2.api.itsokey.kr/signIn";
-    private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
-    private final AtomicBoolean completing = new AtomicBoolean(false);
-    private WebView webView;
+    private final AtomicBoolean loginInFlight = new AtomicBoolean(false);
+    private EditText emailInput;
+    private EditText passwordInput;
     private TextView status;
     private ProgressBar progress;
+    private Button loginButton;
     private SecureSessionStore sessionStore;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -47,180 +36,134 @@ public final class LoginActivity extends Activity {
                 android.view.WindowManager.LayoutParams.FLAG_SECURE);
         sessionStore = new SecureSessionStore(this);
         buildUi();
-        configureWebView();
-        webView.loadUrl(LOGIN_URL);
-        handler.postDelayed(sessionPoller, 700L);
     }
 
     private void buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.WHITE);
+        root.setPadding(dp(24), dp(28), dp(24), dp(24));
+        root.setGravity(Gravity.CENTER_HORIZONTAL);
+        root.setBackgroundColor(Color.rgb(245, 245, 247));
 
-        LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(dp(12), dp(8), dp(12), dp(8));
-        header.setBackgroundColor(Color.rgb(0, 122, 141));
+        TextView title = new TextView(this);
+        title.setText("ITSOKEY 로그인");
+        title.setTextSize(27f);
+        title.setTextColor(Color.rgb(29, 29, 31));
+        root.addView(title, matchWrap());
 
-        status = new TextView(this);
-        status.setText("카카오로 ITSOKEY 로그인");
-        status.setTextColor(Color.WHITE);
-        status.setTextSize(16f);
-        status.setSingleLine(true);
-        header.addView(status, new LinearLayout.LayoutParams(0, dp(48), 1f));
+        TextView description = new TextView(this);
+        description.setText("ITSOKEY에서 사용하는 이메일과 비밀번호를 입력하세요. 비밀번호는 저장하지 않습니다.");
+        description.setTextSize(14f);
+        description.setTextColor(Color.DKGRAY);
+        description.setPadding(0, dp(8), 0, dp(18));
+        root.addView(description, matchWrap());
 
-        progress = new ProgressBar(this);
-        header.addView(progress, new LinearLayout.LayoutParams(dp(36), dp(36)));
+        emailInput = new EditText(this);
+        emailInput.setHint("이메일");
+        emailInput.setSingleLine(true);
+        emailInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
+        emailInput.setAutofillHints("emailAddress", "username");
+        root.addView(emailInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
 
-        Button close = new Button(this);
-        close.setText("닫기");
-        close.setOnClickListener(v -> finishCanceled("로그인이 취소되었습니다"));
-        header.addView(close, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)));
-
-        webView = new WebView(this);
-        root.addView(header, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        root.addView(webView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        setContentView(root);
-    }
-
-    private void configureWebView() {
-        android.webkit.WebSettings settings = webView.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setDomStorageEnabled(true);
-        settings.setDatabaseEnabled(true);
-        settings.setAllowFileAccess(false);
-        settings.setAllowContentAccess(false);
-        settings.setJavaScriptCanOpenWindowsAutomatically(true);
-        settings.setSupportMultipleWindows(true);
-        settings.setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW);
-        String userAgent = settings.getUserAgentString();
-        if (userAgent != null) settings.setUserAgentString(userAgent.replace("; wv", ""));
-        CookieManager cookies = CookieManager.getInstance();
-        cookies.setAcceptCookie(true);
-        cookies.setAcceptThirdPartyCookies(webView, true);
-
-        webView.setWebChromeClient(new WebChromeClient() {
-            @Override public void onProgressChanged(WebView view, int newProgress) {
-                progress.setVisibility(newProgress >= 100 ? View.GONE : View.VISIBLE);
-            }
-            @Override public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, android.os.Message resultMsg) {
-                WebView.WebViewTransport transport = (WebView.WebViewTransport) resultMsg.obj;
-                WebView popup = new WebView(LoginActivity.this);
-                popup.getSettings().setJavaScriptEnabled(true);
-                popup.getSettings().setDomStorageEnabled(true);
-                popup.getSettings().setUserAgentString(webView.getSettings().getUserAgentString());
-                popup.setWebViewClient(new WebViewClient() {
-                    @Override public boolean shouldOverrideUrlLoading(WebView child, WebResourceRequest request) {
-                        String target = request.getUrl().toString();
-                        if (!handleExternalUrl(target)) webView.loadUrl(target);
-                        child.destroy();
-                        return true;
-                    }
-                    @Override public boolean shouldOverrideUrlLoading(WebView child, String target) {
-                        if (!handleExternalUrl(target)) webView.loadUrl(target);
-                        child.destroy();
-                        return true;
-                    }
-                });
-                transport.setWebView(popup);
-                resultMsg.sendToTarget();
+        passwordInput = new EditText(this);
+        passwordInput.setHint("비밀번호");
+        passwordInput.setSingleLine(true);
+        passwordInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        passwordInput.setAutofillHints("password");
+        passwordInput.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        passwordInput.setOnEditorActionListener((view, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                submitLogin();
                 return true;
             }
+            return false;
         });
-        webView.setWebViewClient(new WebViewClient() {
-            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return handleExternalUrl(request.getUrl().toString());
-            }
-            @Override public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                return handleExternalUrl(url);
-            }
-            @Override public void onPageFinished(WebView view, String url) {
-                super.onPageFinished(view, url);
-                status.setText(url.contains("itsokey.kr") ? "ITSOKEY 로그인 상태 확인 중" : "카카오 인증 중");
-                inspectSession();
-            }
-            @Override public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
-                handler.cancel();
-                status.setText("보안 연결을 확인할 수 없습니다");
+        LinearLayout.LayoutParams passwordParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58));
+        passwordParams.setMargins(0, dp(10), 0, 0);
+        root.addView(passwordInput, passwordParams);
+
+        status = new TextView(this);
+        status.setText("공식 ITSOKEY 이메일 계정으로 로그인합니다");
+        status.setTextSize(14f);
+        status.setTextColor(Color.rgb(0, 100, 115));
+        status.setPadding(0, dp(14), 0, dp(10));
+        root.addView(status, matchWrap());
+
+        progress = new ProgressBar(this);
+        progress.setVisibility(android.view.View.GONE);
+        root.addView(progress, new LinearLayout.LayoutParams(dp(40), dp(40)));
+
+        loginButton = new Button(this);
+        loginButton.setText("아이디·비밀번호로 로그인");
+        loginButton.setOnClickListener(v -> submitLogin());
+        LinearLayout.LayoutParams loginParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54));
+        loginParams.setMargins(0, dp(8), 0, 0);
+        root.addView(loginButton, loginParams);
+
+        Button cancelButton = new Button(this);
+        cancelButton.setText("취소");
+        cancelButton.setOnClickListener(v -> finishCanceled("로그인이 취소되었습니다"));
+        LinearLayout.LayoutParams cancelParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50));
+        cancelParams.setMargins(0, dp(8), 0, 0);
+        root.addView(cancelButton, cancelParams);
+
+        setContentView(root);
+        emailInput.requestFocus();
+    }
+
+    private void submitLogin() {
+        String email = emailInput.getText().toString().trim();
+        String password = passwordInput.getText().toString();
+        if (!ItsokeyApiClient.validEmail(email)) {
+            showError("올바른 ITSOKEY 이메일을 입력하세요");
+            emailInput.requestFocus();
+            return;
+        }
+        if (password.isEmpty()) {
+            showError("ITSOKEY 비밀번호를 입력하세요");
+            passwordInput.requestFocus();
+            return;
+        }
+        if (!loginInFlight.compareAndSet(false, true)) return;
+        setBusy(true, "ITSOKEY 계정 인증 중");
+        executor.execute(() -> {
+            try {
+                ItsokeyApiClient api = new ItsokeyApiClient(sessionStore);
+                api.loginWithCredentials(email, password);
+                runOnUiThread(() -> {
+                    passwordInput.setText("");
+                    setBusy(true, "회원정보와 기기 권한 확인 중");
+                });
+                String verification = api.verifySession();
+                JSONObject result = new JSONObject(verification);
+                if (!result.optBoolean("ok", false)) {
+                    throw new IllegalStateException(result.optString("message", "ITSOKEY 세션 검증 실패"));
+                }
+                runOnUiThread(() -> finishSuccess(verification));
+            } catch (Exception error) {
+                sessionStore.clear();
+                loginInFlight.set(false);
+                runOnUiThread(() -> {
+                    passwordInput.setText("");
+                    setBusy(false, error.getMessage() == null ? "ITSOKEY 로그인 실패" : error.getMessage());
+                    passwordInput.requestFocus();
+                });
             }
         });
     }
 
-    private boolean handleExternalUrl(String url) {
-        if (url == null) return false;
-        Uri uri = Uri.parse(url);
-        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase();
-        if (scheme.equals("http") || scheme.equals("https")) return false;
-        try {
-            Intent intent;
-            if (scheme.equals("intent")) {
-                intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
-                String fallback = intent.getStringExtra("browser_fallback_url");
-                // Keep Kakao OAuth inside this WebView. Leaving the WebView would
-                // put the resulting ITSOKEY localStorage in another browser process.
-                if (fallback != null && (fallback.startsWith("https://") || fallback.startsWith("http://"))) {
-                    webView.loadUrl(fallback);
-                    return true;
-                }
-                if (intent.getPackage() != null && getPackageManager().getLaunchIntentForPackage(intent.getPackage()) == null) {
-                    status.setText("카카오 웹 로그인으로 전환할 수 없습니다");
-                    return true;
-                }
-            } else {
-                intent = new Intent(Intent.ACTION_VIEW, uri);
-            }
-            startActivity(intent);
-        } catch (ActivityNotFoundException error) {
-            status.setText("카카오톡 또는 브라우저를 열 수 없습니다");
-        } catch (Exception error) {
-            status.setText("외부 로그인 화면을 열지 못했습니다");
-        }
-        return true;
+    private void setBusy(boolean busy, String message) {
+        progress.setVisibility(busy ? android.view.View.VISIBLE : android.view.View.GONE);
+        loginButton.setEnabled(!busy);
+        emailInput.setEnabled(!busy);
+        passwordInput.setEnabled(!busy);
+        status.setText(message);
+        status.setTextColor(busy ? Color.rgb(0, 100, 115) : Color.rgb(190, 30, 45));
     }
 
-    private final Runnable sessionPoller = new Runnable() {
-        @Override public void run() {
-            inspectSession();
-            if (!isFinishing() && !completing.get()) handler.postDelayed(this, 800L);
-        }
-    };
-
-    private void inspectSession() {
-        if (webView == null || completing.get()) return;
-        String script = "(function(){try{var k=['tokenType','accessToken','accessTokenExpired','refreshToken','refreshTokenExpired','member','session'];var o={};for(var i=0;i<k.length;i++){var v=localStorage.getItem(k[i]);if(v===null)v=sessionStorage.getItem(k[i]);o[k[i]]=v;}return JSON.stringify(o);}catch(e){return null;}})()";
-        webView.evaluateJavascript(script, this::handleStorageResult);
-    }
-
-    private void handleStorageResult(String encoded) {
-        if (encoded == null || encoded.equals("null") || completing.get()) return;
-        try {
-            String decoded = new JSONArray("[" + encoded + "]").getString(0);
-            JSONObject storage = new JSONObject(decoded);
-            ItsokeySession session = sessionStore.fromWebStorage(storage);
-            if (!session.usable()) return;
-            if (!completing.compareAndSet(false, true)) return;
-            status.setText("ITSOKEY 세션 검증 중");
-            executor.execute(() -> {
-                try {
-                    ItsokeyApiClient api = new ItsokeyApiClient(sessionStore);
-                    statusOnUiThread("ITSOKEY 회원정보 확인 중");
-                    ItsokeySession memberSession = api.loadMemberInformation(session);
-                    statusOnUiThread("ITSOKEY 위젯 세션 발급 중");
-                    ItsokeySession widgetSession = api.generateWidgetSession(memberSession);
-                    if (!widgetSession.usable()) throw new IllegalStateException("ITSOKEY 위젯 토큰 발급에 실패했습니다");
-                    sessionStore.save(widgetSession);
-                    String verification = api.verifySession();
-                    boolean ok = new JSONObject(verification).optBoolean("ok", false);
-                    if (!ok) throw new IllegalStateException(new JSONObject(verification).optString("message", "세션 검증 실패"));
-                    runOnUiThread(() -> finishSuccess(verification));
-                } catch (Exception error) {
-                    sessionStore.clear();
-                    completing.set(false);
-                    runOnUiThread(() -> status.setText(error.getMessage() == null ? "로그인 검증 실패" : error.getMessage()));
-                }
-            });
-        } catch (Exception ignored) {}
+    private void showError(String message) {
+        status.setText(message);
+        status.setTextColor(Color.rgb(190, 30, 45));
     }
 
     private void finishSuccess(String verification) {
@@ -228,10 +171,6 @@ public final class LoginActivity extends Activity {
         result.putExtra("result", verification);
         setResult(RESULT_OK, result);
         finish();
-    }
-
-    private void statusOnUiThread(String message) {
-        runOnUiThread(() -> status.setText(message));
     }
 
     private void finishCanceled(String message) {
@@ -242,22 +181,17 @@ public final class LoginActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) webView.goBack();
-        else finishCanceled("로그인이 취소되었습니다");
+        finishCanceled("로그인이 취소되었습니다");
     }
 
     @Override protected void onDestroy() {
-        handler.removeCallbacksAndMessages(null);
+        if (passwordInput != null) passwordInput.setText("");
         executor.shutdownNow();
-        if (webView != null) {
-            webView.stopLoading();
-            webView.loadUrl("about:blank");
-            webView.clearHistory();
-            webView.removeAllViews();
-            webView.destroy();
-            webView = null;
-        }
         super.onDestroy();
+    }
+
+    private LinearLayout.LayoutParams matchWrap() {
+        return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
     }
 
     private int dp(int value) {

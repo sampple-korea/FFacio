@@ -1,16 +1,18 @@
-# FFacio Android 0.9.1 — FFacio Runtime + ITSOKEY Runtime
+# FFacio Android 0.9.2 — FFacio Runtime + ITSOKEY Runtime
 
 FFacio는 카메라 기반 출입 인증, 사용자·Head Admin 관리와 ITSOKEY 도어락 연동을 담당하는 Android 앱입니다.
 
 - 얼굴 검출·속성 분석·템플릿 추출·비교: 별도 **FFacio Runtime** (`com.kbyai.faceattribute`)
-- 카카오 로그인·ITSOKEY 세션·기기 조회·문 제어: 별도 **ITSOKEY Runtime** (`io.ffacio.itsokeyruntime`)
+- 이메일 로그인·ITSOKEY 세션·기기 조회·문 제어: 별도 **ITSOKEY Runtime** (`io.ffacio.itsokeyruntime`)
 
 FFacio 본체에는 얼굴 모델과 ITSOKEY access/refresh token을 넣지 않습니다.
 
 ## 이번 수정의 핵심
 
 - 기존 SmartThings REST 직접 연동을 ITSOKEY Runtime Binder 연동으로 교체
-- FFacio 관리자 화면에서 ITSOKEY 공식 카카오 로그인 화면 실행
+- FFacio 관리자 화면에서 ITSOKEY 이메일·비밀번호 직접 로그인 실행
+- 브라우저 기반 소셜 로그인과 토큰 추출 경로 제거
+- 비밀번호는 인증 요청에만 사용하고 저장하지 않음
 - 계정에 등록된 도어락 자동 조회·선택
 - 선택한 기기 ID와 활성화 상태만 FFacio에 저장
 - 토큰은 ITSOKEY Runtime 앱의 Android Keystore AES-GCM 저장소에만 보관
@@ -90,7 +92,7 @@ android/app/build/outputs/apk/debug/app-debug.apk
 - 프로토콜 입력 검증 하네스 10개 검사를 통과했습니다.
 - `MainActivity.kt`는 Kotlin 파서 단계에서 구문 오류가 없음을 확인했습니다.
 
-현재 실행 환경에는 완성된 Android SDK/Gradle 배포본, 실제 카카오 계정과 HG-1300이 없어 전체 APK 빌드·설치·실문 OPEN은 실행하지 못했습니다. 자세한 기록은 [ITSOKEY_VERIFY.md](ITSOKEY_VERIFY.md)에 있습니다.
+실제 ITSOKEY 계정과 HG-1300이 필요한 실문 OPEN 검증 범위는 [ITSOKEY_VERIFY.md](ITSOKEY_VERIFY.md)에 기록했습니다.
 
 ## 문서
 
@@ -100,4 +102,4 @@ android/app/build/outputs/apk/debug/app-debug.apk
 - [docs/android.md](docs/android.md)
 - [docs/runtime-migration.md](docs/runtime-migration.md)
 
-`docs/smartthings-door-lock.md`와 과거 release 기록은 이전 버전의 역사 자료이며 현재 0.9.1의 문 제어 구현에는 적용되지 않습니다.
+`docs/smartthings-door-lock.md`와 과거 release 기록은 이전 버전의 역사 자료이며 현재 0.9.2의 문 제어 구현에는 적용되지 않습니다.

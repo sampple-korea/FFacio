@@ -89,7 +89,7 @@ public final class ItsokeySettingsActivity extends Activity {
         root.addView(title, matchWrap());
 
         TextView description = new TextView(this);
-        description.setText("카카오 로그인은 ITSOKEY Runtime 앱에서 처리하며, FFacio에는 토큰이 저장되지 않습니다.");
+        description.setText("ITSOKEY 이메일과 비밀번호로 직접 로그인합니다. 비밀번호는 저장하지 않으며 FFacio에는 토큰이 저장되지 않습니다.");
         description.setTextSize(14f);
         description.setTextColor(Color.DKGRAY);
         description.setPadding(0, dp(6), 0, dp(12));
@@ -110,7 +110,7 @@ public final class ItsokeySettingsActivity extends Activity {
         actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.setGravity(Gravity.CENTER_VERTICAL);
         loginButton = new Button(this);
-        loginButton.setText("카카오 로그인");
+        loginButton.setText("이메일 로그인");
         loginButton.setOnClickListener(v -> startLogin());
         actions.addView(loginButton, new LinearLayout.LayoutParams(0, dp(52), 1f));
         reloadButton = new Button(this);
@@ -200,7 +200,7 @@ public final class ItsokeySettingsActivity extends Activity {
                     runOnUiThread(() -> {
                         setControlsEnabled(true);
                         deviceContainer.removeAllViews();
-                        setStatus("카카오 로그인이 필요합니다", true);
+                        setStatus("ITSOKEY 이메일 로그인이 필요합니다", true);
                     });
                     return;
                 }

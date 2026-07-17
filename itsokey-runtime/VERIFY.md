@@ -17,7 +17,7 @@
 ## 실행하지 못한 항목
 
 - Gradle/AGP 전체 빌드와 APK 생성
-- Android 실제 기기의 WebView 카카오 로그인
+- Android 실제 기기의 ITSOKEY 이메일 로그인
 - 실제 ITSOKEY 계정의 기기 목록 응답
 - 실제 HG-1300 OPEN/CLOSE
 

@@ -18,7 +18,7 @@
 
 - Compose를 포함한 전체 Gradle 빌드
 - APK 설치 및 동일 서명 Binder 연결
-- 카카오 로그인과 ITSOKEY 서버 실계정 호출
+- ITSOKEY 이메일 로그인과 서버 실계정 호출
 - 실제 도어락 OPEN
 
 이 ZIP은 소스 통합본입니다. 실제 기기에서 완전 작동을 확정한 APK가 아닙니다.

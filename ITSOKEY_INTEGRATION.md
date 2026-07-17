@@ -16,7 +16,7 @@
 
 ## 필요한 별도 앱
 
-함께 제공되는 `ITSOKEY-Runtime-1.0.0-source.zip`을 빌드해 먼저 설치해야 합니다.
+함께 제공되는 ITSOKEY Runtime을 먼저 설치해야 합니다.
 
 **두 APK는 동일 인증서로 서명해야 합니다.** Runtime Binder 권한이 `signature` 보호 수준이기 때문입니다. 같은 PC의 debug keystore 또는 동일 release keystore를 사용하세요.
 
@@ -32,7 +32,7 @@ cd android
 1. ITSOKEY Runtime 설치
 2. 이 FFacio 설치
 3. FFacio 관리자 설정 열기
-4. ITSOKEY 연결 화면에서 카카오 로그인
+4. ITSOKEY 연결 화면에서 이메일·비밀번호로 직접 로그인
 5. 사용할 도어락 선택
 6. Runtime 라이브니스 활성화 확인
 7. `인증 성공 시 ITSOKEY 도어락 해제` 활성화

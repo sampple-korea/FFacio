@@ -49,7 +49,7 @@ public final class MainActivity extends Activity {
         root.addView(title, matchWrap());
 
         TextView desc = new TextView(this);
-        desc.setText("카카오 로그인, 세션 자동 갱신, 도어락 조회와 OPEN/CLOSE 제어를 FFacio에 제공합니다.");
+        desc.setText("ITSOKEY 이메일 로그인, 세션 자동 갱신, 도어락 조회와 OPEN/CLOSE 제어를 FFacio에 제공합니다.");
         desc.setTextSize(14f);
         desc.setTextColor(Color.DKGRAY);
         desc.setPadding(0, dp(8), 0, dp(12));
@@ -66,7 +66,7 @@ public final class MainActivity extends Activity {
         buttons.setGravity(Gravity.CENTER_VERTICAL);
 
         Button login = new Button(this);
-        login.setText("카카오 로그인");
+        login.setText("이메일 로그인");
         login.setOnClickListener(v -> {
             Intent intent = new Intent(this, LoginActivity.class);
             startActivityForResult(intent, REQUEST_LOGIN);
@@ -103,7 +103,7 @@ public final class MainActivity extends Activity {
     private void reloadDevices() {
         deviceContainer.removeAllViews();
         if (sessionStore.load() == null) {
-            status.setText("로그인되지 않았습니다. 카카오 로그인을 먼저 진행하세요.");
+            status.setText("로그인되지 않았습니다. ITSOKEY 이메일 로그인을 먼저 진행하세요.");
             return;
         }
         status.setText("ITSOKEY 기기 목록을 불러오는 중입니다");

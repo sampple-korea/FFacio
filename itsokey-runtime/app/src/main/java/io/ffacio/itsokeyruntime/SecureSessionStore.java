@@ -10,11 +10,6 @@ import org.json.JSONObject;
 
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
-import java.util.TimeZone;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -73,59 +68,6 @@ final class SecureSessionStore {
 
     synchronized void clear() {
         prefs.edit().remove(VALUE_KEY).remove(LEGACY_VALUE_KEY).commit();
-    }
-
-    ItsokeySession fromWebStorage(JSONObject storage) {
-        JSONObject source = unwrapSession(storage);
-        String access = nullableStorageString(source, "accessToken");
-        String refresh = nullableStorageString(source, "refreshToken");
-        String tokenType = nullableStorageString(source, "tokenType");
-        long accessAt = parseWebExpiry(nullableStorageString(source, "accessTokenExpired"));
-        long refreshAt = parseWebExpiry(nullableStorageString(source, "refreshTokenExpired"));
-        String member = nullableStorageString(source, "member");
-        return new ItsokeySession(tokenType, access, refresh, accessAt, refreshAt, member);
-    }
-
-    private static JSONObject unwrapSession(JSONObject storage) {
-        Object raw = storage.opt("session");
-        if (raw instanceof JSONObject) return (JSONObject) raw;
-        if (raw instanceof String) {
-            try { return new JSONObject((String) raw); } catch (Exception ignored) {}
-        }
-        return storage;
-    }
-
-    private static String nullableStorageString(JSONObject object, String key) {
-        if (!object.has(key) || object.isNull(key)) return "";
-        Object raw = object.opt(key);
-        if (raw instanceof JSONObject || raw instanceof org.json.JSONArray) return raw.toString();
-        String value = String.valueOf(raw);
-        return "null".equalsIgnoreCase(value) ? "" : value;
-    }
-
-    static long parseWebExpiry(String value) {
-        if (value == null || value.trim().isEmpty()) return 0L;
-        String trimmed = value.trim();
-        try {
-            long number = Long.parseLong(trimmed);
-            if (number <= 0L) return 0L;
-            // ITSOKEY Authorization.accessTokenExpired / refreshTokenExpired are
-            // millisecond durations. Very large values are already epoch millis.
-            return number < 1_000_000_000_000L
-                    ? System.currentTimeMillis() + number - 30_000L
-                    : number;
-        } catch (NumberFormatException ignored) {}
-        String[] patterns = {"yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss.SSSX", "yyyy-MM-dd'T'HH:mm:ssX"};
-        for (String pattern : patterns) {
-            try {
-                SimpleDateFormat format = new SimpleDateFormat(pattern, Locale.US);
-                format.setLenient(false);
-                if (!pattern.endsWith("X")) format.setTimeZone(TimeZone.getDefault());
-                Date parsed = format.parse(trimmed);
-                if (parsed != null) return parsed.getTime();
-            } catch (ParseException ignored) {}
-        }
-        return 0L;
     }
 
     private SecretKey getOrCreateKey() throws Exception {
