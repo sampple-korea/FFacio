@@ -86,5 +86,6 @@ dependencies {
     implementation files("libs/fotoapparat-2.7.0.aar")
 
     testImplementation "junit:junit:4.13.2"
+    testImplementation "org.json:json:20240303"
     debugImplementation "androidx.compose.ui:ui-tooling"
 }
