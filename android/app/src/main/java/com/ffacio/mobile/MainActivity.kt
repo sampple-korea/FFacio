@@ -4477,6 +4477,12 @@ private fun formatScore(value: Double): String =
 internal fun approvalResultSucceeded(result: String): Boolean =
     !result.contains("실패")
 
+internal fun approvalPublicSummary(entry: ApprovalLogEntry): String =
+    "최근 출입 이벤트 · ${entry.result}"
+
+private fun formatClock(timeMillis: Long): String =
+    SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timeMillis))
+
 private fun accessFeedbackBackground(kind: AccessFeedbackKind): ComposeColor = when (kind) {
     AccessFeedbackKind.AuthOnly, AccessFeedbackKind.DoorSucceeded -> ComposeColor(0xFFE9FBEF)
     AccessFeedbackKind.DoorPending -> ComposeColor(0xFFEAF2FF)
