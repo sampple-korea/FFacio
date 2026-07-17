@@ -125,8 +125,8 @@ jobs:
           grep -q "package: name='io.ffacio.itsokeyruntime'" itsokey-badging.txt
           grep -q "launchable-activity: name='io.ffacio.itsokeyruntime.MainActivity'" itsokey-badging.txt
 
-          FFACIO_SHA="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' ffacio-signature.txt | head -n 1 | tr -d '[:space:]')"
-          ITSOKEY_SHA="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' itsokey-signature.txt | head -n 1 | tr -d '[:space:]')"
+          FFACIO_SHA="$(sed -n 's/^.*certificate SHA-256 digest: //p' ffacio-signature.txt | head -n 1 | tr -d '[:space:]')"
+          ITSOKEY_SHA="$(sed -n 's/^.*certificate SHA-256 digest: //p' itsokey-signature.txt | head -n 1 | tr -d '[:space:]')"
           test -n "$FFACIO_SHA"
           test "$FFACIO_SHA" = "$ITSOKEY_SHA"
           test "$FFACIO_SHA" = "e1344975a288ec785ab12841ca8719b2115eadf41ae6f6e7ab8770979b7fa2b9"
